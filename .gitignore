@@ -1,0 +1,11 @@
+# build artifacts
+/covercraft
+
+# user's prompt context (private data)
+context/
+
+# local QA artifacts
+dogfood/
+
+# IDE
+.idea/

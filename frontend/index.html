@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<!-- CoverCraft terminal UI. Surface: Operate (workbench), style: Cyber/Technical.
+     Tokens per ui-ux-pro-max: semantic, 4/8px rhythm, rem units, dark-first.
+     Settings live in Go (~/.config/covercraft), served via /api/settings. -->
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CoverCraft</title>
+<style>
+:root {
+  /* Terminal palette — semantic tokens, dark-first (ui-ux-pro-max §6) */
+  --bg: #0b0e12;           /* терминальный чёрный с синевой */
+  --bg-elev: #10141b;      /* панели */
+  --bg-inset: #07090d;     /* поля ввода — глубже фона */
+  --ink: #c9d4e0;          /* основной текст */
+  --ink-dim: #7e8b9e;      /* подписи, вторичный */
+  --ink-faint: #525f72;    /* подсказки, рамки */
+  --accent: #2fe08b;      /* терминальный зелёный */
+  --accent-ink: #062a18;   /* текст на акценте */
+  --accent-dim: rgba(47, 224, 139, .13);
+  --danger: #ff5d5d;
+  --danger-dim: rgba(255, 93, 93, .12);
+  --warn: #ffb454;
+  --ok: #2fe08b;
+  --border: #1d2632;       /* рамки панелей */
+  --border-focus: #2fe08b;
+  --focus-ring: rgba(47, 224, 139, .55);
+  --radius: 4px;           /* терминалы не круглые */
+  --font-mono: "JetBrains Mono", "Fira Code", "Ubuntu Mono", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --font-emoji: "Noto Color Emoji";
+  --dur: 180ms;            /* 150–300ms по ui-ux-pro-max §7 */
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f2f4f7; --bg-elev: #ffffff; --bg-inset: #e9edf2;
+    --ink: #1c2430; --ink-dim: #55627a; --ink-faint: #8a94a8;
+    --accent: #0b7a45; --accent-ink: #ffffff; --accent-dim: rgba(11, 122, 69, .09);
+    --danger: #c22f2f; --danger-dim: rgba(194, 47, 47, .08);
+    --warn: #9a6a00; --ok: #0b7a45; --border: #d4dae4; --border-focus: #0b7a45;
+    --focus-ring: rgba(11, 122, 69, .45);
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  font: 14px/1.6 var(--font-mono), var(--font-emoji);
+  color: var(--ink);
+  background: var(--bg);
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+button, input, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+
+/* ---------- Header: терминальная строка статуса ---------- */
+header {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 14px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+  min-height: 48px;
+}
+.logo {
+  display: flex; align-items: center; gap: 8px;
+  font-weight: 700; font-size: 15px; letter-spacing: .5px;
+  color: var(--ink);
+}
+.logo svg { width: 18px; height: 18px; flex: none; }
+.prompt-sign { color: var(--accent); font-weight: 700; }
+#model-chip {
+  font-size: 12px; color: var(--ink-dim);
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+  max-width: 32ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#model-chip:empty { display: none; }
+header .spacer { flex: 1; }
+
+/* ---------- Layout: две колонки, mobile-first ---------- */
+main {
+  display: grid;
+  grid-template-columns: 1fr;   /* mobile-first: одна колонка */
+  min-height: 0;
+  overflow: hidden;
+}
+.pane {
+  display: flex; flex-direction: column; gap: 12px;
+  padding: 14px;
+  min-height: 0; min-width: 0;
+}
+@media (min-width: 768px) {
+  main { grid-template-columns: minmax(340px, 460px) 1fr; }
+  .pane + .pane { border-left: 1px solid var(--border); }
+}
+@media (max-width: 767px) {
+  body { overflow: auto; }
+  main { overflow: auto; }
+  .pane + .pane { border-top: 1px solid var(--border); }
+}
+
+/* ---------- Панель с заголовком-терминальным префиксом ---------- */
+.panel {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  flex: none;
+}
+.panel-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-inset);
+  cursor: pointer;
+  user-select: none;
+  min-height: 44px;      /* touch target (ui-ux-pro-max §2) */
+}
+.panel-head:hover { background: var(--accent-dim); }
+.panel-head:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.panel-title {
+  font-size: 12px; font-weight: 700; letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+.panel-title::before { content: "$ "; color: var(--accent); }
+.panel-sub {
+  margin-left: auto;
+  font-size: 11px; color: var(--ink-faint);
+  max-width: 20ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.caret {
+  margin-left: auto;
+  color: var(--ink-faint);
+  transition: transform var(--dur) ease-out;
+  font-size: 10px;
+}
+.panel[open] > .panel-head .caret { transform: rotate(90deg); }
+.panel-body { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+
+/* ---------- Формы ---------- */
+label {
+  display: block;
+  font-size: 11px; letter-spacing: .5px;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  margin-bottom: 4px;
+}
+input[type=text], input[type=password], input[type=number], textarea, select {
+  width: 100%;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--ink);
+  padding: 9px 11px;
+  min-height: 44px;          /* touch-friendly (responsive skill) */
+  font-size: 13px;
+  transition: border-color var(--dur) ease-out, box-shadow var(--dur) ease-out;
+}
+select {
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--ink-dim) 50%),
+                    linear-gradient(135deg, var(--ink-dim) 50%, transparent 50%);
+  background-position: calc(100% - 16px) 50%, calc(100% - 11px) 50%;
+  background-size: 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 28px;
+  cursor: pointer;
+}
+select option { background: var(--bg-elev); color: var(--ink); }
+textarea { min-height: 90px; resize: vertical; line-height: 1.6; }
+input::placeholder, textarea::placeholder { color: var(--ink-faint); }
+input:focus-visible, textarea:focus-visible {
+  outline: none;
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+.field { display: flex; flex-direction: column; }
+.grid2 { display: grid; grid-template-columns: 1fr; gap: 10px; }
+@media (min-width: 480px) { .grid2 { grid-template-columns: 1fr 1fr; } }
+
+/* Vacancy = главный ввод */
+#vacancy-wrap { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 150px; }
+#vacancy-wrap .field, #vacancy { flex: 1; min-height: 0; min-height: 120px; }
+#vacancy { height: 100%; }
+
+/* ---------- Результат: письмо ---------- */
+#result-wrap { flex: 1; display: flex; flex-direction: column; min-height: 0; gap: 0; }
+#result-wrap .panel { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+#result-bar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px; min-height: 44px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-inset);
+}
+#result-bar .panel-title { color: var(--ink); }
+#count {
+  font-size: 11px; color: var(--ink-faint); margin-left: auto;
+  font-variant-numeric: tabular-nums;   /* number-tabular: цифры не прыгают */
+}
+#result {
+  flex: 1; min-height: 0; overflow: auto;
+  background: var(--bg-elev);
+  padding: 16px 18px;
+  font-size: 14px; line-height: 1.75;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+#result:empty::before {
+  content: "# письмо появится здесь\A# вставьте вакансию и нажмите [ gen ]";
+  white-space: pre-wrap;
+  color: var(--ink-faint);
+}
+#result:focus-visible { outline-offset: -3px; outline: 2px solid var(--focus-ring); }
+
+/* ---------- Постпроверка письма (internal/audit) ---------- */
+#audit-warns {
+  border-top: 1px solid var(--border);
+  background: var(--danger-dim);
+  color: var(--ink);
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  max-height: 140px;
+  overflow: auto;
+}
+#audit-warns .warn-title {
+  display: block;
+  color: var(--warn);
+  font-weight: 700;
+  letter-spacing: .5px;
+  margin-bottom: 4px;
+}
+#audit-warns ul { margin: 0; padding-left: 18px; }
+#audit-warns li { margin: 2px 0; }
+
+/* ---------- Кнопки: терминальные ---------- */
+button.btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--ink);
+  min-height: 44px; padding: 8px 16px;
+  font-size: 13px; font-weight: 600; letter-spacing: .3px;
+  transition: background-color var(--dur) ease-out, border-color var(--dur) ease-out,
+              transform var(--dur) ease-out, opacity var(--dur) ease-out;
+}
+button.btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+button.btn:active:not(:disabled) { transform: translateY(1px); }
+button.btn:disabled { opacity: .45; cursor: not-allowed; }
+button.btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+button.btn.primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: var(--accent);
+}
+button.btn.primary:hover:not(:disabled) { filter: brightness(1.08); color: var(--accent-ink); }
+button.btn.primary:disabled { opacity: .45; }
+.btn .kbrd {
+  font-size: 10px; opacity: .75;
+  border: 1px solid currentColor; border-radius: 2px; padding: 1px 4px;
+}
+/* terminal button: [ gen ] */
+button.btn.term {
+  background: transparent;
+  font-family: inherit;
+}
+button.btn.term::before { content: "["; color: var(--accent); }
+button.btn.term::after { content: "]"; color: var(--accent); }
+button.btn.term:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+
+/* ---------- Статусная строка ---------- */
+footer {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 14px;
+  background: var(--bg-elev);
+  border-top: 1px solid var(--border);
+  font-size: 12px; color: var(--ink-dim);
+  min-height: 32px;
+  flex-wrap: wrap;
+}
+footer.err { color: var(--danger); }
+footer .spacer { flex: 1; }
+.status-prefix { color: var(--accent); font-weight: 700; }
+footer.err .status-prefix { color: var(--danger); }
+.copy {
+  font-size: 11px; color: var(--ink-faint);
+  margin-left: 4px; white-space: nowrap;
+}
+.copy a { color: var(--ink-faint); text-decoration: none; border-bottom: 1px dotted var(--ink-faint); }
+.copy a:hover { color: var(--accent); border-bottom-color: var(--accent); }
+.copy .sep { margin: 0 5px; opacity: .6; }
+.spin {
+  width: 12px; height: 12px; flex: none;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+  display: none;
+}
+body.busy .spin { display: inline-block; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .spin { animation: none; }
+  * { transition-duration: 0ms !important; }
+}
+/* Сканирующая линия при генерации — motion conveys meaning (§7) */
+@keyframes scanline {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(100%); }
+}
+#scan {
+  position: fixed; left: 0; right: 0; top: 0; height: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 100;
+}
+body.busy #scan {
+  animation: scanline 1.4s linear infinite;
+  opacity: .5;
+}
+@media (prefers-reduced-motion: reduce) { body.busy #scan { animation: none; opacity: .15; } }
+
+/* ---------- Copy feedback ---------- */
+#copy.ok { color: var(--ok); border-color: var(--ok); }
+</style>
+</head>
+<body>
+<div id="scan" aria-hidden="true"></div>
+
+<header>
+  <div class="logo">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <polyline points="4 17 10 11 4 5"></polyline>
+      <line x1="12" y1="19" x2="20" y2="19"></line>
+    </svg>
+    <span><span class="prompt-sign">~$</span> covercraft</span>
+  </div>
+  <span id="model-chip" role="status"></span>
+  <span class="spacer"></span>
+  <span class="spin" id="spin" aria-hidden="true"></span>
+  <button class="btn term primary" id="generate" disabled>
+    <span>gen</span>
+    <span class="kbrd">Ctrl+↵</span>
+  </button>
+</header>
+
+<main>
+  <!-- ======== Левая колонка: ввод ======== -->
+  <section class="pane" aria-label="Ввод">
+    <details class="panel" id="api-details" open>
+      <summary class="panel-head">
+        <span class="panel-title">api.config</span>
+        <span class="panel-sub" id="api-sub">не настроено</span>
+        <span class="caret">▶</span>
+      </summary>
+      <div class="panel-body">
+        <div class="field">
+          <label for="baseUrl">base_url</label>
+          <input type="text" id="baseUrl" placeholder="http://127.0.0.1:11434/v1" spellcheck="false" autocomplete="off">
+        </div>
+        <div class="grid2">
+          <div class="field">
+            <label for="apiKey">api_key (пусто для ollama)</label>
+            <input type="password" id="apiKey" placeholder="sk-…" spellcheck="false" autocomplete="off">
+          </div>
+          <div class="field">
+            <label for="model">model</label>
+            <input type="text" id="model" placeholder="llama3.2" spellcheck="false" autocomplete="off">
+          </div>
+          <div class="field">
+            <label for="reasoningEffort">reasoning_effort</label>
+            <select id="reasoningEffort" title="Для reasoning-моделей (glm и др.): none — не думать, иначе могут генерировать минутами. Пусто — не отправлять параметр.">
+              <option value="" selected>не отправлять</option>
+              <option value="none">none — отключить</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="timeoutSec">timeout (сек, 5–900)</label>
+            <input type="number" id="timeoutSec" min="5" max="900" step="5" value="60" title="Сколько ждать ответа модели до ошибки «таймаут». 60 с хватает быстрым моделям; медленным reasoning поднимите.">
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details class="panel" id="prompt-details">
+      <summary class="panel-head">
+        <span class="panel-title">system.prompt</span>
+        <span class="panel-sub" id="prompt-sub"></span>
+        <span class="caret">▶</span>
+      </summary>
+      <div class="panel-body">
+        <div class="field">
+          <label for="systemPrompt">инструкция модели — кастом до перезапуска</label>
+          <textarea id="systemPrompt" rows="6" spellcheck="false" placeholder="Ты помощник по сопроводительным письмам…"></textarea>
+        </div>
+        <button class="btn term" id="resetPrompt" type="button" style="align-self:flex-start">
+          <span>reset default</span>
+        </button>
+      </div>
+    </details>
+
+    <div id="vacancy-wrap">
+      <div class="field">
+        <label for="vacancy">vacancy.in — описание вакансии</label>
+        <textarea id="vacancy" spellcheck="false" placeholder="# вставьте текст вакансии…"></textarea>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======== Правая колонка: результат ======== -->
+  <section class="pane" aria-label="Результат">
+    <div id="result-wrap">
+      <div class="panel">
+        <div id="result-bar">
+          <span class="panel-title">letter.out</span>
+          <button class="btn term" id="copy" disabled><span>copy</span></button>
+          <span id="count"></span>
+        </div>
+        <div id="result" contenteditable="true" spellcheck="true" role="textbox"
+             aria-multiline="true" aria-label="Сгенерированное письмо — можно отредактировать"></div>
+        <div id="audit-warns" hidden></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer id="status">
+  <span class="status-prefix">❯</span>
+  <span id="status-text">готово.</span>
+  <span class="spacer"></span>
+  <span>ctrl+enter — генерировать · esc — сброс</span>
+  <span class="copy">
+    <span class="sep">·</span>
+    Developed:
+    <a href="https://github.com/turkprogrammer" title="GitHub">Robert Yusupov</a>
+    <a href="https://yusupov-tech.ru/" title="Сайт">◍</a>
+  </span>
+</footer>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const els = {
+  chip: $("model-chip"), spin: $("spin"),
+  generate: $("generate"), copy: $("copy"), result: $("result"), count: $("count"),
+  status: $("status"), statusText: $("status-text"),
+  baseUrl: $("baseUrl"), apiKey: $("apiKey"), model: $("model"),
+  systemPrompt: $("systemPrompt"), reasoningEffort: $("reasoningEffort"),
+  timeoutSec: $("timeoutSec"),
+  vacancy: $("vacancy"), apiSub: $("api-sub"), promptSub: $("prompt-sub"),
+  auditWarns: $("audit-warns"),
+};
+
+function setStatus(text, cls) {
+  els.statusText.textContent = text;
+  els.status.className = cls || "";
+}
+function setBusy(on) {
+  document.body.classList.toggle("busy", on);
+  els.generate.disabled = on || !els.vacancy.value.trim();
+}
+function chip(model) {
+  els.chip.textContent = model ? "@" + model : "";
+  els.apiSub.textContent = model || "не настроено";
+}
+
+/* ---------- settings: владеет Go, автосейв с дебаунсом 400мс ---------- */
+/* Промпт — исключение: не персистится. При запуске всегда дефолт из бэкенда,
+   кастом живёт в поле до перезапуска (передаётся в /api/generate). */
+let saveTimer = null;
+let defaultPrompt = "";
+function readForm() {
+  const t = parseInt(els.timeoutSec.value, 10);
+  return {
+    baseUrl: els.baseUrl.value.trim(),
+    apiKey: els.apiKey.value,
+    model: els.model.value.trim(),
+    reasoningEffort: els.reasoningEffort.value,
+    timeoutSec: Number.isFinite(t) ? Math.min(900, Math.max(5, t)) : 60,
+  };
+}
+function fillForm(s) {
+  els.baseUrl.value = s.baseUrl || "";
+  els.apiKey.value = s.apiKey || "";
+  els.model.value = s.model || "";
+  els.reasoningEffort.value = s.reasoningEffort || "";
+  els.timeoutSec.value = s.timeoutSec || 60;
+  defaultPrompt = s.defaultSystemPrompt || "";
+  els.systemPrompt.value = defaultPrompt;
+  chip(els.model.value.trim());
+  els.promptSub.textContent = defaultPrompt.split("\n")[0].slice(0, 48) || "—";
+}
+function resetPrompt() {
+  els.systemPrompt.value = defaultPrompt;
+  els.promptSub.textContent = defaultPrompt.split("\n")[0].slice(0, 48) || "—";
+  els.systemPrompt.focus();
+}
+function scheduleSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(async () => {
+    try {
+      const r = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(readForm()),
+      });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      setStatus("config сохранён.");
+    } catch (e) {
+      setStatus("не удалось сохранить config: " + e.message, "err");
+    }
+  }, 400);
+}
+
+/* ---------- generate ---------- */
+let liveTimer = null;
+async function generate() {
+  if (!els.vacancy.value.trim() || els.generate.disabled) return;
+  if (!els.model.value.trim()) {
+    setStatus("err: model не задана — откройте api.config", "err");
+    $("api-details").open = true;
+    els.model.focus();
+    return;
+  }
+  setBusy(true);
+  // Живой счётчик: видно, что генерация идёт, а не зависла.
+  const t0 = performance.now();
+  setStatus("генерация… 0 сек");
+  liveTimer = setInterval(() => {
+    const s = Math.floor((performance.now() - t0) / 1000);
+    setStatus(`генерация… ${s} сек`);
+  }, 1000);
+  try {
+    const r = await fetch("/api/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        vacancy: els.vacancy.value,
+        systemPrompt: els.systemPrompt.value,
+      }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || data.error) throw new Error(data.error || "HTTP " + r.status);
+    els.result.textContent = data.letter || "";
+    showAuditWarnings(data.warnings);
+    els.copy.disabled = !data.letter;
+    countChars(data.elapsedMs);
+    setStatus(data.letter
+      ? `ок — за ${(data.elapsedMs / 1000).toFixed(1)}s. Письмо можно править и копировать.`
+      : "ок — модель вернула пустой ответ.");
+  } catch (e) {
+    setStatus("err: " + e.message, "err");
+  } finally {
+    clearInterval(liveTimer);
+    setBusy(false);
+  }
+}
+
+/* ---------- постпроверка письма ---------- */
+let lastWarnings = [];
+
+function showAuditWarnings(warnings) {
+  lastWarnings = Array.isArray(warnings) ? warnings : [];
+  const box = els.auditWarns;
+  if (lastWarnings.length === 0) {
+    box.hidden = true;
+    box.textContent = "";
+    return;
+  }
+  box.textContent = "";
+  const title = document.createElement("span");
+  title.className = "warn-title";
+  title.textContent = "⚠ проверка письма: " + lastWarnings.length +
+    (lastWarnings.length === 1 ? " замечание" : " замечаний") + " — правь перед отправкой";
+  box.appendChild(title);
+  const ul = document.createElement("ul");
+  for (const w of lastWarnings) {
+    const li = document.createElement("li");
+    li.textContent = w;
+    ul.appendChild(li);
+  }
+  box.appendChild(ul);
+  const fixBtn = document.createElement("button");
+  fixBtn.className = "btn term";
+  fixBtn.id = "auditFix";
+  fixBtn.type = "button";
+  fixBtn.style.marginTop = "8px";
+  fixBtn.innerHTML = "<span>auto-fix</span>";
+  fixBtn.addEventListener("click", auditFix);
+  box.appendChild(fixBtn);
+  box.hidden = false;
+}
+
+// Автоправка: сервер отдаёт письмо обратно модели с списком замечаний,
+// получает исправленный текст и проверяет его повторно. Кнопка остаётся,
+// пока замечания не кончатся или пользователь не остановит генерацию.
+async function auditFix() {
+  const btn = document.getElementById("auditFix");
+  if (!btn || btn.disabled) return;
+  btn.disabled = true;
+  setBusy(true);
+  const t0 = performance.now();
+  setStatus("автоправка… 0 сек");
+  const timer = setInterval(() => {
+    setStatus(`автоправка… ${Math.floor((performance.now() - t0) / 1000)} сек`);
+  }, 1000);
+  try {
+    const r = await fetch("/api/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        vacancy: els.vacancy.value,
+        systemPrompt: els.systemPrompt.value,
+        auditFix: true,
+        letter: els.result.textContent,
+        warnings: lastWarnings,
+      }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || data.error) throw new Error(data.error || "HTTP " + r.status);
+    els.result.textContent = data.letter || "";
+    showAuditWarnings(data.warnings);
+    countChars(data.elapsedMs);
+    setStatus(data.warnings && data.warnings.length
+      ? `ок — замечаний осталось: ${data.warnings.length}`
+      : "ок — замечаний больше нет.");
+  } catch (e) {
+    setStatus("err: автоправка не удалась: " + e.message, "err");
+    btn.disabled = false;
+  } finally {
+    clearInterval(timer);
+    setBusy(false);
+  }
+}
+
+/* ---------- copy ---------- */
+async function copyResult() {
+  const text = els.result.textContent;
+  if (!text) return;
+  let ok = false;
+  try { await navigator.clipboard.writeText(text); ok = true; } catch (_) {}
+  if (!ok) {
+    const ta = document.createElement("textarea");
+    ta.value = text; document.body.appendChild(ta); ta.select();
+    ok = document.execCommand("copy"); ta.remove();
+  }
+  els.copy.classList.toggle("ok", ok);
+  els.copy.querySelector("span").textContent = ok ? "copied ✓" : "fail";
+  setTimeout(() => {
+    els.copy.classList.remove("ok");
+    els.copy.querySelector("span").textContent = "copy";
+  }, 1500);
+}
+function countChars(elapsedMs) {
+  const n = els.result.textContent.length;
+  const t = typeof elapsedMs === "number" && elapsedMs > 0
+    ? " · " + (elapsedMs / 1000).toFixed(1) + "s" : "";
+  els.count.textContent = n ? n + " chars" + t : "";
+}
+
+/* ---------- wire up ---------- */
+async function boot() {
+  try {
+    const r = await fetch("/api/settings");
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    fillForm(await r.json());
+    setStatus("готово.");
+  } catch (e) {
+    setStatus("err: настройки не загрузились: " + e.message, "err");
+  }
+  for (const el of [els.baseUrl, els.apiKey, els.model, els.reasoningEffort, els.timeoutSec]) {
+    el.addEventListener("input", scheduleSave);
+    el.addEventListener("change", scheduleSave);
+  }
+  // Промпт не автосейвится: кастом живёт до перезапуска, сброс — кнопкой.
+  els.systemPrompt.addEventListener("input", () => {
+    els.promptSub.textContent = "кастом (сброс при перезапуске)";
+  });
+  $("resetPrompt").addEventListener("click", resetPrompt);
+  els.vacancy.addEventListener("input", () => {
+    els.generate.disabled = !els.vacancy.value.trim() || document.body.classList.contains("busy");
+  });
+  els.generate.addEventListener("click", generate);
+  els.copy.addEventListener("click", copyResult);
+  els.result.addEventListener("input", countChars);
+  document.addEventListener("keydown", e => {
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); generate(); }
+    if (e.key === "Escape") { els.result.textContent = ""; els.copy.disabled = true; countChars(); }
+  });
+  els.vacancy.focus();
+}
+boot();
+</script>
+</html>
