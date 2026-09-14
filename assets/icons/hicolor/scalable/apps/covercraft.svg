@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- Dark terminal identity, matching frontend/index.html tokens -->
+  <rect x="3" y="3" width="122" height="122" rx="26" ry="26"
+        fill="#0b0e12" stroke="#1d2632" stroke-width="2"/>
+
+  <!-- Letter sheet -->
+  <rect x="34" y="26" width="60" height="76" rx="6"
+        fill="#10141b" stroke="#2fe08b" stroke-width="4"/>
+  <!-- Folded corner -->
+  <path d="M94 26 v14 l14 -14 Z" fill="#1d2632"/>
+
+  <!-- Text lines: green accent + dim -->
+  <rect x="44" y="42" width="40" height="5" rx="2.5" fill="#2fe08b"/>
+  <rect x="44" y="56" width="40" height="4" rx="2" fill="#7e8b9e"/>
+  <rect x="44" y="67" width="40" height="4" rx="2" fill="#7e8b9e"/>
+  <rect x="44" y="78" width="26" height="4" rx="2" fill="#7e8b9e"/>
+
+  <!-- Terminal prompt caret -->
+  <path d="M44 96 L52 102 L44 108" fill="none" stroke="#2fe08b"
+        stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

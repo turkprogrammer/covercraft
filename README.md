@@ -1,0 +1,202 @@
+# CoverCraft
+
+[![Go Version](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go)](https://go.dev)
+[![License: MIT](https://img.shields.io/badge/License-MIT-2fe08b.svg)](LICENSE)
+[![Go Report Card](https://goreportcard.com/badge/github.com/turkprogrammer/covercraft)](https://goreportcard.com/report/github.com/turkprogrammer/covercraft)
+[![CI](https://github.com/turkprogrammer/covercraft/actions/workflows/ci.yml/badge.svg)](https://github.com/turkprogrammer/covercraft/actions/workflows/ci.yml)
+
+Генератор сопроводительных писем: нативное окно (WebKit2GTK) + Go-бэкенд.
+Один бинарник, UI зашит внутрь через `embed`, настройки в
+`~/.config/covercraft/settings.json`, контекст кандидата в `context/*.md`.
+
+Автор: **Robert Yusupov** — [github.com/turkprogrammer](https://github.com/turkprogrammer) ·
+[yusupov-tech.ru](https://yusupov-tech.ru/)
+
+## Скриншоты
+
+<img src="assets/screenshots/covercraft.png"
+     alt="CoverCraft: терминальный UI генератора сопроводительных писем"
+     width="720">
+
+## Как это работает
+
+```text
+┌────────────────────────────────┐
+│  GTK-окно + WebKit2GTK 4.1     │  internal/window (CGO, ~50 строк)
+│  frontend/index.html (embed)   │  terminal UI, vanilla JS
+└──────────┬─────────────────────┘
+           │ fetch() по относительным URL
+┌──────────▼─────────────────────┐
+│  HTTP на 127.0.0.1:случайный   │  internal/server
+│  / · /api/settings · /api/generate
+└──────┬──────────────┬──────────┘
+       │              │
+ ~/.config/…    context/*.md + LLM (OpenAI-совместимый API)
+ settings.json  (Ollama / OpenAI / TokenRouter / Apinex / …)
+```
+
+- **UI**: один HTML-файл без бандлеров, терминальный стиль (тёмная тема по
+  умолчанию, светлая через `prefers-color-scheme`), моноширинный шрифт.
+  Ходит по относительным URL — порт в JS не нужен.
+- **Настройки**: хранит Go, UI читает/пишет через `/api/settings`.
+  LocalStorage не используется: случайный порт = новый origin при каждом
+  запуске, настройки бы терялись.
+- **Промпт**: `context/*.md` (профиль, проекты — всё, что `.md`, по алфавиту)
+  + текст вакансии → единый user-промпт; системный промпт — из настроек.
+- **Постпроверка письма (`internal/audit`)**: после генерации письмо
+  автоматически проверяется на типовые сбои LLM — потерянные факты профиля
+  (Yii2/Lumen/PHPUnit/Fraud Engine и метрики), запрещённое в строке стека
+  (фреймворки, PHPUnit/PHPStan, non-tech термины), дубли технологий между
+  буллетами и секцией пробелов, смещённую атрибуцию метрик (155+ тестов —
+  Go-проект, а не PHPUnit), плейсхолдеры и названия ИИ-редакторов. Найденное
+  показывается панелью «⚠ проверка письма» под результатом.
+- **Автоправка (auto-fix)**: кнопка в панели замечаний отправляет письмо +
+  список претензий + контекст кандидата обратно модели с правилами исправления
+  по каждому типу замечания; исправленный текст проверяется повторно — цикл
+  до нуля замечаний. Модель правит точечно по фактам профиля, а не пишет
+  письмо заново.
+- **LLM**: любой OpenAI-совместимый endpoint. Ollama работает без ключа.
+- **Счётчик времени**: `/api/generate` возвращает `elapsedMs` — UI показывает
+  `N chars · X.Xs` рядом с письмом (сколько отвечала модель).
+
+## Reasoning-модели (glm и другие)
+
+Модели с «размышлениями» (z-ai/glm-5.x и т.п.) без настройки могут думать
+минутами — письмо кажется «висящим», а потом приходит `context deadline
+exceeded`. В панели `api.config` есть селект **reasoning_effort**:
+
+- **none** — отключить размышления (рекомендуется для генерации писем);
+- low / medium / high — управляемое усилие;
+- «не отправлять» — параметр не уходит в запрос (для моделей и провайдеров
+  без поддержки, например Ollama).
+
+Замеры на реальном провайдере: glm-5.3-free без effort — 3355
+reasoning-токенов и 6+ минут на письме; с `none` — в разы быстрее.
+Таймауты: клиент 300 s, сервер 600 s — медленные модели успевают.
+
+## Требования
+
+- Ubuntu, Linux x86_64, GTK3, WebKit2GTK 4.1.
+- Go 1.26+ для сборки.
+
+```bash
+# dev-заголовки для сборки (рантайм уже есть в Ubuntu 22.04+):
+sudo apt install build-essential pkg-config libwebkit2gtk-4.1-dev
+```
+
+> `libwebkit2gtk-4.0` в Ubuntu 24.04+ больше нет — поэтому вендорить
+> `webview/webview_go` нельзя, окно открывается собственной CGO-обвязкой
+> поверх системного WebKit 4.1 (internal/window).
+
+## Сборка
+
+```bash
+go build -o covercraft .
+./covercraft
+```
+
+## Установка
+
+Основной путь — готовый бинарник из [Releases](https://github.com/turkprogrammer/covercraft/releases):
+
+```bash
+tar xzf covercraft_0.1.0_linux_amd64.tar.gz
+./covercraft
+```
+
+Для запуска достаточно рантайма `libwebkit2gtk-4.1-0` (есть в Ubuntu 24.04+).
+
+Альтернатива — `go install` (компилирует на вашей машине, нужны dev-заголовки):
+
+```bash
+sudo apt install build-essential pkg-config libwebkit2gtk-4.1-dev
+go install github.com/turkprogrammer/covercraft@latest
+```
+
+Бинарник окажется в `~/go/bin/`. Приложение ищет `context/*.md` рядом с
+бинарником или в текущем каталоге — создайте `context/` там, где будете
+запускать.
+
+## Использование
+
+1. Запустите. Откроется окно `~$ covercraft` в терминальном стиле.
+2. В панели `api.config` укажите base URL провайдера (например
+   `https://api.apinex.bond/v1` или `http://127.0.0.1:11434/v1` для
+   Ollama), модель (например `free/gemini-3.8-flash`, `llama3.2`),
+   ключ при необходимости, и reasoning_effort для reasoning-моделей.
+3. В `system.prompt` — как писать письмо (уже есть разумный дефолт).
+4. Вставьте вакансию в `vacancy.in`, нажмите `[ gen ]` или Ctrl+Enter.
+5. Письмо появится в `letter.out` — счётчик покажет размер и время
+   генерации (`N chars · X.Xs`); можно отредактировать и нажать `[ copy ]`.
+
+Настройки сохраняются автоматически (после 400 мс тишины) и переживают
+перезапуск. Esc очищает результат.
+
+## Структура
+
+```text
+main.go                  точка входа: сервер + окно
+frontend/index.html     весь UI (embed)
+internal/settings/      JSON-настройки, 0600, атомарная запись
+internal/llm/           OpenAI-совместимый клиент /chat/completions,
+                         reasoning_effort (omitempty), timeout 300s
+internal/cover/          сборка user-промпта из context/*.md
+internal/server/         HTTP-роутер + шов LLMFunc для тестов,
+                         /api/generate возвращает letter + elapsedMs
+internal/window/         CGO: GTK-окно + WebKit2GTK 4.1
+internal/audit/          постпроверка письма: запрещённые паттерны,
+                         потерянные факты, дубли, атрибуция метрик
+context/                 user's context: *.md (gitignored, private)
+```
+
+Полный обзор для AI-агентов — [llms.txt](llms.txt).
+Правила контрибуции — [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## API (для интеграции)
+
+| Метод | Путь           | Что делает |
+|-------|----------------|------------|
+| GET   | `/`            | UI (HTML из embed) |
+| GET   | `/api/settings`| текущие настройки |
+| POST  | `/api/settings`| сохранить настройки |
+| POST  | `/api/generate`| `{vacancy}` → `{letter, elapsedMs}` |
+
+## Тесты
+
+```bash
+go test ./...
+```
+
+Юнит-тесты на все пакеты: настройки (roundtrip, битый JSON, права 0600),
+LLM-клиент (запрос/ответ/ошибки через httptest; reasoning_effort
+отправляется только когда задан), сборка промпта, HTTP-эндпоинты
+(включая 400/502 и elapsedMs), embed-фронтенд (копирайт, селект
+reasoning effort), постпроверка писем (запрещённые паттерны, потерянные
+факты, дубли, атрибуция метрик) и режим автоправки.
+
+## Отладка
+
+- Сервер печатает URL в stderr: `covercraft: http://127.0.0.1:PORT`.
+- Логи запросов — там же (`GET /`, `POST /api/generate`).
+- `GDK_BACKEND=x11 ./covercraft` — окно через Xwayland (удобно для
+  скриншотов и xprop).
+
+## Дистрибуция
+
+Артефакты релиза собираются в `dist/` (не в git):
+
+```bash
+mkdir -p dist
+go build -o covercraft .
+tar czf dist/covercraft_0.1.0_linux_amd64.tar.gz covercraft README.md LICENSE
+sha256sum dist/covercraft_0.1.0_linux_amd64.tar.gz \
+  > dist/covercraft_0.1.0_linux_amd64.tar.gz.sha256
+```
+
+`context/` в архив не входит: он приватен и создаётся каждым
+пользователем под себя. Dev-пакеты нужны только для сборки; для запуска
+достаточно рантайма `libwebkit2gtk-4.1-0` (есть в Ubuntu 24.04+).
+
+## License
+
+MIT — см. [LICENSE](LICENSE).

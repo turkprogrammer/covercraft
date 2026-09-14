@@ -1,0 +1,62 @@
+# CoverCraft — llms.txt
+
+> Генератор сопроводительных писем: нативное окно (WebKit2GTK 4.1 через CGO)
+> + Go-бэкенд, UI зашит в бинарник через go:embed. Один бинарник, ноль
+> Go-зависимостей (только stdlib).
+
+## Что это
+
+Desktop-приложение для Linux (Ubuntu 22.04+): вставляешь текст вакансии,
+приложение генерирует сопроводительное письмо через любой
+OpenAI-совместимый LLM-endpoint (Ollama локально, OpenAI, OpenRouter и
+любой другой /v1/chat/completions). Контекст кандидата (профиль, опыт)
+кладётся в `context/*.md` рядом с бинарником — он не входит в git и релизы.
+
+## Архитектура (KISS/YAGNI)
+
+```
+main.go                     точка входа: сервер + окно
+frontend/index.html         весь UI (embed, vanilla JS, тёмная/светлая темы)
+frontend/embed.go           go:embed index.html
+internal/settings/          JSON-настройки в ~/.config/covercraft,
+                            права 0600, атомарная запись (tmp + rename)
+internal/llm/               OpenAI-совместимый клиент /chat/completions,
+                            reasoning_effort (omitempty), таймаут 5–900 с
+internal/cover/             сборка user-промпта: context/*.md + вакансия
+internal/server/            HTTP на 127.0.0.1:случайный порт,
+                            /api/settings, /api/generate (letter, elapsedMs)
+internal/window/            CGO: GTK3-окно + WebKit2GTK 4.1 (~70 строк)
+assets/icons/hicolor/       иконки: SVG-исходник + PNG 48–512
+```
+
+Ключевые решения:
+- UI ходит по **относительным** URL — случайный порт не нужен в JS.
+- Настройками владеет **Go**, не LocalStorage: случайный порт = новый
+  origin при каждом запуске, LocalStorage терял бы всё.
+- reasoning_effort отправляется только когда задан (omitempty) — не
+  ломает провайдеров без поддержки; «none» отключает многоминутные
+  размышления reasoning-моделей.
+- DefaultSystemPrompt обезличен: язык письма — по языку вакансии,
+  подпись — именем из профиля, если есть.
+
+## API
+
+| Метод | Путь            | Что делает |
+|-------|-----------------|------------|
+| GET   | `/`             | UI (HTML из embed) |
+| GET   | `/api/settings` | текущие настройки |
+| POST  | `/api/settings` | сохранить настройки |
+| POST  | `/api/generate` | `{vacancy}` → `{letter, elapsedMs}` |
+
+## Сборка и тесты
+
+```bash
+sudo apt install build-essential pkg-config libwebkit2gtk-4.1-dev
+go build -o covercraft .
+go test ./...
+```
+
+## Стек
+
+Go 1.26 (только stdlib), GTK3, WebKit2GTK 4.1 (CGO), go:embed.
+29 unit-тестов. ~1900 строк Go. MIT.
