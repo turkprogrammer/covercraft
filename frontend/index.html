@@ -524,8 +524,57 @@ function scheduleSave() {
   }, 400);
 }
 
-/* ---------- generate ---------- */
+/* ---------- generate (SSE-стриминг) ---------- */
 let liveTimer = null;
+let genAbort = null;
+
+// streamGenerate — POST /api/generate + парсинг SSE-потока. Дельты летят
+// в onDelta по мере генерации, возвращает финальное событие done.
+async function streamGenerate(body, onDelta) {
+  genAbort = new AbortController();
+  const r = await fetch("/api/generate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: genAbort.signal,
+  });
+  genAbort = null;
+  // Ошибки до старта стрима — обычные HTTP-коды с JSON-телом.
+  if (!r.ok) {
+    const data = await r.json().catch(() => ({}));
+    throw new Error(data.error || "HTTP " + r.status);
+  }
+  if (!r.body) throw new Error("браузер не поддерживает стриминг");
+  const reader = r.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "", done = null;
+  for (;;) {
+    const { value, done: eof } = await reader.read();
+    if (eof) break;
+    buf += dec.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf("\n\n")) >= 0) {
+      const chunk = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      const line = chunk.split("\n").find(l => l.startsWith("data: "));
+      if (!line) continue;
+      const ev = JSON.parse(line.slice(6));
+      if (ev.error) throw new Error(ev.error);
+      if (ev.delta) onDelta(ev.delta);
+      if (ev.done) done = ev;
+    }
+  }
+  if (!done) throw new Error("соединение оборвалось без результата");
+  return done;
+}
+
+function startTimer(label, t0) {
+  liveTimer = setInterval(() => {
+    const s = Math.floor((performance.now() - t0) / 1000);
+    setStatus(`${label}… ${s} сек`);
+  }, 1000);
+}
+
 async function generate() {
   if (!els.vacancy.value.trim() || els.generate.disabled) return;
   if (!els.model.value.trim()) {
@@ -538,22 +587,19 @@ async function generate() {
   // Живой счётчик: видно, что генерация идёт, а не зависла.
   const t0 = performance.now();
   setStatus("генерация… 0 сек");
-  liveTimer = setInterval(() => {
-    const s = Math.floor((performance.now() - t0) / 1000);
-    setStatus(`генерация… ${s} сек`);
-  }, 1000);
+  startTimer("генерация", t0);
+  els.result.textContent = "";
+  els.copy.disabled = true;
   try {
-    const r = await fetch("/api/generate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        vacancy: els.vacancy.value,
-        systemPrompt: els.systemPrompt.value,
-      }),
-    });
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok || data.error) throw new Error(data.error || "HTTP " + r.status);
-    els.result.textContent = data.letter || "";
+    const data = await streamGenerate(
+      { vacancy: els.vacancy.value, systemPrompt: els.systemPrompt.value },
+      delta => {
+        els.result.textContent += delta;
+        // Автоскролл: письмо растёт, конец текста остаётся на виду.
+        els.result.scrollTop = els.result.scrollHeight;
+        countChars();
+      },
+    );
     showAuditWarnings(data.warnings);
     els.copy.disabled = !data.letter;
     countChars(data.elapsedMs);
@@ -561,7 +607,8 @@ async function generate() {
       ? `ок — за ${(data.elapsedMs / 1000).toFixed(1)}s. Письмо можно править и копировать.`
       : "ок — модель вернула пустой ответ.");
   } catch (e) {
-    setStatus("err: " + e.message, "err");
+    if (e.name === "AbortError") setStatus("генерация остановлена (esc).");
+    else setStatus("err: " + e.message, "err");
   } finally {
     clearInterval(liveTimer);
     setBusy(false);
@@ -604,8 +651,9 @@ function showAuditWarnings(warnings) {
 }
 
 // Автоправка: сервер отдаёт письмо обратно модели с списком замечаний,
-// получает исправленный текст и проверяет его повторно. Кнопка остаётся,
-// пока замечания не кончатся или пользователь не остановит генерацию.
+// получает исправленный текст (стримингом — видно, как модель правит) и
+// проверяет его повторно. Кнопка остаётся, пока замечания не кончатся
+// или пользователь не остановит генерацию.
 async function auditFix() {
   const btn = document.getElementById("auditFix");
   if (!btn || btn.disabled) return;
@@ -613,34 +661,36 @@ async function auditFix() {
   setBusy(true);
   const t0 = performance.now();
   setStatus("автоправка… 0 сек");
-  const timer = setInterval(() => {
-    setStatus(`автоправка… ${Math.floor((performance.now() - t0) / 1000)} сек`);
-  }, 1000);
+  startTimer("автоправка", t0);
+  const letter = els.result.textContent; // исходное письмо — до очистки поля
+  els.result.textContent = "";
   try {
-    const r = await fetch("/api/generate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    const data = await streamGenerate(
+      {
         vacancy: els.vacancy.value,
         systemPrompt: els.systemPrompt.value,
         auditFix: true,
-        letter: els.result.textContent,
+        letter: letter,
         warnings: lastWarnings,
-      }),
-    });
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok || data.error) throw new Error(data.error || "HTTP " + r.status);
-    els.result.textContent = data.letter || "";
+      },
+      delta => {
+        els.result.textContent += delta;
+        els.result.scrollTop = els.result.scrollHeight;
+        countChars();
+      },
+    );
     showAuditWarnings(data.warnings);
     countChars(data.elapsedMs);
+    els.copy.disabled = !data.letter;
     setStatus(data.warnings && data.warnings.length
       ? `ок — замечаний осталось: ${data.warnings.length}`
       : "ок — замечаний больше нет.");
   } catch (e) {
-    setStatus("err: автоправка не удалась: " + e.message, "err");
+    if (e.name === "AbortError") setStatus("автоправка остановлена (esc).");
+    else setStatus("err: автоправка не удалась: " + e.message, "err");
     btn.disabled = false;
   } finally {
-    clearInterval(timer);
+    clearInterval(liveTimer);
     setBusy(false);
   }
 }
@@ -697,7 +747,11 @@ async function boot() {
   els.result.addEventListener("input", countChars);
   document.addEventListener("keydown", e => {
     if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); generate(); }
-    if (e.key === "Escape") { els.result.textContent = ""; els.copy.disabled = true; countChars(); }
+    if (e.key === "Escape") {
+      // Останов активной генерации + очистка результата.
+      if (genAbort) genAbort.abort();
+      els.result.textContent = ""; els.copy.disabled = true; countChars();
+    }
   });
   els.vacancy.focus();
 }

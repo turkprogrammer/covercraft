@@ -52,6 +52,14 @@ var stackLineRe = regexp.MustCompile(`(?i)^\W*(стек|stack)\s*:?\W*`)
 // в буллетах и тут же повторить в «Честно о пробелах».
 var dupTechs = []string{"horizon", "octane", "kafka", "clickhouse", "argo"}
 
+// foreignGapTerms — термины, законно живущие в секции пробелов. Их нужно
+// вырезать перед проверкой дублей: без этого «Debezium» содержит подстроку
+// «clickhouse» (De-bez-ClickHouse-ium) и даёт ложное срабатывание детектора.
+var foreignGapTerms = []string{
+	"debezium", "elasticsearch", "opensearch", "prometheus",
+	"grafana", "airflow", "rabbitmq",
+}
+
 // stackForbidden — всё, что запрещено в строке стека (правила промпта v4.1):
 // фреймворки, инструменты тестирования/анализа, ADR, non-tech термины.
 var stackForbidden = []string{
@@ -217,6 +225,11 @@ func Check(letter, vacancy string) Result {
 	if gapIdx := gapSectionIndex(letter); gapIdx >= 0 {
 		bullets := strings.ToLower(letter[:gapIdx])
 		gap := strings.ToLower(letter[gapIdx:])
+		// Вырезаем имена чужих технологий из секции пробелов: «Debezium»
+		// содержит подстроку «clickhouse» и ловился бы как ложный дубль.
+		for _, term := range foreignGapTerms {
+			gap = strings.ReplaceAll(gap, term, " ")
+		}
 		for _, tech := range dupTechs {
 			re := regexp.MustCompile(`(?i)\b` + tech + `\b`)
 			if !re.MatchString(bullets) || !re.MatchString(gap) || dupSeen[tech] {

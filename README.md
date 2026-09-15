@@ -56,6 +56,9 @@
   до нуля замечаний. Модель правит точечно по фактам профиля, а не пишет
   письмо заново.
 - **LLM**: любой OpenAI-совместимый endpoint. Ollama работает без ключа.
+- **Стриминг**: `/api/generate` отвечает Server-Sent Events — письмо печатается
+  в `letter.out` по мере генерации модели (эффект «печатающей машинки»);
+  в конце — событие с полным текстом, `elapsedMs` и предупреждениями аудита.
 - **Счётчик времени**: `/api/generate` возвращает `elapsedMs` — UI показывает
   `N chars · X.Xs` рядом с письмом (сколько отвечала модель).
 
@@ -141,8 +144,9 @@ internal/settings/      JSON-настройки, 0600, атомарная зап
 internal/llm/           OpenAI-совместимый клиент /chat/completions,
                          reasoning_effort (omitempty), timeout 300s
 internal/cover/          сборка user-промпта из context/*.md
-internal/server/         HTTP-роутер + шов LLMFunc для тестов,
-                         /api/generate возвращает letter + elapsedMs
+internal/server/         HTTP-роутер + швы LLMFunc/LLMStreamFunc для тестов,
+                         /api/generate стримит SSE: дельты + done (letter,
+                         elapsedMs, warnings)
 internal/window/         CGO: GTK-окно + WebKit2GTK 4.1
 internal/audit/          постпроверка письма: запрещённые паттерны,
                          потерянные факты, дубли, атрибуция метрик
@@ -159,7 +163,7 @@ context/                 user's context: *.md (gitignored, private)
 | GET   | `/`            | UI (HTML из embed) |
 | GET   | `/api/settings`| текущие настройки |
 | POST  | `/api/settings`| сохранить настройки |
-| POST  | `/api/generate`| `{vacancy}` → `{letter, elapsedMs}` |
+| POST  | `/api/generate`| `{vacancy}` → SSE: `delta`…, `done {letter, elapsedMs, warnings}` |
 
 ## Тесты
 

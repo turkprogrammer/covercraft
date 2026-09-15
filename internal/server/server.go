@@ -33,10 +33,16 @@ import (
 // LLMFunc — шов для тестов: получает готовые system и user промпты.
 type LLMFunc func(ctx context.Context, system, user string) (string, error)
 
+// LLMStreamFunc — шов стриминга: дельты текста приходят через onDelta по
+// мере генерации, полный текст — возвращаемым значением. Если в Config
+// задан только LLM, сервер оборачивает его: одна дельта в конце.
+type LLMStreamFunc func(ctx context.Context, system, user string, onDelta func(string)) (string, error)
+
 // Config — зависимости хендлера.
 type Config struct {
-	ContextDir string  // папка context/*.md; может не существовать
-	LLM        LLMFunc // если nil — используется реальный клиент из settings
+	ContextDir string        // папка context/*.md; может не существовать
+	LLM        LLMFunc       // если nil — используется реальный клиент из settings
+	LLMStream  LLMStreamFunc // если nil — буферизованный LLM (без стриминга)
 }
 
 // Handler обрабатывает запросы UI.
@@ -44,12 +50,35 @@ type Handler struct {
 	cfg Config
 }
 
-// New собирает хендлер. LLM == nil означает «прод»: используется realLLM.
+// New собирает хендлер. LLM == nil означает «прод»: LLMStream — realLLMStream.
+// Заданный в тестах LLM без LLMStream буферизуется (одна дельта в конце).
 func New(cfg Config) *Handler {
+	testLLM := cfg.LLM // заданный в тестах LLM без LLMStream буферизуем
 	if cfg.LLM == nil {
 		cfg.LLM = realLLM
 	}
+	if cfg.LLMStream == nil {
+		if testLLM != nil {
+			cfg.LLMStream = bufferedLLMStream(testLLM)
+		} else {
+			cfg.LLMStream = realLLMStream
+		}
+	}
 	return &Handler{cfg: cfg}
+}
+
+// bufferedLLMStream — фоллбэк: обычный LLMFunc без стриминга, дельта одна.
+func bufferedLLMStream(fn LLMFunc) LLMStreamFunc {
+	return func(ctx context.Context, system, user string, onDelta func(string)) (string, error) {
+		letter, err := fn(ctx, system, user)
+		if err != nil {
+			return "", err
+		}
+		if letter != "" && onDelta != nil {
+			onDelta(letter)
+		}
+		return letter, nil
+	}
 }
 
 // ServeHTTP — единая точка входа: без внешних роутеров (KISS).
@@ -108,13 +137,25 @@ type generateRequest struct {
 	Warnings []string `json:"warnings,omitempty"`
 }
 
-// generateResponse — ответ /api/generate. ElapsedMs — сколько отвечала модель.
-// Warnings — результаты постпроверки письма (internal/audit): пустой срез,
-// если письмо чистое. UI показывает их как предупреждение, не блокируя копию.
+// generateResponse — финальное событие done в SSE-потоке /api/generate.
+// ElapsedMs — сколько отвечала модель. Warnings — результаты постпроверки
+// письма (internal/audit): пустой срез, если письмо чистое.
 type generateResponse struct {
+	Done      bool     `json:"done"`
 	Letter    string   `json:"letter"`
 	ElapsedMs int64    `json:"elapsedMs"`
 	Warnings  []string `json:"warnings,omitempty"`
+}
+
+// sseDelta — промежуточное событие: кусочек текста по мере генерации.
+type sseDelta struct {
+	Delta string `json:"delta"`
+}
+
+// sseError — событие ошибки внутри SSE-потока (после старта стрима код
+// HTTP уже 200, поэтому ошибки доходят как событие, а не статус-код).
+type sseError struct {
+	Error string `json:"error"`
 }
 
 func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
@@ -148,52 +189,66 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
 
 	// Режим автоправки: письмо + замечания аудита → модель переписывает.
 	// Контекст профиля не пересобираем — правки только по списку замечаний.
+	var user string
 	if req.AuditFix {
 		if strings.TrimSpace(req.Letter) == "" || len(req.Warnings) == 0 {
 			http.Error(w, "auditFix требует letter и warnings", http.StatusBadRequest)
 			return
 		}
-		user := fixPrompt(req.Letter, req.Warnings) + "\n\n" +
+		user = fixPrompt(req.Letter, req.Warnings) + "\n\n" +
 			cover.BuildUserPrompt(h.cfg.ContextDir, req.Vacancy)
-		start := time.Now()
-		letter, err := h.cfg.LLM(ctx, system, user)
-		elapsed := time.Since(start)
-		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) {
-				writeJSON(w, http.StatusGatewayTimeout, map[string]string{
-					"error": fmt.Sprintf("таймаут: модель не ответила за %d сек", timeoutSec),
-				})
-				return
-			}
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-			return
-		}
-		// Повторная проверка исправленного письма.
-		warnings := audit.Check(letter, req.Vacancy).Warnings
-		writeJSON(w, http.StatusOK, generateResponse{Letter: letter, ElapsedMs: elapsed.Milliseconds(), Warnings: warnings})
-		return
+	} else {
+		// User-промпт собирает сервер: context/*.md + вакансия.
+		user = cover.BuildUserPrompt(h.cfg.ContextDir, req.Vacancy)
 	}
 
-	// User-промпт собирает сервер: context/*.md + вакансия.
-	user := cover.BuildUserPrompt(h.cfg.ContextDir, req.Vacancy)
+	streamGenerate(w, ctx, h.cfg.LLMStream, system, user, req.Vacancy, timeoutSec)
+}
+
+// streamGenerate вызывает LLM и пишет ответ как SSE: дельты по мере
+// генерации (каждая с flush — UI обновляется живьём), в конце событие
+// done с полным текстом, elapsedMs и warnings постпроверки. Ошибки после
+// старта стрима идут событием {"error": ...}: заголовки уже отправлены.
+func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc, system, user, vacancy string, timeoutSec int) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	flush := func() {
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}
 
 	start := time.Now()
-	letter, err := h.cfg.LLM(ctx, system, user)
+	letter, err := fn(ctx, system, user, func(delta string) {
+		writeSSE(w, sseDelta{Delta: delta})
+		flush()
+	})
 	elapsed := time.Since(start)
+
 	if err != nil {
+		msg := err.Error()
 		if errors.Is(err, context.DeadlineExceeded) {
-			writeJSON(w, http.StatusGatewayTimeout, map[string]string{
-				"error": fmt.Sprintf("таймаут: модель не ответила за %d сек — выберите модель быстрее или поднимите таймаут в api.config", timeoutSec),
-			})
-			return
+			msg = fmt.Sprintf("таймаут: модель не ответила за %d сек — выберите модель быстрее или поднимите таймаут в api.config", timeoutSec)
 		}
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		writeSSE(w, sseError{Error: msg})
+		flush()
 		return
 	}
 	// elapsedMs — счётчик времени ответа модели (замер пользователя).
 	// Постпроверка: теряемые факты и запрещённые паттерны видны в UI.
-	warnings := audit.Check(letter, req.Vacancy).Warnings
-	writeJSON(w, http.StatusOK, generateResponse{Letter: letter, ElapsedMs: elapsed.Milliseconds(), Warnings: warnings})
+	warnings := audit.Check(letter, vacancy).Warnings
+	writeSSE(w, generateResponse{Done: true, Letter: letter, ElapsedMs: elapsed.Milliseconds(), Warnings: warnings})
+	flush()
+}
+
+// writeSSE — одно событие протокола Server-Sent Events.
+func writeSSE(w http.ResponseWriter, v any) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(w, "data: %s\n\n", b)
 }
 
 // fixPrompt — user-промпт режима автоправки: письмо + замечания аудита.
@@ -220,8 +275,7 @@ func fixPrompt(letter string, warnings []string) string {
 	return b.String()
 }
 
-// realLLM — продовая реализация LLMFunc: клиент из настроек; промпты
-// уже собраны сервером.
+// realLLM — буферизованный продовый клиент (фоллбэк без стриминга).
 func realLLM(ctx context.Context, system, user string) (string, error) {
 	s, err := settings.Load()
 	if err != nil {
@@ -234,6 +288,22 @@ func realLLM(ctx context.Context, system, user string) (string, error) {
 		ReasoningEffort: s.ReasoningEffort,
 		Timeout:         time.Duration(s.TimeoutSec) * time.Second,
 	}.Generate(ctx, system, user)
+}
+
+// realLLMStream — продовая реализация стриминга: клиент из настроек;
+// промпты уже собраны сервером, дельты летят в UI по мере генерации.
+func realLLMStream(ctx context.Context, system, user string, onDelta func(string)) (string, error) {
+	s, err := settings.Load()
+	if err != nil {
+		return "", errors.New("не удалось прочитать настройки: " + err.Error())
+	}
+	return llm.Client{
+		BaseURL:         s.BaseURL,
+		APIKey:          s.APIKey,
+		Model:           s.Model,
+		ReasoningEffort: s.ReasoningEffort,
+		Timeout:         time.Duration(s.TimeoutSec) * time.Second,
+	}.GenerateStream(ctx, system, user, onDelta)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

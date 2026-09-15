@@ -157,6 +157,22 @@ func TestMetricAttributionCorrectProject(t *testing.T) {
 	}
 }
 
+func TestDebeziumNotFalseClickHouseDuplicate(t *testing.T) {
+	// Регрессия: «Debezium» содержит подстроку «clickhouse» — не должен
+	// считаться упоминанием ClickHouse в секции пробелов.
+	letter := `Чем могу быть полезен:
+• Идемпотентность через ClickHouse Upsert (Stable ID, Kafka).
+
+Честно о пробелах:
+• NiFi/Camel/Debezium/OpenTelemetry — опыта нет, готов освоить.`
+	r := Check(letter, "")
+	for _, w := range r.Warnings {
+		if strings.Contains(w, "одновременно") {
+			t.Errorf("ложный дубль из-за Debezium: %s", w)
+		}
+	}
+}
+
 func TestHonestGapNotFlaggedAsDuplicate(t *testing.T) {
 	// Horizon только в пробелах («не работал») — это правильный пробел, не дубль.
 	letter := `Чем могу быть полезен:

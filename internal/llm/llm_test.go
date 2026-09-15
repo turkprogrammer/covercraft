@@ -123,3 +123,70 @@ func TestGenerateSurfacesEmptyChoices(t *testing.T) {
 		t.Error("хочу ошибку на пустых choices")
 	}
 }
+
+/* ---------- GenerateStream ---------- */
+
+const okSSE = "data: {\"choices\":[{\"delta\":{\"content\":\"Здравствуйте\"}}]}\n" +
+	"\n" +
+	"data: {\"choices\":[{\"delta\":{\"content\":\", мир.\"}}]}\n" +
+	"\n" +
+	"data: [DONE]\n\n"
+
+func TestGenerateStreamCollectsDeltas(t *testing.T) {
+	f := newFakeAPI(t, 200, okSSE)
+	c := Client{BaseURL: f.url, APIKey: "sk-test", Model: "test-model", Timeout: 5 * time.Second}
+
+	var got []string
+	full, err := c.GenerateStream(context.Background(), "sys", "user", func(d string) {
+		got = append(got, d)
+	})
+	if err != nil {
+		t.Fatalf("GenerateStream: %v", err)
+	}
+	if full != "Здравствуйте, мир." {
+		t.Errorf("полный текст = %q", full)
+	}
+	if len(got) != 2 || got[0] != "Здравствуйте" || got[1] != ", мир." {
+		t.Errorf("onDelta получил %q", got)
+	}
+	if !f.gotReq.Stream {
+		t.Error("запрос должен идти со stream: true")
+	}
+	if f.gotAuth != "Bearer sk-test" {
+		t.Errorf("Authorization = %q", f.gotAuth)
+	}
+	if len(f.gotReq.Messages) != 2 {
+		t.Errorf("messages: %d записей, хочу 2", len(f.gotReq.Messages))
+	}
+}
+
+func TestGenerateStreamSurfacesHTTPError(t *testing.T) {
+	f := newFakeAPI(t, 429, `{"error":{"message":"rate limited"}}`)
+	c := Client{BaseURL: f.url, Timeout: 5 * time.Second}
+
+	_, err := c.GenerateStream(context.Background(), "sys", "user", nil)
+	if err == nil || !strings.Contains(err.Error(), "429") || !strings.Contains(err.Error(), "rate limited") {
+		t.Errorf("ошибка должна содержать статус и тело: %v", err)
+	}
+}
+
+func TestGenerateStreamSurfacesErrorInsideStream(t *testing.T) {
+	// Часть провайдеров шлёт ошибку событием уже внутри 200-потока.
+	body := "data: {\"error\":{\"message\":\"quota exceeded\"}}\n\n"
+	f := newFakeAPI(t, 200, body)
+	c := Client{BaseURL: f.url, Timeout: 5 * time.Second}
+
+	_, err := c.GenerateStream(context.Background(), "sys", "user", nil)
+	if err == nil || !strings.Contains(err.Error(), "quota exceeded") {
+		t.Errorf("хочу ошибку из потока: %v", err)
+	}
+}
+
+func TestGenerateStreamRejectsEmptyStream(t *testing.T) {
+	f := newFakeAPI(t, 200, ": keep-alive\n\n")
+	c := Client{BaseURL: f.url, Timeout: 5 * time.Second}
+
+	if _, err := c.GenerateStream(context.Background(), "sys", "user", nil); err == nil {
+		t.Error("хочу ошибку, когда дельт не было вовсе")
+	}
+}
