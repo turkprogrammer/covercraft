@@ -198,7 +198,9 @@ func TestGenerateStream_DataNoSpace(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		chunk := `data:{"choices":[{"delta":{"content":"%s"}}]}` + "\n\n"
-		fmt.Fprint(w, fmt.Sprintf(chunk, "Привет")+fmt.Sprintf(chunk, ", мир")+"data:[DONE]\n\n")
+		// Пустые события ("data:" без payload) валидны по спеке и
+		// не должны обрывать поток.
+		fmt.Fprint(w, fmt.Sprintf(chunk, "Привет")+"data:\n\n"+fmt.Sprintf(chunk, ", мир")+"data: \n\n"+"data:[DONE]\n\n")
 	}))
 	defer srv.Close()
 
