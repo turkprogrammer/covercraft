@@ -137,23 +137,22 @@ type generateRequest struct {
 	Warnings []string `json:"warnings,omitempty"`
 }
 
-// generateResponse — финальное событие done в SSE-потоке /api/generate.
+// sseDelta — событие дельты в SSE-потоке /api/generate: кусок письма
+// по мере генерации.
+type sseDelta struct {
+	Delta string `json:"delta"`
+}
+
+// sseDone — финальное событие done в SSE-потоке /api/generate.
 // ElapsedMs — сколько отвечала модель. Warnings — результаты постпроверки
 // письма (internal/audit): пустой срез, если письмо чистое.
-type generateResponse struct {
+type sseDone struct {
 	Done      bool     `json:"done"`
 	Letter    string   `json:"letter"`
 	ElapsedMs int64    `json:"elapsedMs"`
 	Warnings  []string `json:"warnings,omitempty"`
 }
 
-// sseDelta — промежуточное событие: кусочек текста по мере генерации.
-type sseDelta struct {
-	Delta string `json:"delta"`
-}
-
-// sseError — событие ошибки внутри SSE-потока (после старта стрима код
-// HTTP уже 200, поэтому ошибки доходят как событие, а не статус-код).
 type sseError struct {
 	Error string `json:"error"`
 }
@@ -209,6 +208,8 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
 // генерации (каждая с flush — UI обновляется живьём), в конце событие
 // done с полным текстом, elapsedMs и warnings постпроверки. Ошибки после
 // старта стрима идут событием {"error": ...}: заголовки уже отправлены.
+// Если клиент отвалился (esc-abort), записи прекращаются, но upstream
+// дожидается до конца — проще, чем канцелять LLMStreamFunc.
 func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc, system, user, vacancy string, timeoutSec int) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -219,9 +220,17 @@ func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc
 		}
 	}
 
+	// writeErr — клиент отключился; дальше в мёртвый writer не пишем.
+	writeErr := false
 	start := time.Now()
 	letter, err := fn(ctx, system, user, func(delta string) {
-		writeSSE(w, sseDelta{Delta: delta})
+		if writeErr {
+			return
+		}
+		if e := writeSSE(w, sseDelta{Delta: delta}); e != nil {
+			writeErr = true
+			return
+		}
 		flush()
 	})
 	elapsed := time.Since(start)
@@ -231,24 +240,31 @@ func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc
 		if errors.Is(err, context.DeadlineExceeded) {
 			msg = fmt.Sprintf("таймаут: модель не ответила за %d сек — выберите модель быстрее или поднимите таймаут в api.config", timeoutSec)
 		}
-		writeSSE(w, sseError{Error: msg})
+		if !writeErr {
+			writeSSE(w, sseError{Error: msg})
+		}
 		flush()
 		return
 	}
 	// elapsedMs — счётчик времени ответа модели (замер пользователя).
 	// Постпроверка: теряемые факты и запрещённые паттерны видны в UI.
 	warnings := audit.Check(letter, vacancy).Warnings
-	writeSSE(w, generateResponse{Done: true, Letter: letter, ElapsedMs: elapsed.Milliseconds(), Warnings: warnings})
+	if !writeErr {
+		writeSSE(w, sseDone{Done: true, Letter: letter, ElapsedMs: elapsed.Milliseconds(), Warnings: warnings})
+	}
 	flush()
 }
 
-// writeSSE — одно событие протокола Server-Sent Events.
-func writeSSE(w http.ResponseWriter, v any) {
+// writeSSE — одно событие протокола Server-Sent Events. Ошибка обычно
+// означает, что клиент отключился; json.Marshal здесь упасть не может
+// (простые структуры), поэтому любая ошибка трактуется как обрыв записи.
+func writeSSE(w http.ResponseWriter, v any) error {
 	b, err := json.Marshal(v)
 	if err != nil {
-		return
+		return err
 	}
-	fmt.Fprintf(w, "data: %s\n\n", b)
+	_, werr := fmt.Fprintf(w, "data: %s\n\n", b)
+	return werr
 }
 
 // fixPrompt — user-промпт режима автоправки: письмо + замечания аудита.
@@ -275,11 +291,12 @@ func fixPrompt(letter string, warnings []string) string {
 	return b.String()
 }
 
-// realLLM — буферизованный продовый клиент (фоллбэк без стриминга).
-func realLLM(ctx context.Context, system, user string) (string, error) {
+// clientFromSettings — LLM-клиент из сохранённых настроек; общий для
+// буферизованного и стримингового путей.
+func clientFromSettings() (llm.Client, error) {
 	s, err := settings.Load()
 	if err != nil {
-		return "", errors.New("не удалось прочитать настройки: " + err.Error())
+		return llm.Client{}, fmt.Errorf("не удалось прочитать настройки: %w", err)
 	}
 	return llm.Client{
 		BaseURL:         s.BaseURL,
@@ -287,23 +304,26 @@ func realLLM(ctx context.Context, system, user string) (string, error) {
 		Model:           s.Model,
 		ReasoningEffort: s.ReasoningEffort,
 		Timeout:         time.Duration(s.TimeoutSec) * time.Second,
-	}.Generate(ctx, system, user)
+	}, nil
+}
+
+// realLLM — буферизованный продовый клиент (фоллбэк без стриминга).
+func realLLM(ctx context.Context, system, user string) (string, error) {
+	c, err := clientFromSettings()
+	if err != nil {
+		return "", err
+	}
+	return c.Generate(ctx, system, user)
 }
 
 // realLLMStream — продовая реализация стриминга: клиент из настроек;
 // промпты уже собраны сервером, дельты летят в UI по мере генерации.
 func realLLMStream(ctx context.Context, system, user string, onDelta func(string)) (string, error) {
-	s, err := settings.Load()
+	c, err := clientFromSettings()
 	if err != nil {
-		return "", errors.New("не удалось прочитать настройки: " + err.Error())
+		return "", err
 	}
-	return llm.Client{
-		BaseURL:         s.BaseURL,
-		APIKey:          s.APIKey,
-		Model:           s.Model,
-		ReasoningEffort: s.ReasoningEffort,
-		Timeout:         time.Duration(s.TimeoutSec) * time.Second,
-	}.GenerateStream(ctx, system, user, onDelta)
+	return c.GenerateStream(ctx, system, user, onDelta)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

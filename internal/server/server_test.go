@@ -117,7 +117,7 @@ func fakeLLM(t *testing.T, status int, sse string) string {
 // sseEvents — разобранный ответ /api/generate в тестах.
 type sseEvents struct {
 	Deltas []string
-	Done   *generateResponse
+	Done   *sseDone
 	Err    string
 }
 
@@ -142,7 +142,7 @@ func parseSSE(t *testing.T, body string) sseEvents {
 		case probe.Error != "":
 			ev.Err = probe.Error
 		case probe.Done:
-			ev.Done = &generateResponse{}
+			ev.Done = &sseDone{}
 			if err := json.Unmarshal([]byte(payload), ev.Done); err != nil {
 				t.Fatalf("битое done-событие: %v", err)
 			}

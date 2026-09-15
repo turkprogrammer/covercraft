@@ -590,6 +590,7 @@ async function generate() {
   startTimer("генерация", t0);
   els.result.textContent = "";
   els.copy.disabled = true;
+  let live = 0;
   try {
     const data = await streamGenerate(
       { vacancy: els.vacancy.value, systemPrompt: els.systemPrompt.value },
@@ -597,7 +598,8 @@ async function generate() {
         els.result.textContent += delta;
         // Автоскролл: письмо растёт, конец текста остаётся на виду.
         els.result.scrollTop = els.result.scrollHeight;
-        countChars();
+        live += delta.length;
+        els.count.textContent = live + " chars";
       },
     );
     showAuditWarnings(data.warnings);
@@ -664,6 +666,7 @@ async function auditFix() {
   startTimer("автоправка", t0);
   const letter = els.result.textContent; // исходное письмо — до очистки поля
   els.result.textContent = "";
+  let live = 0;
   try {
     const data = await streamGenerate(
       {
@@ -676,7 +679,8 @@ async function auditFix() {
       delta => {
         els.result.textContent += delta;
         els.result.scrollTop = els.result.scrollHeight;
-        countChars();
+        live += delta.length;
+        els.count.textContent = live + " chars";
       },
     );
     showAuditWarnings(data.warnings);
@@ -748,9 +752,11 @@ async function boot() {
   document.addEventListener("keydown", e => {
     if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); generate(); }
     if (e.key === "Escape") {
-      // Останов активной генерации + очистка результата.
+      // Останов активной генерации + очистка результата. Письмо очищено —
+      // панель замечаний (и список для auto-fix) тоже уходит.
       if (genAbort) genAbort.abort();
       els.result.textContent = ""; els.copy.disabled = true; countChars();
+      showAuditWarnings([]);
     }
   });
   els.vacancy.focus();
