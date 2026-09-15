@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -100,17 +101,56 @@ func TestSettingsRejectsBadJSON(t *testing.T) {
 	}
 }
 
-// fakeLLM — реальный HTTP-сервер, но отвечает всегда одинаково.
-func fakeLLM(t *testing.T, status int, resp string) string {
+// fakeLLM — реальный HTTP-сервер, отвечающий SSE-потоком /chat/completions.
+func fakeLLM(t *testing.T, status int, sse string) string {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(10 * time.Millisecond) // чтобы elapsedMs был замерен, а не 0
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(status)
-		_, _ = w.Write([]byte(resp))
+		_, _ = w.Write([]byte(sse))
 	}))
 	t.Cleanup(srv.Close)
 	return srv.URL
+}
+
+// sseEvents — разобранный ответ /api/generate в тестах.
+type sseEvents struct {
+	Deltas []string
+	Done   *generateResponse
+	Err    string
+}
+
+// parseSSE разбирает события "data: {...}\n\n" из тела ответа сервера.
+func parseSSE(t *testing.T, body string) sseEvents {
+	t.Helper()
+	var ev sseEvents
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		var probe struct {
+			Delta string `json:"delta"`
+			Done  bool   `json:"done"`
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(payload), &probe); err != nil {
+			t.Fatalf("битое SSE-событие %q: %v", payload, err)
+		}
+		switch {
+		case probe.Error != "":
+			ev.Err = probe.Error
+		case probe.Done:
+			ev.Done = &generateResponse{}
+			if err := json.Unmarshal([]byte(payload), ev.Done); err != nil {
+				t.Fatalf("битое done-событие: %v", err)
+			}
+		default:
+			ev.Deltas = append(ev.Deltas, probe.Delta)
+		}
+	}
+	return ev
 }
 
 func TestGenerateEndpointHappyPath(t *testing.T) {
@@ -140,18 +180,24 @@ func TestGenerateEndpointHappyPath(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("код = %d, тело: %s", rec.Code, rec.Body.String())
 	}
-	var out struct {
-		Letter    string `json:"letter"`
-		ElapsedMs int64  `json:"elapsedMs"`
+	if ct := rec.Header().Get("Content-Type"); ct != "text/event-stream" {
+		t.Errorf("Content-Type = %q, хочу text/event-stream", ct)
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-		t.Fatalf("ответ не JSON: %v", err)
+	ev := parseSSE(t, rec.Body.String())
+	if ev.Err != "" {
+		t.Fatalf("неожиданная ошибка в стриме: %q", ev.Err)
 	}
-	if out.Letter != "Письмо готово." {
-		t.Errorf("letter = %q", out.Letter)
+	if ev.Done == nil {
+		t.Fatal("нет done-события")
 	}
-	if out.ElapsedMs <= 0 {
-		t.Errorf("elapsedMs = %d, хочу > 0 — UI показывает время ответа модели", out.ElapsedMs)
+	if len(ev.Deltas) == 0 || strings.Join(ev.Deltas, "") != ev.Done.Letter {
+		t.Errorf("дельты %q должны склеиваться в letter %q", ev.Deltas, ev.Done.Letter)
+	}
+	if ev.Done.Letter != "Письмо готово." {
+		t.Errorf("letter = %q", ev.Done.Letter)
+	}
+	if ev.Done.ElapsedMs <= 0 {
+		t.Errorf("elapsedMs = %d, хочу > 0 — UI показывает время ответа модели", ev.Done.ElapsedMs)
 	}
 }
 
@@ -171,14 +217,11 @@ func TestGenerateEndpointAuditWarnings(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("код = %d, тело: %s", rec.Code, rec.Body.String())
 	}
-	var out struct {
-		Letter   string   `json:"letter"`
-		Warnings []string `json:"warnings"`
+	ev := parseSSE(t, rec.Body.String())
+	if ev.Done == nil {
+		t.Fatal("нет done-события")
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-		t.Fatal(err)
-	}
-	if len(out.Warnings) == 0 {
+	if len(ev.Done.Warnings) == 0 {
 		t.Error("фреймворки в стеке письма не помечены предупреждением")
 	}
 }
@@ -213,15 +256,12 @@ func TestGenerateEndpointAuditFix(t *testing.T) {
 	if !strings.Contains(gotUser, "Стек: Go, PHP, ML, Laravel.") {
 		t.Errorf("в промпт автоправки не попало письмо: %q", gotUser)
 	}
-	var out struct {
-		Letter   string   `json:"letter"`
-		Warnings []string `json:"warnings"`
+	ev := parseSSE(t, rec.Body.String())
+	if ev.Done == nil {
+		t.Fatal("нет done-события")
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-		t.Fatal(err)
-	}
-	if len(out.Warnings) != 0 {
-		t.Errorf("исправленное письмо не должно иметь замечаний: %v", out.Warnings)
+	if len(ev.Done.Warnings) != 0 {
+		t.Errorf("исправленное письмо не должно иметь замечаний: %v", ev.Done.Warnings)
 	}
 }
 
@@ -264,15 +304,15 @@ func TestGenerateEndpointSurfacesLLMError(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("ошибка LLM: код = %d, хочу 502, тело: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ошибка LLM после старта SSE: код = %d, тело: %s", rec.Code, rec.Body.String())
 	}
-	var out struct {
-		Error string `json:"error"`
+	ev := parseSSE(t, rec.Body.String())
+	if !strings.Contains(ev.Err, "модель недоступна") {
+		t.Errorf("ошибка должна прийти событием и дойти до UI: %q", ev.Err)
 	}
-	json.Unmarshal(rec.Body.Bytes(), &out)
-	if !strings.Contains(out.Error, "модель недоступна") {
-		t.Errorf("текст ошибки должен доходить до UI: %q", out.Error)
+	if ev.Done != nil {
+		t.Error("done-события при ошибке быть не должно")
 	}
 }
 
@@ -313,9 +353,10 @@ func TestGenerateEndpointUsesCustomPrompt(t *testing.T) {
 }
 
 func TestGenerateUsesConfiguredClient(t *testing.T) {
-	// Настройки, сохранённые через /api/settings, должны попадать в LLM-вызов.
+	// Настройки, сохранённые через /api/settings, должны попадать в LLM-вызов;
+	// запрос — со stream: true (прод идёт по стриминговому пути).
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	base := fakeLLM(t, 200, `{"choices":[{"message":{"content":"ok"}}]}`)
+	base := fakeLLM(t, 200, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n")
 	if err := settings.Save(settings.Settings{
 		BaseURL: base, APIKey: "k", Model: "m", ReasoningEffort: "none",
 	}); err != nil {
@@ -332,18 +373,44 @@ func TestGenerateUsesConfiguredClient(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("код = %d, тело: %s", rec.Code, rec.Body.String())
 	}
-	var out struct {
-		Letter    string `json:"letter"`
-		ElapsedMs int64  `json:"elapsedMs"`
+	ev := parseSSE(t, rec.Body.String())
+	if ev.Err != "" || ev.Done == nil || ev.Done.Letter != "ok" {
+		t.Fatalf("ответ стрима: err=%q done=%+v", ev.Err, ev.Done)
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-		t.Fatal(err)
+	if ev.Done.ElapsedMs <= 0 {
+		t.Errorf("elapsedMs = %d, хочу > 0", ev.Done.ElapsedMs)
 	}
-	if out.Letter != "ok" {
-		t.Errorf("letter = %q, хочу %q", out.Letter, "ok")
+}
+
+// TestGenerateEndpointStreamsDeltas — заданный LLMStream шов отдаёт дельты
+// по мере генерации: сервер транслирует их в SSE-события по одной.
+func TestGenerateEndpointStreamsDeltas(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	h := New(Config{
+		ContextDir: t.TempDir(),
+		LLMStream: func(ctx context.Context, system, user string, onDelta func(string)) (string, error) {
+			for _, d := range []string{"Здрав", "ствуйте", ", мир!"} {
+				time.Sleep(5 * time.Millisecond) // чтобы elapsedMs был не 0
+				onDelta(d)
+			}
+			return "Здравствуйте, мир!", nil
+		},
+	})
+	body, _ := json.Marshal(map[string]string{"vacancy": "V"})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+
+	ev := parseSSE(t, rec.Body.String())
+	if want := []string{"Здрав", "ствуйте", ", мир!"}; !reflect.DeepEqual(ev.Deltas, want) {
+		t.Errorf("дельты = %q, хочу %q", ev.Deltas, want)
 	}
-	if out.ElapsedMs <= 0 {
-		t.Errorf("elapsedMs = %d, хочу > 0", out.ElapsedMs)
+	if ev.Done == nil || ev.Done.Letter != "Здравствуйте, мир!" {
+		t.Fatalf("done-событие: %+v", ev.Done)
+	}
+	if ev.Done.ElapsedMs <= 0 {
+		t.Errorf("elapsedMs = %d, хочу > 0", ev.Done.ElapsedMs)
 	}
 }
 
@@ -372,15 +439,12 @@ func TestGenerateEndpointTimesOut(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusGatewayTimeout {
-		t.Fatalf("код = %d, хочу 504, тело: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("код = %d, тело: %s", rec.Code, rec.Body.String())
 	}
-	var out struct {
-		Error string `json:"error"`
-	}
-	json.Unmarshal(rec.Body.Bytes(), &out)
-	if !strings.Contains(out.Error, "таймаут") {
-		t.Errorf("ошибка должна говорить про таймаут: %q", out.Error)
+	ev := parseSSE(t, rec.Body.String())
+	if !strings.Contains(ev.Err, "таймаут") {
+		t.Errorf("ошибка должна говорить про таймаут: %q", ev.Err)
 	}
 }
 
