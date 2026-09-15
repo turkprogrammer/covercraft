@@ -210,8 +210,9 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
 // генерации (каждая с flush — UI обновляется живьём), в конце событие
 // done с полным текстом, elapsedMs и warnings постпроверки. Ошибки после
 // старта стрима идут событием {"error": ...}: заголовки уже отправлены.
-// Если клиент отвалился (esc-abort), записи прекращаются, но upstream
-// дожидается до конца — проще, чем канцелять LLMStreamFunc.
+// Если клиент отвалился (esc-abort), записи прекращаются, а upstream
+// отменяется через ctx: он derived от r.Context(), который http-сервер
+// отменяет при обрыве соединения (GenerateStream учитывает ctx в c.do).
 func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc, system, user, vacancy string, timeoutSec int) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
