@@ -138,6 +138,9 @@ func (c Client) GenerateStream(ctx context.Context, system, user string, onDelta
 		// Спека SSE разрешает и "data: x", и "data:x" — часть провайдеров
 		// шлёт второй вариант.
 		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" {
+			continue // пустое событие ("data:") — валидно по спеке SSE
+		}
 		if payload == "[DONE]" {
 			break
 		}

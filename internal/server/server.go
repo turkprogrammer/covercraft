@@ -153,6 +153,8 @@ type sseDone struct {
 	Warnings  []string `json:"warnings,omitempty"`
 }
 
+// sseError — событие ошибки внутри SSE-потока: после старта стрима код
+// HTTP уже 200, поэтому ошибки доходят событием, а не статус-кодом.
 type sseError struct {
 	Error string `json:"error"`
 }
@@ -241,7 +243,7 @@ func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc
 			msg = fmt.Sprintf("таймаут: модель не ответила за %d сек — выберите модель быстрее или поднимите таймаут в api.config", timeoutSec)
 		}
 		if !writeErr {
-			writeSSE(w, sseError{Error: msg})
+			_ = writeSSE(w, sseError{Error: msg}) // best-effort: клиент мог отвалиться
 		}
 		flush()
 		return
@@ -250,7 +252,7 @@ func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc
 	// Постпроверка: теряемые факты и запрещённые паттерны видны в UI.
 	warnings := audit.Check(letter, vacancy).Warnings
 	if !writeErr {
-		writeSSE(w, sseDone{Done: true, Letter: letter, ElapsedMs: elapsed.Milliseconds(), Warnings: warnings})
+		_ = writeSSE(w, sseDone{Done: true, Letter: letter, ElapsedMs: elapsed.Milliseconds(), Warnings: warnings}) // best-effort
 	}
 	flush()
 }
