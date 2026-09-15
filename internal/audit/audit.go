@@ -181,7 +181,10 @@ var obligations = []obligation{
 		fact: "Highload-требование: метрики профиля (92% F1 / P95 < 4.2ms / 10 000 RPS) отсутствуют",
 	},
 	{
-		need: mustRE(`(?i)php.*(senior|middle)|laravel|symfony|тест`),
+		// PHPUnit + TDD обязателен ТОЛЬКО для PHP-primary. Слово «тест» в
+		// Go-вакансии не запускает это правило: для Go-primary PHPUnit в
+		// письме запрещён (правило промпта), тесты закрываются «155+ тестов».
+		need: mustRE(`(?i)(php.*(senior|middle)|laravel|symfony|bitrix|битрикс)`),
 		has:  mustRE(`(?i)phpunit`),
 		fact: "PHP-primary: PHPUnit + TDD обязателен в буллете",
 	},
@@ -224,7 +227,15 @@ func Check(letter, vacancy string) Result {
 	dupSeen := map[string]bool{}
 	if gapIdx := gapSectionIndex(letter); gapIdx >= 0 {
 		bullets := strings.ToLower(letter[:gapIdx])
-		gap := strings.ToLower(letter[gapIdx:])
+		gapAll := strings.ToLower(letter[gapIdx:])
+		// Секция пробелов заканчивается строкой стека/контактами — в стек
+		// «ClickHouse» входит законно и не должен считаться упоминанием в пробелах.
+		gap := gapAll
+		for _, stop := range []string{"стек:", "stack:", "+7", "telegram:"} {
+			if i := strings.Index(gap, stop); i >= 0 {
+				gap = gap[:i]
+			}
+		}
 		// Вырезаем имена чужих технологий из секции пробелов: «Debezium»
 		// содержит подстроку «clickhouse» и ловился бы как ложный дубль.
 		for _, term := range foreignGapTerms {
