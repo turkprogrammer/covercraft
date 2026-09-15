@@ -103,7 +103,7 @@ go build -o covercraft .
 Основной путь — готовый бинарник из [Releases](https://github.com/turkprogrammer/covercraft/releases):
 
 ```bash
-tar xzf covercraft_0.1.0_linux_amd64.tar.gz
+tar xzf covercraft_0.1.2_linux_amd64.tar.gz
 ./covercraft
 ```
 
@@ -192,9 +192,9 @@ reasoning effort), постпроверка писем (запрещённые �
 ```bash
 mkdir -p dist
 go build -o covercraft .
-tar czf dist/covercraft_0.1.0_linux_amd64.tar.gz covercraft README.md LICENSE
-sha256sum dist/covercraft_0.1.0_linux_amd64.tar.gz \
-  > dist/covercraft_0.1.0_linux_amd64.tar.gz.sha256
+tar czf dist/covercraft_0.1.2_linux_amd64.tar.gz covercraft README.md LICENSE
+sha256sum dist/covercraft_0.1.2_linux_amd64.tar.gz \
+  > dist/covercraft_0.1.2_linux_amd64.tar.gz.sha256
 ```
 
 `context/` в архив не входит: он приватен и создаётся каждым
