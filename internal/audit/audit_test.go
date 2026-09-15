@@ -173,6 +173,26 @@ func TestDebeziumNotFalseClickHouseDuplicate(t *testing.T) {
 	}
 }
 
+func TestStackLineAfterGapsNotFalseDuplicate(t *testing.T) {
+	// Регрессия: Kafka/ClickHouse в строке стека (после секции пробелов) —
+	// законные; детектор дублей обязан останавливаться на границе «Стек:».
+	letter := `Чем могу быть полезен:
+• Go и highload: Stable ID (Kafka, 10 000 RPS), ClickHouse Upsert.
+
+Честно о пробелах:
+• С MongoDB не работал; опыт с NoSQL ограничен Redis, готов освоить.
+
+Стек: Go, PHP, ML, PostgreSQL, Redis, Kafka, ClickHouse, Docker
+
++7 (963) 896-93-42 | Telegram: @example`
+	r := Check(letter, "")
+	for _, w := range r.Warnings {
+		if strings.Contains(w, "одновременно") {
+			t.Errorf("ложный дубль из-за строки стека: %s", w)
+		}
+	}
+}
+
 func TestHonestGapNotFlaggedAsDuplicate(t *testing.T) {
 	// Horizon только в пробелах («не работал») — это правильный пробел, не дубль.
 	letter := `Чем могу быть полезен:
