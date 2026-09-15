@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -188,5 +189,25 @@ func TestGenerateStreamRejectsEmptyStream(t *testing.T) {
 
 	if _, err := c.GenerateStream(context.Background(), "sys", "user", nil); err == nil {
 		t.Error("хочу ошибку, когда дельт не было вовсе")
+	}
+}
+
+// SSE без пробела после "data:" — разрешено спекой, часть провайдеров
+// так шлёт. Дельты должны собираться так же, как с пробелом.
+func TestGenerateStream_DataNoSpace(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunk := `data:{"choices":[{"delta":{"content":"%s"}}]}` + "\n\n"
+		fmt.Fprint(w, fmt.Sprintf(chunk, "Привет")+fmt.Sprintf(chunk, ", мир")+"data:[DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	c := Client{BaseURL: srv.URL, Model: "m"}
+	got, err := c.GenerateStream(context.Background(), "s", "u", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "Привет, мир" {
+		t.Fatalf("got %q", got)
 	}
 }

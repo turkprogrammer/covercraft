@@ -26,30 +26,27 @@ type Client struct {
 	Timeout         time.Duration
 }
 
-// Generate отправляет system+user промпт и возвращает текст ответа.
-func (c Client) Generate(ctx context.Context, system, user string) (string, error) {
-	req := chatRequest{
-		Model: c.Model,
-		Messages: []message{
-			{Role: "system", Content: system},
-			{Role: "user", Content: user},
-		},
-		ReasoningEffort: c.ReasoningEffort,
-	}
+// do отправляет chat-запрос на /chat/completions и возвращает ответ.
+// Общий для Generate и GenerateStream: заголовки, UA, авторизация,
+// таймаут. accept — значение заголовка Accept ("" — не отправлять).
+func (c Client) do(ctx context.Context, req chatRequest, accept string) (*http.Response, error) {
 	raw, err := json.Marshal(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	base := strings.TrimSuffix(c.BaseURL, "/")
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		base+"/chat/completions", bytes.NewReader(raw))
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	// Явный UA: некоторые WAF провайдеров режут дефолтный Go-http-client.
 	httpReq.Header.Set("User-Agent", "covercraft/1.0")
+	if accept != "" {
+		httpReq.Header.Set("Accept", accept)
+	}
 	if c.APIKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
@@ -62,7 +59,29 @@ func (c Client) Generate(ctx context.Context, system, user string) (string, erro
 
 	resp, err := hc.Do(httpReq)
 	if err != nil {
-		return "", fmt.Errorf("не удалось связаться с %s: %w", base, err)
+		return nil, fmt.Errorf("не удалось связаться с %s: %w", base, err)
+	}
+	return resp, nil
+}
+
+// prompt — стандартная пара сообщений для /chat/completions.
+func prompt(system, user string) []message {
+	return []message{
+		{Role: "system", Content: system},
+		{Role: "user", Content: user},
+	}
+}
+
+// Generate отправляет system+user промпт и возвращает текст ответа.
+func (c Client) Generate(ctx context.Context, system, user string) (string, error) {
+	req := chatRequest{
+		Model:           c.Model,
+		Messages:        prompt(system, user),
+		ReasoningEffort: c.ReasoningEffort,
+	}
+	resp, err := c.do(ctx, req, "")
+	if err != nil {
+		return "", err
 	}
 	defer resp.Body.Close()
 
@@ -90,42 +109,14 @@ func (c Client) Generate(ctx context.Context, system, user string) (string, erro
 // накопленный полный текст; при обрыве — то, что успело прийти, и ошибку.
 func (c Client) GenerateStream(ctx context.Context, system, user string, onDelta func(string)) (string, error) {
 	req := chatRequest{
-		Model: c.Model,
-		Messages: []message{
-			{Role: "system", Content: system},
-			{Role: "user", Content: user},
-		},
+		Model:           c.Model,
+		Messages:        prompt(system, user),
 		ReasoningEffort: c.ReasoningEffort,
 		Stream:          true,
 	}
-	raw, err := json.Marshal(req)
+	resp, err := c.do(ctx, req, "text/event-stream")
 	if err != nil {
 		return "", err
-	}
-
-	base := strings.TrimSuffix(c.BaseURL, "/")
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		base+"/chat/completions", bytes.NewReader(raw))
-	if err != nil {
-		return "", err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	// Явный UA: некоторые WAF провайдеров режут дефолтный Go-http-client.
-	httpReq.Header.Set("User-Agent", "covercraft/1.0")
-	httpReq.Header.Set("Accept", "text/event-stream")
-	if c.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
-
-	timeout := c.Timeout
-	if timeout == 0 {
-		timeout = 300 * time.Second // reasoning-модели думают минутами
-	}
-	hc := &http.Client{Timeout: timeout}
-
-	resp, err := hc.Do(httpReq)
-	if err != nil {
-		return "", fmt.Errorf("не удалось связаться с %s: %w", base, err)
 	}
 	defer resp.Body.Close()
 	// Ошибка провайдера приходит до первой дельты — можно отдать обычную
@@ -141,10 +132,12 @@ func (c Client) GenerateStream(ctx context.Context, system, user string, onDelta
 	sc.Buffer(make([]byte, 0, 64<<10), 1<<20) // строки SSE могут быть длинными
 	for sc.Scan() {
 		line := sc.Text()
-		if !strings.HasPrefix(line, "data: ") {
+		if !strings.HasPrefix(line, "data:") {
 			continue // комментарии, keep-alive, пустые строки
 		}
-		payload := strings.TrimPrefix(line, "data: ")
+		// Спека SSE разрешает и "data: x", и "data:x" — часть провайдеров
+		// шлёт второй вариант.
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if payload == "[DONE]" {
 			break
 		}
