@@ -53,6 +53,7 @@ func TestForbiddenPatterns(t *testing.T) {
 		"С Python не работал (основной стек — Go)":           "основной стек",
 		"поиск ближайших соседей реализовывал на ClickHouse": "соседей",
 		"ClickHouse для кэширования эмбеддингов":             "эмбеддингов",
+		"Redis (кэш, блокировки) в production":               "блокиров",
 	}
 	for letter, name := range cases {
 		r := Check(letter, "")
@@ -205,5 +206,49 @@ func TestHonestGapNotFlaggedAsDuplicate(t *testing.T) {
 		if strings.Contains(w, "одновременно") {
 			t.Errorf("честный пробел помечен как дубль: %s", w)
 		}
+	}
+}
+
+func TestBareStackLineAfterGapsNotFalseDuplicate(t *testing.T) {
+	// Регрессия: модель иногда пишет строку стека БЕЗ префикса «Стек:».
+	// Детектор дублей не должен считать её частью секции пробелов.
+	letter := `Чем могу быть полезен:
+• Go и highload: Stable ID (Kafka, 10 000 RPS), ClickHouse Upsert.
+
+Честно о пробелах:
+• С MongoDB не работал; опыт с NoSQL ограничен Redis, готов освоить.
+
+Go, PHP, ML, PostgreSQL, Redis, Kafka, ClickHouse, Docker
+
++7 (963) 896-93-42 | Telegram: @example`
+	r := Check(letter, "")
+	for _, w := range r.Warnings {
+		if strings.Contains(w, "одновременно") {
+			t.Errorf("ложный дубль из-за голой строки стека (без «Стек:»): %s", w)
+		}
+	}
+}
+
+func TestBareStackLineWithFrameworkFlagged(t *testing.T) {
+	// Голая строка стека (без «Стек:») с фреймворками тоже должна ловиться.
+	letter := `Чем могу быть полезен:
+• Что-то.
+
+Честно о пробелах:
+• С Kubernetes не работал, готов освоить.
+
+Go, PHP, ML, Laravel, Symfony, Yii2, Docker`
+	r := Check(letter, "")
+	got := strings.Join(r.Warnings, "|")
+	if !strings.Contains(got, "в строке стека") {
+		t.Errorf("голая строка стека с фреймворками не поймана: %s", got)
+	}
+}
+
+func TestRedisLocksAllowedWhenVacancyNeeds(t *testing.T) {
+	// Вакансия прямо требует блокировки/rate limiting — упоминание законно.
+	r := Check("• Инфраструктура: Redis (кэш, блокировки).", "Требуется rate limiting и блокировки на Redis")
+	if !r.OK() {
+		t.Errorf("блокировки при требовании вакансии помечены ошибочно: %v", r.Warnings)
 	}
 }

@@ -34,6 +34,12 @@ var forbidden = []struct {
 	{"поиск ближайших соседей", "k-NN/ANN как опыт — эмбеддингов и векторного поиска в профиле нет", nil},
 	{"кэширования эмбеддингов", "Эмбеддинги как опыт — в профиле их нет (кэш = текстовые ключи)", nil},
 	{"эмбеддинг", "Упоминание эмбеддингов — проверить: в профиле эмбеддингов нет", nil},
+	{"блокиров", "Блокировки (Redis) без требования в вакансии — заменить на «Redis (кэш)»", func(v string) bool {
+		vl := strings.ToLower(v)
+		return strings.Contains(vl, "блокиров") || strings.Contains(vl, "rate limit") ||
+			strings.Contains(vl, "rate-limit") || strings.Contains(vl, "локинг") ||
+			strings.Contains(vl, "lock")
+	}},
 }
 
 // Плейсхолдеры вида [Название вакансии], <роль>, {{...}} — письмо не готово.
@@ -47,6 +53,11 @@ var frameWords = []string{"laravel", "symfony", "yii2", "lumen"}
 
 // stackLineRe — строка стека в любом виде: «Стек: …», «**Стек:** …», «Stack:».
 var stackLineRe = regexp.MustCompile(`(?i)^\W*(стек|stack)\s*:?\W*`)
+
+// bareStackRe — «голая» строка стека: перечень технологий через запятую,
+// начинающийся с языка («Go, PHP, ML, Kafka, …»). Модель иногда теряет
+// префикс «Стек:» — опознаём такую строку по форме, а не по слову.
+var bareStackRe = regexp.MustCompile(`(?i)^\W*(?:go|golang|php|python|java|rust|kotlin|typescript|javascript|ml|sql|bash)\s*[,;]`)
 
 // dupTechs — технологии, которые модель любит дублировать: заявить как опыт
 // в буллетах и тут же повторить в «Честно о пробелах».
@@ -227,15 +238,21 @@ func Check(letter, vacancy string) Result {
 	dupSeen := map[string]bool{}
 	if gapIdx := gapSectionIndex(letter); gapIdx >= 0 {
 		bullets := strings.ToLower(letter[:gapIdx])
-		gapAll := strings.ToLower(letter[gapIdx:])
 		// Секция пробелов заканчивается строкой стека/контактами — в стек
-		// «ClickHouse» входит законно и не должен считаться упоминанием в пробелах.
-		gap := gapAll
-		for _, stop := range []string{"стек:", "stack:", "+7", "telegram:"} {
-			if i := strings.Index(gap, stop); i >= 0 {
-				gap = gap[:i]
+		// «ClickHouse» и «Kafka» входят законно и не должны считаться
+		// упоминанием в пробелах. Границу ищем построчно: модель иногда
+		// теряет префикс «Стек:», поэтому строку стека опознаём и по
+		// форме перечня (isStackLine), а не только по слову «Стек».
+		var gapLines []string
+		for _, line := range strings.Split(letter[gapIdx:], "\n") {
+			lt := strings.ToLower(strings.TrimSpace(line))
+			if isStackLine(line) || strings.HasPrefix(lt, "+7") ||
+				strings.HasPrefix(lt, "telegram:") || strings.HasPrefix(lt, "github") {
+				break
 			}
+			gapLines = append(gapLines, lt)
 		}
+		gap := strings.Join(gapLines, "\n")
 		// Вырезаем имена чужих технологий из секции пробелов: «Debezium»
 		// содержит подстроку «clickhouse» и ловился бы как ложный дубль.
 		for _, term := range foreignGapTerms {
@@ -258,7 +275,7 @@ func Check(letter, vacancy string) Result {
 
 	// Фреймворки/инструменты в строке стека — полный список запрещённых слов.
 	for _, line := range strings.Split(letter, "\n") {
-		if !stackLineRe.MatchString(strings.TrimSpace(line)) {
+		if !isStackLine(line) {
 			continue
 		}
 		ll := strings.ToLower(line)
@@ -283,6 +300,20 @@ func Check(letter, vacancy string) Result {
 	r.Warnings = append(r.Warnings, checkMetricAttribution(letter)...)
 
 	return r
+}
+
+// isStackLine — строка стека в любом виде: с префиксом («Стек: …»,
+// «**Стек:** …») или «голым» перечнем технологий. Голая строка считается
+// стеком только если это чистый перечень (≥2 запятых, без скобок и тире),
+// чтобы не принять за стек обычный буллет или предложение.
+func isStackLine(line string) bool {
+	t := strings.TrimSpace(line)
+	if stackLineRe.MatchString(t) {
+		return true
+	}
+	return bareStackRe.MatchString(t) &&
+		strings.Count(t, ",") >= 2 &&
+		!strings.ContainsAny(t, "(—:[")
 }
 
 // gapSectionIndex — начало секции честных пробелов (несколько формулировок).
