@@ -74,6 +74,10 @@ func TestEvaluateSingleMissingIsCaveats(t *testing.T) {
 	if !adviceHas(f.Advice, "критичен ли он для этой вакансии") {
 		t.Errorf("совет должен называть пробел и предлагать оценить критичность: %+v", f.Advice)
 	}
+	// Заголовок уже называет единственный пробел — построчного дубля нет.
+	if adviceHas(f.Advice, "не закрыто ничем") {
+		t.Errorf("при одном missing построчный совет дублирует заголовок: %+v", f.Advice)
+	}
 }
 
 // Два незакрытых must-have — skip: дырки много, откликаться не стоит.
@@ -83,6 +87,29 @@ func TestEvaluateSkipOnTwoMissing(t *testing.T) {
 	f := Evaluate(reqs, profileGo, letter, "вакансия")
 	if f.Verdict != Skip {
 		t.Errorf("verdict = %q, хочу %q: два missing — skip", f.Verdict, Skip)
+	}
+	// При skip построчные советы обязательны: заголовок имён не называет.
+	for _, r := range f.Missing {
+		if !adviceHas(f.Advice, "«"+r.Text+"» не закрыто ничем") {
+			t.Errorf("нет построчного совета для «%s»: %+v", r.Text, f.Advice)
+		}
+	}
+}
+
+// Живой кейс (SQL-вакансия): один must-have закрыт профилем (совет
+// «впиши в письмо» — полезен и остаётся), один — missing. Вердикт —
+// caveats, заголовок называет missing; построчного дубля быть не должно.
+func TestEvaluateMixedProfileAndSingleMissing(t *testing.T) {
+	reqs := mustReqs([]string{"Опыт с ClickHouse", "Опыт эксплуатации Kubernetes в проде"}, nil, "go-primary")
+	f := Evaluate(reqs, profileGo, "Стек: Go, Kafka", "вакансия")
+	if f.Verdict != Caveats {
+		t.Errorf("verdict = %q, хочу %q: профиль-закрытие + один missing", f.Verdict, Caveats)
+	}
+	if !adviceHas(f.Advice, "впиши в письмо") {
+		t.Errorf("совет «впиши в письмо» должен остаться: %+v", f.Advice)
+	}
+	if adviceHas(f.Advice, "не закрыто ничем") {
+		t.Errorf("построчный совет про единственный missing дублирует заголовок: %+v", f.Advice)
 	}
 }
 
