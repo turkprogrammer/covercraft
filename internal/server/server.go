@@ -26,6 +26,7 @@ import (
 	"github.com/turkprogrammer/covercraft/frontend"
 	"github.com/turkprogrammer/covercraft/internal/audit"
 	"github.com/turkprogrammer/covercraft/internal/cover"
+	"github.com/turkprogrammer/covercraft/internal/fit"
 	"github.com/turkprogrammer/covercraft/internal/llm"
 	"github.com/turkprogrammer/covercraft/internal/settings"
 )
@@ -43,6 +44,9 @@ type Config struct {
 	ContextDir string        // папка context/*.md; может не существовать
 	LLM        LLMFunc       // если nil — используется реальный клиент из settings
 	LLMStream  LLMStreamFunc // если nil — буферизованный LLM (без стриминга)
+	// FitLLM — LLM для извлечения требований вакансии (internal/fit);
+	// если nil — тот же LLM, что и для письма.
+	FitLLM LLMFunc
 }
 
 // Handler обрабатывает запросы UI.
@@ -56,6 +60,13 @@ func New(cfg Config) *Handler {
 	testLLM := cfg.LLM // заданный в тестах LLM без LLMStream буферизуем
 	if cfg.LLM == nil {
 		cfg.LLM = realLLM
+	}
+	if cfg.FitLLM == nil {
+		if testLLM != nil {
+			cfg.FitLLM = testLLM // тесты: извлечение через тот же fake
+		} else {
+			cfg.FitLLM = realLLM // прод: тот же клиент, отдельный вызов
+		}
 	}
 	if cfg.LLMStream == nil {
 		if testLLM != nil {
@@ -151,6 +162,10 @@ type sseDone struct {
 	Letter    string   `json:"letter"`
 	ElapsedMs int64    `json:"elapsedMs"`
 	Warnings  []string `json:"warnings,omitempty"`
+	// Fit — рекомендация отклика (internal/fit): вердикт, скор
+	// соответствия и расшифровка покрытия. nil — если разбор вакансии
+	// не удался или не успел: письмо важнее фита, панель не рендерится.
+	Fit *fit.Fit `json:"fit,omitempty"`
 }
 
 // sseError — событие ошибки внутри SSE-потока: после старта стрима код
@@ -203,17 +218,22 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
 		user = cover.BuildUserPrompt(h.cfg.ContextDir, req.Vacancy)
 	}
 
-	streamGenerate(w, ctx, h.cfg.LLMStream, system, user, req.Vacancy, timeoutSec)
+	streamGenerate(w, ctx, h.cfg.LLMStream, fit.LLMFunc(h.cfg.FitLLM), system, user, req.Vacancy, fit.LoadProfile(h.cfg.ContextDir), timeoutSec)
 }
 
 // streamGenerate вызывает LLM и пишет ответ как SSE: дельты по мере
 // генерации (каждая с flush — UI обновляется живьём), в конце событие
-// done с полным текстом, elapsedMs и warnings постпроверки. Ошибки после
-// старта стрима идут событием {"error": ...}: заголовки уже отправлены.
-// Если клиент отвалился (esc-abort), записи прекращаются, а upstream
-// отменяется через ctx: он derived от r.Context(), который http-сервер
-// отменяет при обрыве соединения (GenerateStream учитывает ctx в c.do).
-func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc, system, user, vacancy string, timeoutSec int) {
+// done с полным текстом, elapsedMs, warnings постпроверки и вердиктом
+// фита. Ошибки после старта стрима идут событием {"error": ...}:
+// заголовки уже отправлены.
+//
+// Параллелизм: пока модель пишет письмо (fn), вторая горутина просит
+// ту же модель разобрать вакансию на требования (fnExtract, шаг 1 фита).
+// Извлечение живёт в канале буфером 1: горутина гарантированно
+// завершается (ctx отменяет upstream при обрыве клиента), отправка
+// никогда не блокируется, значение передаётся копией. На ошибке письма
+// канал не читается — горутина уже завершилась сама.
+func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc, fnExtract fit.LLMFunc, system, user, vacancy, profile string, timeoutSec int) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
@@ -222,6 +242,21 @@ func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc
 			f.Flush()
 		}
 	}
+
+	// Шаг 1 фита — параллельно с генерацией письма.
+	type extraction struct {
+		reqs fit.Requirements
+		ok   bool // false — разбор не удался, вердикта не будет
+	}
+	exCh := make(chan extraction, 1)
+	go func() {
+		reqs, err := fit.ExtractRequirements(ctx, fnExtract, vacancy)
+		if err != nil {
+			exCh <- extraction{}
+			return
+		}
+		exCh <- extraction{reqs: reqs, ok: true}
+	}()
 
 	// writeErr — клиент отключился; дальше в мёртвый writer не пишем.
 	writeErr := false
@@ -252,8 +287,25 @@ func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc
 	// elapsedMs — счётчик времени ответа модели (замер пользователя).
 	// Постпроверка: теряемые факты и запрещённые паттерны видны в UI.
 	warnings := audit.Check(letter, vacancy).Warnings
+
+	// Шаг 2 фита — детерминированный, ноль токенов. Если письмо готово,
+	// а разбор ещё идёт — ждём его в пределах того же ctx: параллельно,
+	// так что латентность не добавляется. Не успел — done уйдёт без фита.
+	var verdict *fit.Fit
+	select {
+	case ex := <-exCh:
+		if ex.ok {
+			f := fit.Evaluate(ex.reqs, profile, letter, vacancy)
+			if f.Verdict != "" {
+				verdict = &f
+			}
+		}
+	case <-ctx.Done():
+		// письмо важнее фита
+	}
+
 	if !writeErr {
-		_ = writeSSE(w, sseDone{Done: true, Letter: letter, ElapsedMs: elapsed.Milliseconds(), Warnings: warnings}) // best-effort
+		_ = writeSSE(w, sseDone{Done: true, Letter: letter, ElapsedMs: elapsed.Milliseconds(), Warnings: warnings, Fit: verdict}) // best-effort
 	}
 	flush()
 }
