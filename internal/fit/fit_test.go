@@ -586,6 +586,31 @@ func TestEvaluateConsistencyConcept(t *testing.T) {
 	}
 }
 
+// Живой регресс платёжной вакансии: ограничитель профиля перевешивает
+// метку моста. Профиль содержит «(мост к outbox)» в блоке фактов и живой
+// ограничитель «Transactional outbox: НЕ использовал» — matcher не должен
+// советовать «впиши в письмо, закроется полностью» по неприменённому
+// паттерну; честный путь — мост с оговоркой.
+func TestEvaluateProfileLimiterBeatsBridgeLabel(t *testing.T) {
+	reqs := mustReqs([]string{"Проектирование event-driven цепочек через transactional outbox на PostgreSQL"}, nil, "go-primary")
+	profile := "ОБЩИЙ ПРОФИЛЬ:\n- Надёжная доставка событий (мост к outbox): буферизация, идемпотентный Upsert, at-least-once, event-driven паттерны, PostgreSQL.\nОГРАНИЧИТЕЛИ:\n- Transactional outbox на PostgreSQL: не использовал."
+	letter := "Event-driven архитектура: Kafka consumer groups, буферизация при недоступности брокера, идемпотентность, at-least-once; PostgreSQL."
+	f := Evaluate(reqs, profile, letter, "вакансия")
+	for _, c := range f.Covered {
+		if c.Source == SrcProfile {
+			t.Errorf("ограничитель «не использовал» должен перевесить метку моста: %+v", f.Covered)
+		}
+	}
+	for _, a := range f.Advice {
+		if strings.Contains(a, "впиши в письмо") {
+			t.Errorf("совет вписать неприменённый паттерн недопустим: %q", a)
+		}
+	}
+	if len(f.Caveats) != 1 || f.Caveats[0].Source != SrcBridge {
+		t.Fatalf("ожидался мост с оговоркой: %+v", f)
+	}
+}
+
 // adviceHas — проверка, что среди советов есть содержащий подстроку.
 func adviceHas(list []string, sub string) bool {
 	for _, s := range list {
