@@ -96,6 +96,10 @@ func TestBuildUserPromptChecklist(t *testing.T) {
 	if !strings.Contains(withChecklist, "не выдумывай") {
 		t.Error("чек-лист должен запрещать выдумывать факты")
 	}
+	// Требование конкретики: «имею опыт» не считается закрытием.
+	if !strings.Contains(withChecklist, "конкретный проект и факт") {
+		t.Errorf("чек-лист должен требовать конкретный проект/факт, а не абстракцию:\n%s", withChecklist)
+	}
 
 	without := BuildUserPrompt(dir, "V", nil)
 	if strings.Contains(without, "чек-лист") {
