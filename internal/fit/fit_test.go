@@ -383,7 +383,72 @@ func TestEvaluateSolidConceptFromProfile(t *testing.T) {
 	}
 }
 
-// adviceHas — проверка, что среди советов есть содержащий подстроку.
+// Живой кейс (платёжная вакансия): письмо честно называет пробел
+// («С OpenTelemetry опыта нет, готов освоить»). Голая подстрока считала
+// это закрытием в письме — теперь отрицание в предложении распознаётся:
+// не covered, а unknown с нотой о честном пробеле.
+func TestEvaluateNegatedFactNotCovered(t *testing.T) {
+	reqs := mustReqs([]string{"OpenTelemetry для трейсинга"}, nil, "go-primary")
+	letter := "Стек: Go, Kafka, ClickHouse.\nС OpenTelemetry опыта нет, готов освоить."
+	f := Evaluate(reqs, profileGo, letter, "вакансия")
+	if len(f.Covered) != 0 {
+		t.Errorf("отрицание («опыта нет») не должно считаться закрытием: %+v", f.Covered)
+	}
+	if len(f.Caveats) != 1 || f.Caveats[0].Source != SrcUnknown {
+		t.Fatalf("честный пробел должен стать unknown-кавеатом: %+v", f.Caveats)
+	}
+	if !strings.Contains(f.Caveats[0].Note, "честно назван пробел") {
+		t.Errorf("нота должна отличать честный пробел от молчаливого пропуска: %q", f.Caveats[0].Note)
+	}
+}
+
+// Регресс: отрицание в соседнем предложении не роняет валидный факт.
+func TestEvaluateNegationSentenceScoped(t *testing.T) {
+	reqs := mustReqs([]string{"Опыт с Kafka и ClickHouse"}, nil, "go-primary")
+	letter := "Не работал с Kubernetes.\nСтек: Go, Kafka, ClickHouse."
+	f := Evaluate(reqs, profileGo, letter, "вакансия")
+	if len(f.Covered) != 1 || f.Covered[0].Source != SrcLetter {
+		t.Errorf("факт в другом предложении должен закрывать требование письмом: %+v", f)
+	}
+}
+
+// Logbroker — «Kafka-like» (формулировка вакансии): требование про
+// Logbroker закрывается письмом, где назван Kafka + event-driven.
+func TestEvaluateLogbrokerSynonym(t *testing.T) {
+	reqs := mustReqs([]string{"Logbroker (Kafka-like) как event bus"}, nil, "go-primary")
+	letter := "Kafka consumer groups, event-driven паттерны, at-least-once."
+	f := Evaluate(reqs, profileGo, letter, "вакансия")
+	if len(f.Covered) != 1 || f.Covered[0].Source != SrcLetter {
+		t.Errorf("Logbroker должен синонимично закрываться Kafka из письма: %+v", f)
+	}
+}
+
+// Outbox-мост: transactional outbox в письме/профиле не назван, но есть
+// честные якоря — событийный журнал, буферизация, идемпотентность.
+// Bridge (0.5, оговорка), а не «не закрыто ничем».
+func TestEvaluateOutboxBridge(t *testing.T) {
+	reqs := mustReqs([]string{"Проектирование event-driven цепочек через transactional outbox на PostgreSQL"}, nil, "go-primary")
+	letter := "Kafka producer с буферизацией при недоступности брокера, идемпотентность через Upsert, at-least-once."
+	f := Evaluate(reqs, profileGo, letter, "вакансия")
+	if len(f.Caveats) != 1 || f.Caveats[0].Source != SrcBridge {
+		t.Fatalf("outbox должен закрываться мостом с оговоркой: %+v", f.Caveats)
+	}
+	if !strings.Contains(f.Caveats[0].Note, "идемпотентн") {
+		t.Errorf("нота моста должна называть якоря: %q", f.Caveats[0].Note)
+	}
+}
+
+// Observability-мост: в письме Prometheus + Grafana — требование
+// «выстраивание observability» закрывается мостом, не missing.
+func TestEvaluateObservabilityBridge(t *testing.T) {
+	reqs := mustReqs([]string{"Выстраивание observability"}, nil, "go-primary")
+	letter := "Prometheus + Grafana: 3 дашборда, 23 панели, алертинг."
+	f := Evaluate(reqs, profileGo, letter, "вакансия")
+	if len(f.Caveats) != 1 || f.Caveats[0].Source != SrcBridge {
+		t.Errorf("observability должен закрываться мостом: %+v", f.Caveats)
+	}
+}
+
 // adviceHas — проверка, что среди советов есть содержащий подстроку.
 func adviceHas(list []string, sub string) bool {
 	for _, s := range list {
