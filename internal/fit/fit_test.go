@@ -412,6 +412,48 @@ func TestEvaluateNegationSentenceScoped(t *testing.T) {
 	}
 }
 
+// Регресс (живой прогон): профиль-ограничитель «OpenTelemetry: опыта
+// интеграции НЕТ» не должен считаться фактом — иначе matcher советует
+// вписать в письмо то, чего нет.
+func TestEvaluateProfileLimiterNotFact(t *testing.T) {
+	reqs := mustReqs([]string{"OpenTelemetry — трейсинг на всех уровнях"}, nil, "go-primary")
+	profile := "СТЕК: Go, Kafka.\nОграничители:\n- OpenTelemetry: опыта интеграции НЕТ (честный пробел)."
+	letter := "Стек: Go, Kafka.\nС OpenTelemetry опыта нет, готов освоить."
+	f := Evaluate(reqs, profile, letter, "вакансия")
+	for _, c := range f.Covered {
+		if c.Source == SrcProfile {
+			t.Errorf("ограничитель профиля не должен засчитываться фактом: %+v", f.Covered)
+		}
+	}
+	if len(f.Caveats) != 1 || f.Caveats[0].Source != SrcUnknown {
+		t.Fatalf("честный пробел (письмо + ограничитель профиля) должен стать unknown: %+v", f.Caveats)
+	}
+}
+
+// Регресс (живой прогон): письмо честно отрицает outbox, а профиль
+// содержит мост-факт с упоминанием outbox — приоритет у честного пробела
+// письма: unknown, а не совет «впиши transactional в письмо».
+func TestEvaluateLetterHonestGapBeatsProfile(t *testing.T) {
+	reqs := mustReqs([]string{"Проектирование event-driven цепочек через transactional outbox"}, nil, "go-primary")
+	profile := "ОБЩИЙ ПРОФИЛЬ:\n- Надёжная доставка событий (мост к outbox): буферизация, идемпотентный Upsert, at-least-once, event-driven паттерны."
+	letter := "Kafka, event-driven архитектуры.\nTransactional outbox на PostgreSQL не использовал; близкий опыт — событийный журнал в БД с polling-потребителями, готов применить паттерн."
+	f := Evaluate(reqs, profile, letter, "вакансия")
+	for _, c := range f.Covered {
+		if strings.Contains(c.Note, "впиши в письмо") {
+			t.Errorf("письмо честно отрицает outbox — совет «впиши в письмо» недопустим: %+v", c)
+		}
+	}
+	foundUnknown := false
+	for _, c := range f.Caveats {
+		if c.Source == SrcUnknown && strings.Contains(c.Note, "честно назван пробел") {
+			foundUnknown = true
+		}
+	}
+	if !foundUnknown {
+		t.Fatalf("честный пробел письма должен победить профиль: %+v", f)
+	}
+}
+
 // Logbroker — «Kafka-like» (формулировка вакансии): требование про
 // Logbroker закрывается письмом, где назван Kafka + event-driven.
 func TestEvaluateLogbrokerSynonym(t *testing.T) {
@@ -446,6 +488,38 @@ func TestEvaluateObservabilityBridge(t *testing.T) {
 	f := Evaluate(reqs, profileGo, letter, "вакансия")
 	if len(f.Caveats) != 1 || f.Caveats[0].Source != SrcBridge {
 		t.Errorf("observability должен закрываться мостом: %+v", f.Caveats)
+	}
+}
+
+// Честные пробелы, названные в письме, не должны ронять вердикт в skip
+// через порог unknown (иначе скрытие пробелов даёт лучший вердикт, чем
+// честность). Три честных пробела + закрытое ядро → caveats, не skip.
+func TestEvaluateHonestGapsDoNotSkip(t *testing.T) {
+	reqs := Requirements{Role: "go-primary"}
+	for _, m := range []string{
+		"Go — основной язык для новых сервисов",
+		"OpenTelemetry — трейсинг на всех уровнях",
+		"Проектирование через transactional outbox",
+		"Kubernetes — эксплуатация",
+	} {
+		reqs.MustHave = append(reqs.MustHave, Requirement{Text: m, Kind: "must", Category: "stack"})
+	}
+	profile := "ОБЩИЙ ПРОФИЛЬ: Go — основной язык; сервисы на Go."
+	letter := "Go — мой основной язык, сервисы в проде.\n" +
+		"С OpenTelemetry опыта нет, готов освоить.\n" +
+		"Transactional outbox не использовал; близкий опыт — событийный журнал в БД, готов применить паттерн.\n" +
+		"С Kubernetes опыта эксплуатации нет, понимаю архитектуру, готов освоить."
+	f := Evaluate(reqs, profile, letter, "вакансия")
+	if f.Verdict == Skip {
+		t.Fatalf("честное письмо не должно получать skip: %+v", f)
+	}
+	if f.Verdict != Caveats {
+		t.Errorf("ожидался caveats: %s", f.Verdict)
+	}
+	for _, a := range f.Advice {
+		if strings.Contains(a, "проверь вручную") && strings.Contains(a, "OpenTelemetry") {
+			t.Errorf("честный пробел не должен попадать в свод «проверь вручную»: %q", a)
+		}
 	}
 }
 
