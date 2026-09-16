@@ -398,7 +398,7 @@ func tokenNegatedOnly(token, text string) bool {
 func matchTokens(tokens []string, src, text, letter string) (string, string, bool) {
 	all := true
 	for _, t := range tokens {
-		if !findFact(t, text) || tokenNegatedOnly(t, letter) {
+		if !countsAsFact(t, src, text, letter) {
 			all = false
 			break
 		}
@@ -412,7 +412,7 @@ func matchTokens(tokens []string, src, text, letter string) (string, string, boo
 	var missing []string
 	found := 0
 	for _, t := range tokens {
-		if findFact(t, text) && !tokenNegatedOnly(t, letter) {
+		if countsAsFact(t, src, text, letter) {
 			found++
 		} else {
 			missing = append(missing, t)
@@ -425,6 +425,36 @@ func matchTokens(tokens []string, src, text, letter string) (string, string, boo
 		return src, "закрыто в письме; не упомянуты: " + strings.Join(missing, ", ") + " — добавь", true
 	}
 	return "", "", false
+}
+
+// countsAsFact — токен считается фактом в источнике. Два ограничителя:
+//   - токен, честно отрицанный в письме, не засчитывается нигде (включая
+//     профиль): честный пробел письма приоритетнее любого факта профиля,
+//     иначе matcher советует вписать неприменённый опыт;
+//   - токен, отрицанный в клаузе профиля (строка-ограничитель), не
+//     засчитывается как факт профиля, даже если в другой клаузе профиля он
+//     упомянут как метка моста. Живой кейс платёжной вакансии: метка
+//     «(мост к outbox)» в общем профиле давала «в профиле есть факт — впиши
+//     в письмо, закроется полностью» при живом ограничителе
+//     «Transactional outbox на PostgreSQL: НЕ использовал» — совет заявить
+//     неприменённый паттерн.
+func countsAsFact(t, src, text, letter string) bool {
+	if !findFact(t, text) || tokenNegatedOnly(t, letter) {
+		return false
+	}
+	return src != SrcProfile || !declinedInProfile(t, text)
+}
+
+// declinedInProfile — токен назван в отрицающей клаузе профиля: это
+// ограничитель («НЕ использовал», «опыта нет»), а не факт для письма.
+func declinedInProfile(token, profile string) bool {
+	clauses := sentences(profile)
+	for i, c := range clauses {
+		if findText(token, c) && clauseNegated(clauses, i) {
+			return true
+		}
+	}
+	return false
 }
 
 // coverage — где требование закрыто. Порядок проверки: (1) технологии
