@@ -320,7 +320,7 @@ func findText(token, text string) bool {
 // называющее пробел («С OpenTelemetry опыта нет, готов освоить»), не
 // должно считаться закрытием требования — это живой кейс, когда честное
 // письмо получало «закрыто в письме» по голой подстроке.
-var negRe = regexp.MustCompile(`(?i)опыта нет|нет опыта|не работал|не использ|готов освоить|освою|не приходилось`)
+var negRe = regexp.MustCompile(`(?i)опыта нет|нет опыта|опыта\s+(?:\S+\s+)?нет|не работал|не использ|готов освоить|освою|не приходилось`)
 
 // sentences — разбивка текста на предложения (по .!?\n): отрицание
 // действует в границах своего предложения, «не работал с Kubernetes» в
@@ -379,7 +379,11 @@ func coverage(req Requirement, letter, profile string) (source, note string) {
 	} {
 		all := true
 		for _, t := range tokens {
-			if !findFact(t, src.text) {
+			// Токен, честно отрицанный в письме («Transactional outbox не
+			// использовал»), не засчитывается нигде — включая профиль:
+			// честный пробел письма приоритетнее любого факта профиля,
+			// иначе matcher советует вписать неприменённый опыт.
+			if !findFact(t, src.text) || tokenNegatedOnly(t, letter) {
 				all = false
 				break
 			}
@@ -406,7 +410,7 @@ func coverage(req Requirement, letter, profile string) (source, note string) {
 		var missing []string
 		found := 0
 		for _, t := range tokens {
-			if findFact(t, src.text) {
+			if findFact(t, src.text) && !tokenNegatedOnly(t, letter) {
 				found++
 			} else {
 				missing = append(missing, t)
@@ -549,13 +553,21 @@ func Evaluate(reqs Requirements, profile, letter, vacancy string) Fit {
 		case SrcBridge:
 			brN++
 		case SrcUnknown:
+			if strings.HasPrefix(c.Note, "в письме честно назван пробел") {
+				// Честный пробел, названный в письме словами, — не «нет
+				// данных» в смысле риска: кандидат сам раскрыл пробел,
+				// проверять вручную нечего, а наказывать честное письмо
+				// skip'ом — перверсия стимулов (скрытие пробелов давало
+				// бы лучший вердикт). В skip-пороге unknown не участвует.
+				continue
+			}
 			unkN++
 		}
 	}
 	switch {
 	case missN >= 2 || (missN == 1 && unkN >= 2) || unkN >= 3 || brN >= 3 || roleMismatch(reqs, profile):
 		f.Verdict = Skip
-	case missN == 1 || brN >= 1 || unkN >= 1:
+	case missN == 1 || brN >= 1 || unkN >= 1 || len(f.Caveats) > 0:
 		f.Verdict = Caveats // оговорка обязана назвать слабое место — Advice уже заполнен
 	default:
 		f.Verdict = Apply
@@ -585,15 +597,18 @@ func Evaluate(reqs Requirements, profile, letter, vacancy string) Fit {
 		f.Advice = append(f.Advice, missingAdvice...)
 	}
 	// unknown — одним сводным советом, а не построчно: шесть одинаковых
-	// строк «проверь вручную» — шум, а не помощь.
+	// строк «проверь вручную» — шум, а не помощь. Честные пробелы письма
+	// в свод не входят: кандидат их сам раскрыл, «проверь вручную» не нужно.
 	if unkN > 0 {
 		var texts []string
 		for _, c := range f.Caveats {
-			if c.Source == SrcUnknown {
+			if c.Source == SrcUnknown && !strings.HasPrefix(c.Note, "в письме честно назван пробел") {
 				texts = append(texts, "«"+c.Text+"»")
 			}
 		}
-		f.Advice = append(f.Advice, "по "+strconv.Itoa(unkN)+" требовани"+unknownPlural(unkN)+" в профиле нет данных — проверь вручную, это не значит «опыта нет»: "+strings.Join(texts, ", "))
+		if len(texts) > 0 {
+			f.Advice = append(f.Advice, "по "+strconv.Itoa(unkN)+" требовани"+unknownPlural(unkN)+" в профиле нет данных — проверь вручную, это не значит «опыта нет»: "+strings.Join(texts, ", "))
+		}
 	}
 	sort.SliceStable(f.Covered, func(i, j int) bool { return f.Covered[i].Source < f.Covered[j].Source })
 	return f
