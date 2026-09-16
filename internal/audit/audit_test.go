@@ -252,3 +252,37 @@ func TestRedisLocksAllowedWhenVacancyNeeds(t *testing.T) {
 		t.Errorf("блокировки при требовании вакансии помечены ошибочно: %v", r.Warnings)
 	}
 }
+
+// Живой регресс платёжной вакансии: технология в секции пробелов как ЯКОРЬ
+// МОСТА — не дубль. Маркер отрицания («не использовал») стоит до неё, в
+// клаузе другого требования; хвостовой поиск давал ложный warning, а auto-fix
+// по нему требовал убрать якорь (сломав мост) и жёг генерации.
+func TestBridgeAnchorInGapsIsNotDuplicate(t *testing.T) {
+	letter := `Чем могу быть полезен:
+• Go и highload: Stable ID (Kafka, at-least-once, идемпотентность через ClickHouse Upsert).
+• Event-driven архитектура: Kafka consumer groups, буферизация при недоступности брокера.
+
+Честно о пробелах:
+• Transactional outbox: не использовал; мост — буферизация + идемпотентность + at-least-once (Stable ID: буферизованный продюсер, досылка при недоступности Kafka, идемпотентный Upsert).
+
+Стек: Go, Kafka, PostgreSQL`
+	r := Check(letter, "")
+	if got := strings.Join(r.Warnings, "\n"); strings.Contains(got, "kafka") {
+		t.Errorf("якорь моста помечен дублем (ложный warning жёг auto-fix):\n%s", got)
+	}
+}
+
+// Обратный случай: утвердительная подача технологии в пробелах при заявленном
+// факте в буллетах — противоречие, warning обязан остаться.
+func TestAffirmativeTechInGapsStillWarns(t *testing.T) {
+	letter := `• Очереди: Kafka в production, consumer groups.
+
+Честно о пробелах:
+• С Elasticsearch не работал; с Kafka работал в двух проектах.
+
+Стек: Go`
+	r := Check(letter, "")
+	if got := strings.Join(r.Warnings, "\n"); !strings.Contains(got, "kafka") {
+		t.Errorf("утвердительный дубль Kafka не помечен:\n%s", got)
+	}
+}
