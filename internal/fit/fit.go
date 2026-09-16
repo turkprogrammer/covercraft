@@ -84,6 +84,7 @@ var synonyms = map[string][]string{
 	"victoriametrics": {"victoriametrics", "vm"},
 	"argocd":          {"argocd", "argo cd", "argo-cd"},
 	"1c":              {"1с", "1c", "битрикс"},
+	"kafka":           {"kafka", "logbroker"}, // Logbroker — «Kafka-like» event bus (формулировка вакансий)
 }
 
 // bridge — мост: требование без прямого факта, но с соседним опытом
@@ -102,6 +103,8 @@ var bridges = map[string]bridge{
 	"elasticsearch":   {regexp.MustCompile(`(?i)clickhouse|поиск|индекс|логи`), "мост: опыт поисковых индексов → Elasticsearch"},
 	"rabbitmq":        {regexp.MustCompile(`(?i)kafka|очеред|брокер`), "мост: опыт брокеров сообщений → RabbitMQ"},
 	"rag":             {regexp.MustCompile(`(?i)классификац|машинн|ml|модел`), "мост: ML-опыт → RAG"},
+	"outbox":          {regexp.MustCompile(`(?i)at-least-once|идемпотентн|буферизац|polling|событийн.{0,20}журнал|журнал.{0,20}событ`), "мост: событийный журнал в БД с polling-потребителями (geolocation.alerts), буферизованный продюсер и идемпотентный Upsert → transactional outbox (без атомарности с транзакцией PG и брокерной доставки)"},
+	"observability":   {regexp.MustCompile(`(?i)prometheus|grafana|мониторинг|трейсин|трейс`), "мост: опыт мониторинга метрик и дашбордов → observability"},
 }
 
 // softTerms — мягкие требования: не факты и не пробелы. Фит их не
@@ -258,8 +261,13 @@ var stopwords = map[string]bool{
 }
 
 // normToken приводит токен к каноническому имени по таблице синонимов.
+// Суффиксы «-like/-based/-style» срезаются: вакансии пишут «Kafka-like»,
+// «Go-based» — это тот же стек, а не отдельная технология.
 func normToken(tok string) string {
 	lt := strings.ToLower(strings.Trim(tok, ".-,#"))
+	for _, suf := range []string{"-like", "-based", "-style"} {
+		lt = strings.TrimSuffix(lt, suf)
+	}
 	for canon, alts := range synonyms {
 		for _, alt := range alts {
 			if lt == alt {
@@ -308,6 +316,38 @@ func findText(token, text string) bool {
 	return false
 }
 
+// negRe — маркеры отрицания опыта в предложении: письмо, честно
+// называющее пробел («С OpenTelemetry опыта нет, готов освоить»), не
+// должно считаться закрытием требования — это живой кейс, когда честное
+// письмо получало «закрыто в письме» по голой подстроке.
+var negRe = regexp.MustCompile(`(?i)опыта нет|нет опыта|не работал|не использ|готов освоить|освою|не приходилось`)
+
+// sentences — разбивка текста на предложения (по .!?\n): отрицание
+// действует в границах своего предложения, «не работал с Kubernetes» в
+// соседней строке не роняет валидный факт про Kafka.
+func sentences(text string) []string {
+	return strings.FieldsFunc(text, func(r rune) bool {
+		return r == '.' || r == '!' || r == '?' || r == '\n' || r == ';'
+	})
+}
+
+// findFact — токен назван в тексте как факт: существует предложение,
+// где токен есть, а маркера отрицания в нём нет.
+func findFact(token, text string) bool {
+	for _, s := range sentences(text) {
+		if findText(token, s) && !negRe.MatchString(s) {
+			return true
+		}
+	}
+	return false
+}
+
+// tokenNegatedOnly — токен встречается в тексте, но только с отрицанием
+// (ни одного «фактового» вхождения).
+func tokenNegatedOnly(token, text string) bool {
+	return findText(token, text) && !findFact(token, text)
+}
+
 // coverage — где требование закрыто. Порядок проверки: (1) технологии
 // требования есть в тексте целиком; (2) требование без технологий — по
 // концепт-признакам (≥2 сигнала). Источники по приоритету: письмо,
@@ -339,7 +379,7 @@ func coverage(req Requirement, letter, profile string) (source, note string) {
 	} {
 		all := true
 		for _, t := range tokens {
-			if !findText(t, src.text) {
+			if !findFact(t, src.text) {
 				all = false
 				break
 			}
@@ -366,7 +406,7 @@ func coverage(req Requirement, letter, profile string) (source, note string) {
 		var missing []string
 		found := 0
 		for _, t := range tokens {
-			if findText(t, src.text) {
+			if findFact(t, src.text) {
 				found++
 			} else {
 				missing = append(missing, t)
@@ -377,6 +417,15 @@ func coverage(req Requirement, letter, profile string) (source, note string) {
 				return SrcProfile, "в профиле есть факт по большинству токенов (не упомянуты: " + strings.Join(missing, ", ") + ") — впиши в письмо, закроется полностью"
 			}
 			return SrcLetter, "закрыто в письме; не упомянуты: " + strings.Join(missing, ", ") + " — добавь"
+		}
+	}
+	// Честный пробел: токены требования названы в письме, но только
+	// с отрицанием («С OpenTelemetry опыта нет, готов освоить»). Это не
+	// закрытие — но и не «в письме нет вообще»: модель отработала чек-лист,
+	// пробел назван словами. unknown с человеческой нотой, не missing.
+	for _, t := range tokens {
+		if tokenNegatedOnly(t, letter) {
+			return SrcUnknown, "в письме честно назван пробел («" + t + "»), а не молчаливый пропуск — для вердикта это «нет данных»"
 		}
 	}
 	// Мост: по токенам требования (Kubernetes в bridges НЕ входит —
