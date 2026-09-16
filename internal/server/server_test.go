@@ -169,6 +169,11 @@ func TestGenerateEndpointHappyPath(t *testing.T) {
 			time.Sleep(10 * time.Millisecond) // чтобы elapsedMs был замерен, а не 0
 			return "Письмо готово.", nil
 		},
+		// FitLLM — отдельный шов: иначе горутина извлечения и письмо
+		// конкурентно пишут в t/захваты (гонка под -race).
+		FitLLM: func(ctx context.Context, system, user string) (string, error) {
+			return `{"role":"go-primary","mustHave":[{"text":"Go","kind":"must","category":"stack"}]}`, nil
+		},
 	})
 
 	body, _ := json.Marshal(map[string]string{"vacancy": "Нужен Senior Go."})
@@ -198,6 +203,47 @@ func TestGenerateEndpointHappyPath(t *testing.T) {
 	}
 	if ev.Done.ElapsedMs <= 0 {
 		t.Errorf("elapsedMs = %d, хочу > 0 — UI показывает время ответа модели", ev.Done.ElapsedMs)
+	}
+	// Вердикт фита: должен прийти в done вместе с warnings.
+	if ev.Done.Fit == nil {
+		t.Fatal("нет fit-вердикта в done-событии — извлечение и матчинг не сработали")
+	}
+	if ev.Done.Fit.Verdict != "apply" && ev.Done.Fit.Verdict != "apply_with_caveats" && ev.Done.Fit.Verdict != "skip" {
+		t.Errorf("fit.verdict = %q, хочу одно из трёх состояний", ev.Done.Fit.Verdict)
+	}
+	if ev.Done.Fit.Score < 0 || ev.Done.Fit.Score > 100 {
+		t.Errorf("fit.score = %d, хочу 0..100", ev.Done.Fit.Score)
+	}
+}
+
+// TestGenerateEndpointFitSurvivesBadExtraction — битый JSON разбора
+// вакансии не должен ронять письмо: done приходит без fit-панели.
+func TestGenerateEndpointFitSurvivesBadExtraction(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	h := New(Config{
+		ContextDir: t.TempDir(),
+		LLM: func(ctx context.Context, system, user string) (string, error) {
+			return "Письмо готово.", nil
+		},
+		FitLLM: func(ctx context.Context, system, user string) (string, error) {
+			return "модель ответила прозой без JSON", nil
+		},
+	})
+	body, _ := json.Marshal(map[string]string{"vacancy": "Нужен Senior Go."})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+
+	ev := parseSSE(t, rec.Body.String())
+	if ev.Err != "" {
+		t.Fatalf("ошибка разбора вакансии не должна попадать в стрим: %q", ev.Err)
+	}
+	if ev.Done == nil || ev.Done.Letter != "Письмо готово." {
+		t.Fatalf("письмо потеряно из-за битого разбора: %+v", ev.Done)
+	}
+	if ev.Done.Fit != nil {
+		t.Errorf("fit должен отсутствовать при битом разборе, got %+v", ev.Done.Fit)
 	}
 }
 
@@ -235,6 +281,8 @@ func TestGenerateEndpointAuditFix(t *testing.T) {
 	h := New(Config{ContextDir: t.TempDir(), LLM: func(ctx context.Context, system, user string) (string, error) {
 		gotUser = user
 		return "Стек: Go, PHP, ML, PostgreSQL.\nSymfony 7.2 (E-commerce-Lite), Yii2 production, Lumen; PHPUnit + TDD.", nil // исправленное письмо
+	}, FitLLM: func(ctx context.Context, system, user string) (string, error) {
+		return "{}", nil // пустой разбор: fit не влияет на проверки автоправки
 	}})
 	body, _ := json.Marshal(map[string]any{
 		"vacancy":  "Ищем PHP-разработчика (Senior). Laravel.",
@@ -326,6 +374,9 @@ func TestGenerateEndpointUsesCustomPrompt(t *testing.T) {
 		LLM: func(ctx context.Context, system, user string) (string, error) {
 			gotSystem = system
 			return "ok", nil
+		},
+		FitLLM: func(ctx context.Context, system, user string) (string, error) {
+			return "{}", nil // отдельный шов, чтобы не гонять t-захваты параллельно
 		},
 	})
 

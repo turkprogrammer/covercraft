@@ -71,3 +71,16 @@ func TestAuditWarningsPanel(t *testing.T) {
 		}
 	}
 }
+
+func TestFitVerdictPanel(t *testing.T) {
+	// Рекомендация отклика: контейнер + отрисовка вердикта из done.fit.
+	for _, want := range []string{
+		`id="fit-verdict"`, "showFitVerdict", "data.fit",
+		"apply_with_caveats", // все три состояния вердикта различимы
+		"verdict-skip",
+	} {
+		if !strings.Contains(IndexHTML, want) {
+			t.Errorf("в UI нет части рекомендации отклика: не найдено %q", want)
+		}
+	}
+}

@@ -240,6 +240,24 @@ input:focus-visible, textarea:focus-visible {
 #audit-warns ul { margin: 0; padding-left: 18px; }
 #audit-warns li { margin: 2px 0; }
 
+/* ---------- Рекомендация отклика (internal/fit) ---------- */
+#fit-verdict {
+  border-top: 1px solid var(--border);
+  background: var(--bg-inset);
+  color: var(--ink);
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  max-height: 180px;
+  overflow: auto;
+}
+#fit-verdict .fit-title { display: block; font-weight: 700; letter-spacing: .5px; margin-bottom: 4px; }
+#fit-verdict.verdict-apply .fit-title { color: var(--ok); }
+#fit-verdict.verdict-apply_with_caveats .fit-title { color: var(--warn); }
+#fit-verdict.verdict-skip .fit-title { color: var(--danger); }
+#fit-verdict ul { margin: 0; padding-left: 18px; }
+#fit-verdict li { margin: 2px 0; }
+
 /* ---------- Кнопки: терминальные ---------- */
 button.btn {
   display: inline-flex; align-items: center; gap: 8px;
@@ -431,6 +449,7 @@ body.busy #scan {
         <div id="result" contenteditable="true" spellcheck="true" role="textbox"
              aria-multiline="true" aria-label="Сгенерированное письмо — можно отредактировать"></div>
         <div id="audit-warns" hidden></div>
+        <div id="fit-verdict" hidden></div>
       </div>
     </div>
   </section>
@@ -461,6 +480,7 @@ const els = {
   timeoutSec: $("timeoutSec"),
   vacancy: $("vacancy"), apiSub: $("api-sub"), promptSub: $("prompt-sub"),
   auditWarns: $("audit-warns"),
+  fitVerdict: $("fit-verdict"),
 };
 
 function setStatus(text, cls) {
@@ -603,6 +623,7 @@ async function generate() {
       },
     );
     showAuditWarnings(data.warnings);
+    showFitVerdict(data.fit);
     els.copy.disabled = !data.letter;
     countChars(data.elapsedMs);
     setStatus(data.letter
@@ -652,6 +673,64 @@ function showAuditWarnings(warnings) {
   box.hidden = false;
 }
 
+/* ---------- рекомендация отклика (internal/fit) ---------- */
+
+// showFitVerdict рендерит вердикт фита из события done. fit == null —
+// разбор вакансии не удался, панель просто не выходит (письмо важнее).
+function showFitVerdict(fit) {
+  const box = els.fitVerdict;
+  if (!fit || !fit.verdict) {
+    box.hidden = true;
+    box.textContent = "";
+    box.className = "";
+    return;
+  }
+  const labels = {
+    apply: "откликаться",
+    apply_with_caveats: "откликаться с оговоркой",
+    skip: "не откликаться",
+  };
+  box.textContent = "";
+  box.className = "verdict-" + fit.verdict;
+  const title = document.createElement("span");
+  title.className = "fit-title";
+  const roleLabels = { "go-primary": "go-primary", "php-primary": "php-primary", "ml-research": "ml-research", "fullstack": "fullstack" };
+  title.textContent = "→ " + labels[fit.verdict] + " · соответствие ~" + fit.score + "%" +
+    (roleLabels[fit.role] ? " · роль: " + fit.role : "");
+  box.appendChild(title);
+  const sections = [
+    ["✔ закрыто:", fit.covered, r => r.text + (r.note ? " — " + r.note : "")],
+    ["△ с оговоркой:", fit.caveats, r => r.text + (r.note ? " — " + r.note : "")],
+    ["✖ не закрыто:", fit.missing, r => r.text + (r.note ? " — " + r.note : "")],
+  ];
+  for (const [label, reqs, fmt] of sections) {
+    if (!reqs || !reqs.length) continue;
+    const b = document.createElement("b");
+    b.textContent = label;
+    box.appendChild(b);
+    const ul = document.createElement("ul");
+    for (const r of reqs) {
+      const li = document.createElement("li");
+      li.textContent = fmt(r);
+      ul.appendChild(li);
+    }
+    box.appendChild(ul);
+  }
+  if (fit.advice && fit.advice.length) {
+    const b = document.createElement("b");
+    b.textContent = "→ в письме:";
+    box.appendChild(b);
+    const ul = document.createElement("ul");
+    for (const a of fit.advice) {
+      const li = document.createElement("li");
+      li.textContent = a;
+      ul.appendChild(li);
+    }
+    box.appendChild(ul);
+  }
+  box.hidden = false;
+}
+
 // Автоправка: сервер отдаёт письмо обратно модели с списком замечаний,
 // получает исправленный текст (стримингом — видно, как модель правит) и
 // проверяет его повторно. Кнопка остаётся, пока замечания не кончатся
@@ -684,6 +763,7 @@ async function auditFix() {
       },
     );
     showAuditWarnings(data.warnings);
+    showFitVerdict(data.fit);
     countChars(data.elapsedMs);
     els.copy.disabled = !data.letter;
     setStatus(data.warnings && data.warnings.length
