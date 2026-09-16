@@ -53,21 +53,36 @@ func TestEvaluateProfileButNotLetter(t *testing.T) {
 	if len(f.Covered) != 1 || f.Covered[0].Source != SrcProfile {
 		t.Fatalf("источник должен быть profile: %+v", f.Covered)
 	}
-	if !adviceHas(f.Advice, "добавь") {
+	if !adviceHas(f.Advice, "впиши в письмо") {
 		t.Errorf("нужен совет «добавь в письмо»: %+v", f.Advice)
 	}
 }
 
 // K8s нет нигде и моста нет — missing → skip. Классический риск отклика.
-func TestEvaluateSkipOnUnclosedMust(t *testing.T) {
+// Один незакрытый must-have — caveats, а не skip: серая зона, совет называет
+// пробел и предлагает оценить его критичность. Два missing — уже skip.
+func TestEvaluateSingleMissingIsCaveats(t *testing.T) {
 	reqs := mustReqs([]string{"Опыт эксплуатации Kubernetes в проде"}, nil, "go-primary")
 	letter := "Стек: Go, Kafka"
 	f := Evaluate(reqs, profileGo, letter, "вакансия")
-	if f.Verdict != Skip {
-		t.Errorf("verdict = %q, хочу %q", f.Verdict, Skip)
+	if f.Verdict != Caveats {
+		t.Errorf("verdict = %q, хочу %q: один пробел не роняет вердикт", f.Verdict, Caveats)
 	}
 	if len(f.Missing) != 1 {
 		t.Errorf("должен быть один missing: %+v", f)
+	}
+	if !adviceHas(f.Advice, "критичен ли он для этой вакансии") {
+		t.Errorf("совет должен называть пробел и предлагать оценить критичность: %+v", f.Advice)
+	}
+}
+
+// Два незакрытых must-have — skip: дырки много, откликаться не стоит.
+func TestEvaluateSkipOnTwoMissing(t *testing.T) {
+	reqs := mustReqs([]string{"Опыт эксплуатации Kubernetes в проде", "Опыт с Docker Swarm"}, nil, "go-primary")
+	letter := "Стек: Go, Kafka"
+	f := Evaluate(reqs, profileGo, letter, "вакансия")
+	if f.Verdict != Skip {
+		t.Errorf("verdict = %q, хочу %q: два missing — skip", f.Verdict, Skip)
 	}
 }
 
@@ -264,6 +279,84 @@ func TestVerdictNamesMatchUI(t *testing.T) {
 	}
 }
 
+// Правило большинства в токен-ветке: «Linux (systemd, cron)» — systemd в
+// письме есть, cron нет. Один неупомянутый термин не должен ронять
+// требование в «не закрыто ничем»: закрыто письмом, недостающее названо.
+func TestEvaluateMajorityTokensLetter(t *testing.T) {
+	reqs := mustReqs([]string{"Знание системных сервисов ОС Linux (systemd, cron)"}, nil, "go-primary")
+	letter := "Linux 17+ лет диагностики, systemd-юниты в production, журналы."
+	profile := ""
+	f := Evaluate(reqs, profile, letter, "вакансия")
+	if f.Verdict == Skip {
+		t.Errorf("verdict = skip, но ядро требования закрыто письмом: %+v", f)
+	}
+	if len(f.Covered) != 1 || f.Covered[0].Source != SrcLetter {
+		t.Fatalf("покрытие должно быть из письма: %+v", f.Covered)
+	}
+	if !strings.Contains(f.Covered[0].Note, "cron") {
+		t.Errorf("нота должна честно называть недостающий токен: %q", f.Covered[0].Note)
+	}
+}
+
+// Большинство токенов в профиле, не в письме: закрыто профилем (0.7),
+// нота называет недостающие токены.
+func TestEvaluateMajorityTokensProfile(t *testing.T) {
+	reqs := mustReqs([]string{"Знание системных сервисов ОС Linux (systemd, cron)"}, nil, "go-primary")
+	letter := "Про другой проект."
+	profile := "Linux 17+ лет, systemd (production), /etc/crontab."
+	f := Evaluate(reqs, profile, letter, "вакансия")
+	if len(f.Covered) != 1 || f.Covered[0].Source != SrcProfile {
+		t.Fatalf("покрытие должно быть из профиля: %+v", f.Covered)
+	}
+	if !strings.Contains(f.Covered[0].Note, "cron") {
+		t.Errorf("нота должна называть недостающий токен: %q", f.Covered[0].Note)
+	}
+}
+
+// Меньше половины токенов — покрытие нет: письмо с одним «systemd» из
+// четырёх токенов требование не закрывает, идёт в missing (один — caveats).
+func TestEvaluateMinorityTokensStillMissing(t *testing.T) {
+	reqs := mustReqs([]string{"Опыт с Linux, systemd, cron и journald"}, nil, "go-primary")
+	letter := "Стек: Linux, Go, Kafka."
+	f := Evaluate(reqs, "", letter, "вакансия")
+	if f.Verdict != Caveats {
+		t.Errorf("verdict = %q, хочу caveats: 1 токен из 4 — не покрытие, но это один missing", f.Verdict)
+	}
+	if len(f.Missing) != 1 {
+		t.Errorf("требование должно быть в missing: %+v", f)
+	}
+}
+
+// Концепт «многопоточность и жизненный цикл»: требование без токенов
+// закрывается по признакам письма (горутины, ProcessManager, shutdown).
+func TestEvaluateConcurrencyConceptFromLetter(t *testing.T) {
+	reqs := mustReqs([]string{"Мультипоточное программирование, диспетчеризация процессов"}, nil, "go-primary")
+	letter := "Гео-маппинг доменов: горутины, каналы; ProcessManager в Stable ID — диспетчеризация к воркерам, graceful shutdown."
+	f := Evaluate(reqs, "", letter, "вакансия")
+	if len(f.Covered) != 1 || f.Covered[0].Source != SrcLetter {
+		t.Fatalf("концепт должен закрыться письмом по признакам: %+v", f)
+	}
+	if !strings.Contains(f.Covered[0].Note, "многопоточность") {
+		t.Errorf("нота должна называть концепт: %q", f.Covered[0].Note)
+	}
+}
+
+// Концепт SOLID: письмом не назван, но профиль содержит факты
+// (SOLID/GRASP, паттерны) — закрытие из профиля.
+func TestEvaluateSolidConceptFromProfile(t *testing.T) {
+	reqs := mustReqs([]string{"ООП, SOLID, паттерны проектирования"}, nil, "go-primary")
+	letter := "Стек: Go, Kafka, ClickHouse."
+	profile := "SOLID и GRASP — Task Flow; паттерны в production: ProcessManager + Strategy, Hexagonal, DDD."
+	f := Evaluate(reqs, profile, letter, "вакансия")
+	if len(f.Covered) != 1 || f.Covered[0].Source != SrcProfile {
+		t.Fatalf("концепт должен закрыться профилем по признакам: %+v", f)
+	}
+	if !adviceHas(f.Advice, "впиши в письмо") {
+		t.Errorf("нужен совет «впиши в письмо»: %+v", f.Advice)
+	}
+}
+
+// adviceHas — проверка, что среди советов есть содержащий подстроку.
 // adviceHas — проверка, что среди советов есть содержащий подстроку.
 func adviceHas(list []string, sub string) bool {
 	for _, s := range list {
