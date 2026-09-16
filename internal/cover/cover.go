@@ -12,8 +12,11 @@ import (
 
 // BuildUserPrompt читает все *.md из contextDir (в порядке имён файлов) и
 // собирает единый user-промпт: сначала контекст о кандидате, затем вакансия.
+// musts — тексты must-have требований вакансии (извёл fit.ExtractRequirements):
+// они идут отдельной секцией-чек-листом, чтобы модель не молча пропускала
+// неяркие факты профиля. Пустой musts — секции нет (промпт как раньше).
 // Отсутствующая папка не ошибка — промпт состоит из одной вакансии.
-func BuildUserPrompt(contextDir, vacancy string) string {
+func BuildUserPrompt(contextDir, vacancy string, musts []string) string {
 	var b strings.Builder
 	if entries, err := os.ReadDir(contextDir); err == nil {
 		var names []string
@@ -37,6 +40,19 @@ func BuildUserPrompt(contextDir, vacancy string) string {
 			b.Write(raw)
 			b.WriteString("\n\n")
 		}
+	}
+	if len(musts) > 0 {
+		b.WriteString("### Обязательный чек-лист\n\n")
+		b.WriteString("Закрой в письме каждое обязательное требование вакансии фактом из контекста выше:\n")
+		for _, m := range musts {
+			m = strings.TrimSpace(m)
+			if m == "" {
+				continue
+			}
+			b.WriteString("- " + m + "\n")
+		}
+		b.WriteString("\nЕсли факта для какого-то требования в контексте нет — не выдумывай его, " +
+			"письменно не упоминай это требование вовсе.\n\n")
 	}
 	b.WriteString("### Вакансия\n\n")
 	b.WriteString(vacancy)

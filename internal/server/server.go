@@ -205,20 +205,37 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
 
 	// Режим автоправки: письмо + замечания аудита → модель переписывает.
 	// Контекст профиля не пересобираем — правки только по списку замечаний.
-	var user string
-	if req.AuditFix {
-		if strings.TrimSpace(req.Letter) == "" || len(req.Warnings) == 0 {
-			http.Error(w, "auditFix требует letter и warnings", http.StatusBadRequest)
-			return
-		}
-		user = fixPrompt(req.Letter, req.Warnings) + "\n\n" +
-			cover.BuildUserPrompt(h.cfg.ContextDir, req.Vacancy)
-	} else {
-		// User-промпт собирает сервер: context/*.md + вакансия.
-		user = cover.BuildUserPrompt(h.cfg.ContextDir, req.Vacancy)
+	// Валидация до извлечения: битый запрос не должен трогать LLM вообще.
+	if req.AuditFix && (strings.TrimSpace(req.Letter) == "" || len(req.Warnings) == 0) {
+		http.Error(w, "auditFix требует letter и warnings", http.StatusBadRequest)
+		return
 	}
 
-	streamGenerate(w, ctx, h.cfg.LLMStream, fit.LLMFunc(h.cfg.FitLLM), system, user, req.Vacancy, fit.LoadProfile(h.cfg.ContextDir), timeoutSec)
+	// Извлечение требований вакансии — ДО генерации письма: must-have идут
+	// в промпт письма чек-листом, а тот же разбор переиспользуется в фите
+	// (один LLM-вызов на извлечение, второго нет). Ошибка разбора — не
+	// фатальна: письмо генерируется без чек-листа, вердикта не будет.
+	reqs, extractOK := fit.Requirements{}, false
+	if r, err := fit.ExtractRequirements(ctx, fit.LLMFunc(h.cfg.FitLLM), req.Vacancy); err == nil {
+		reqs, extractOK = r, true
+	}
+	musts := make([]string, 0, len(reqs.MustHave))
+	for _, m := range reqs.MustHave {
+		musts = append(musts, m.Text)
+	}
+
+	// Режим автоправки: письмо + замечания аудита → модель переписывает.
+	// Контекст профиля не пересобираем — правки только по списку замечаний.
+	var user string
+	if req.AuditFix {
+		user = fixPrompt(req.Letter, req.Warnings) + "\n\n" +
+			cover.BuildUserPrompt(h.cfg.ContextDir, req.Vacancy, musts)
+	} else {
+		// User-промпт собирает сервер: context/*.md + вакансия + чек-лист.
+		user = cover.BuildUserPrompt(h.cfg.ContextDir, req.Vacancy, musts)
+	}
+
+	streamGenerate(w, ctx, h.cfg.LLMStream, system, user, req.Vacancy, fit.LoadProfile(h.cfg.ContextDir), reqs, extractOK, timeoutSec)
 }
 
 // streamGenerate вызывает LLM и пишет ответ как SSE: дельты по мере
@@ -227,13 +244,9 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
 // фита. Ошибки после старта стрима идут событием {"error": ...}:
 // заголовки уже отправлены.
 //
-// Параллелизм: пока модель пишет письмо (fn), вторая горутина просит
-// ту же модель разобрать вакансию на требования (fnExtract, шаг 1 фита).
-// Извлечение живёт в канале буфером 1: горутина гарантированно
-// завершается (ctx отменяет upstream при обрыве клиента), отправка
-// никогда не блокируется, значение передаётся копией. На ошибке письма
-// канал не читается — горутина уже завершилась сама.
-func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc, fnExtract fit.LLMFunc, system, user, vacancy, profile string, timeoutSec int) {
+// reqs/extractOK — уже выполненный шаг 1 фита (см. generate): при
+// extractOK вердикт считается детерминированно, без новых LLM-вызовов.
+func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc, system, user, vacancy, profile string, reqs fit.Requirements, extractOK bool, timeoutSec int) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
@@ -242,21 +255,6 @@ func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc
 			f.Flush()
 		}
 	}
-
-	// Шаг 1 фита — параллельно с генерацией письма.
-	type extraction struct {
-		reqs fit.Requirements
-		ok   bool // false — разбор не удался, вердикта не будет
-	}
-	exCh := make(chan extraction, 1)
-	go func() {
-		reqs, err := fit.ExtractRequirements(ctx, fnExtract, vacancy)
-		if err != nil {
-			exCh <- extraction{}
-			return
-		}
-		exCh <- extraction{reqs: reqs, ok: true}
-	}()
 
 	// writeErr — клиент отключился; дальше в мёртвый writer не пишем.
 	writeErr := false
@@ -288,20 +286,14 @@ func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc
 	// Постпроверка: теряемые факты и запрещённые паттерны видны в UI.
 	warnings := audit.Check(letter, vacancy).Warnings
 
-	// Шаг 2 фита — детерминированный, ноль токенов. Если письмо готово,
-	// а разбор ещё идёт — ждём его в пределах того же ctx: параллельно,
-	// так что латентность не добавляется. Не успел — done уйдёт без фита.
+	// Шаг 2 фита — детерминированный, ноль токенов; разбор вакансии уже
+	// готов (выполнен до генерации письма и переиспользуется).
 	var verdict *fit.Fit
-	select {
-	case ex := <-exCh:
-		if ex.ok {
-			f := fit.Evaluate(ex.reqs, profile, letter, vacancy)
-			if f.Verdict != "" {
-				verdict = &f
-			}
+	if extractOK {
+		f := fit.Evaluate(reqs, profile, letter, vacancy)
+		if f.Verdict != "" {
+			verdict = &f
 		}
-	case <-ctx.Done():
-		// письмо важнее фита
 	}
 
 	if !writeErr {

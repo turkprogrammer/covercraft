@@ -26,7 +26,7 @@ func TestBuildUserPromptIncludesContextAndVacancy(t *testing.T) {
 		"README.md":      "# Резюме-заметки\nУмею в GTK.",
 	})
 
-	got := BuildUserPrompt(dir, "Вакансия: senior Go developer в банке.")
+	got := BuildUserPrompt(dir, "Вакансия: senior Go developer в банке.", nil)
 
 	for _, want := range []string{
 		"Go-разработчик, 5 лет опыта.",
@@ -48,7 +48,7 @@ func TestBuildUserPromptIncludesContextAndVacancy(t *testing.T) {
 }
 
 func TestBuildUserPromptWithoutContextDir(t *testing.T) {
-	got := BuildUserPrompt(filepath.Join(t.TempDir(), "нет-такой-папки"), "Вакансия X.")
+	got := BuildUserPrompt(filepath.Join(t.TempDir(), "нет-такой-папки"), "Вакансия X.", nil)
 	if !strings.Contains(got, "Вакансия X.") {
 		t.Errorf("без папки контекста промпт должен содержать вакансию: %q", got)
 	}
@@ -60,12 +60,45 @@ func TestBuildUserPromptIsStable(t *testing.T) {
 		"b.md": "B-контент",
 		"a.md": "A-контент",
 	})
-	got1 := BuildUserPrompt(dir, "V")
-	got2 := BuildUserPrompt(dir, "V")
+	got1 := BuildUserPrompt(dir, "V", nil)
+	got2 := BuildUserPrompt(dir, "V", nil)
 	if got1 != got2 {
 		t.Error("повторный вызов должен давать тот же промпт")
 	}
 	if strings.Index(got1, "A-контент") > strings.Index(got1, "B-контент") {
 		t.Error("файлы должны идти в порядке имён (a.md раньше b.md)")
+	}
+}
+
+// TestBuildUserPromptChecklist — непустой список must-have идёт отдельной
+// секцией-чек-листом перед вакансией; пустой — секции нет вовсе.
+func TestBuildUserPromptChecklist(t *testing.T) {
+	dir := t.TempDir()
+
+	withChecklist := BuildUserPrompt(dir, "V", []string{"Go 3+ лет", "PostgreSQL", "  "})
+	if !strings.Contains(withChecklist, "### Обязательный чек-лист") {
+		t.Errorf("с непустым musts секции чек-листа нет:\n%s", withChecklist)
+	}
+	for _, want := range []string{"- Go 3+ лет\n", "- PostgreSQL\n"} {
+		if !strings.Contains(withChecklist, want) {
+			t.Errorf("чек-лист не содержит %q:\n%s", want, withChecklist)
+		}
+	}
+	if strings.Contains(withChecklist, "- \n") || strings.Contains(withChecklist, "- \n\n") {
+		t.Errorf("пустые элементы не должны попадать в чек-лист:\n%s", withChecklist)
+	}
+	// Чек-лист между контекстом и вакансией, с запретом на выдумки.
+	iHead := strings.Index(withChecklist, "### Обязательный чек-лист")
+	iVac := strings.Index(withChecklist, "### Вакансия")
+	if !(iHead >= 0 && iVac > iHead) {
+		t.Errorf("чек-лист должен идти перед вакансией:\n%s", withChecklist)
+	}
+	if !strings.Contains(withChecklist, "не выдумывай") {
+		t.Error("чек-лист должен запрещать выдумывать факты")
+	}
+
+	without := BuildUserPrompt(dir, "V", nil)
+	if strings.Contains(without, "чек-лист") {
+		t.Errorf("пустой musts — секции быть не должно:\n%s", without)
 	}
 }

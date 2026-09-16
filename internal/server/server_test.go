@@ -166,11 +166,14 @@ func TestGenerateEndpointHappyPath(t *testing.T) {
 			if !strings.Contains(user, "Senior Go") {
 				t.Errorf("в промпт не попала вакансия: %q", user)
 			}
+			if !strings.Contains(user, "### Обязательный чек-лист") || !strings.Contains(user, "- Go\n") {
+				t.Errorf("в промпт не попал чек-лист must-have из разбора вакансии: %q", user)
+			}
 			time.Sleep(10 * time.Millisecond) // чтобы elapsedMs был замерен, а не 0
 			return "Письмо готово.", nil
 		},
-		// FitLLM — отдельный шов: иначе горутина извлечения и письмо
-		// конкурентно пишут в t/захваты (гонка под -race).
+		// FitLLM — отдельный шов: иначе LLM-швы конкурентно пишут в
+		// t-захваты (гонка под -race).
 		FitLLM: func(ctx context.Context, system, user string) (string, error) {
 			return `{"role":"go-primary","mustHave":[{"text":"Go","kind":"must","category":"stack"}]}`, nil
 		},
@@ -213,6 +216,40 @@ func TestGenerateEndpointHappyPath(t *testing.T) {
 	}
 	if ev.Done.Fit.Score < 0 || ev.Done.Fit.Score > 100 {
 		t.Errorf("fit.score = %d, хочу 0..100", ev.Done.Fit.Score)
+	}
+}
+
+// TestGenerateEndpointExtractCalledOnce — разбор вакансии выполняется
+// ровно один LLM-вызов: чек-лист письма и fit-вердикт переиспользуют
+// один и тот же результат (второго вызова извлечения быть не должно).
+func TestGenerateEndpointExtractCalledOnce(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	extracts := 0
+	h := New(Config{
+		ContextDir: t.TempDir(),
+		LLM: func(ctx context.Context, system, user string) (string, error) {
+			return "Письмо.", nil
+		},
+		FitLLM: func(ctx context.Context, system, user string) (string, error) {
+			extracts++
+			return `{"role":"go-primary","mustHave":[{"text":"Go","kind":"must","category":"stack"}]}`, nil
+		},
+	})
+	body, _ := json.Marshal(map[string]string{"vacancy": "Нужен Senior Go."})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+
+	ev := parseSSE(t, rec.Body.String())
+	if ev.Done == nil {
+		t.Fatalf("нет done-события: err=%q", ev.Err)
+	}
+	if extracts != 1 {
+		t.Errorf("извлечение вакансии = %d вызовов, хочу ровно 1 (переиспользование)", extracts)
+	}
+	if ev.Done.Fit == nil {
+		t.Error("вердикта нет — извлечённые требования не дошли до фита")
 	}
 }
 

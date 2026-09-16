@@ -176,6 +176,31 @@ var concepts = []concept{
 		"модернизация legacy",
 	},
 	{
+		regexp.MustCompile(`(?i)многопоточн|мультипоточн|межпроцесс|межпоточн|диспетчеризац|синхронизац|параллельн|конкурентн|жизненн.{0,12}цикл|goroutine`),
+		[]signal{
+			{"горутины/каналы", regexp.MustCompile(`(?i)горутин|канал|goroutine|channel|воркер|worker`)},
+			{"lock-free/синхронизация", regexp.MustCompile(`(?i)lock-free|lockfree|atomic|mutex|мьютекс|блокировк|синхронизац`)},
+			{"диспетчеризация/жизненный цикл", regexp.MustCompile(`(?i)processmanager|process manager|диспетчериз|graceful|пул|pool|shutdown`)},
+		},
+		"многопоточность и жизненный цикл",
+	},
+	{
+		regexp.MustCompile(`(?i)ооп|solid|паттерн|проектирова.{0,15}шаблон|принципы`),
+		[]signal{
+			{"SOLID/GRASP", regexp.MustCompile(`(?i)solid|grasp|ооп|объектно-ориент`)},
+			{"паттерны/архитектурные стили", regexp.MustCompile(`(?i)паттерн|шаблон|hexagonal|ddd|strategy|слой|layer`)},
+		},
+		"ООП/SOLID/паттерны",
+	},
+	{
+		regexp.MustCompile(`(?i)алгоритм|структур.{0,15}данн`),
+		[]signal{
+			{"алгоритмы/данные в проектах", regexp.MustCompile(`(?i)очеред|приоритет|индекс|классификац|алгоритм|дерев|кэш|хеш`)},
+			{"нагрузочная практика", regexp.MustCompile(`(?i)rps|p99|p95|throughput|эл/с`)},
+		},
+		"алгоритмы и структуры данных",
+	},
+	{
 		regexp.MustCompile(`(?i)backend|бэкенд|бекенд|серверн`),
 		[]signal{
 			{"серверные языки", regexp.MustCompile(`(?i)\bgo\b|\bgolang\b|php|python|java`)},
@@ -299,7 +324,7 @@ func coverage(req Requirement, letter, profile string) (source, note string) {
 		} {
 			if name, hits := conceptHit(req.Text, src.text, 2); name != "" {
 				if src.label == SrcProfile {
-					return SrcProfile, "закрыто по признакам («" + name + "»: " + strings.Join(hits, ", ") + "), но в письмо не попало — добавь"
+					return SrcProfile, "закрыто по признакам («" + name + "»: " + strings.Join(hits, ", ") + "), но в письмо не попало — впиши в письмо, закроется полностью"
 				}
 				return SrcLetter, "закрыто по признакам («" + name + "»: " + strings.Join(hits, ", ") + ")"
 			}
@@ -321,9 +346,37 @@ func coverage(req Requirement, letter, profile string) (source, note string) {
 		}
 		if all {
 			if src.label == SrcProfile {
-				return SrcProfile, "факт есть в профиле, но не попал в письмо — добавь"
+				return SrcProfile, "в профиле есть факт, но в письмо не попал — впиши в письмо, закроется полностью"
 			}
 			return SrcLetter, "закрыто в письме"
+		}
+	}
+	// Частичное покрытие: большинство токенов найдено, но не все
+	// («Linux (systemd, cron)»: systemd в письме есть, cron нет). Требовать
+	// ВСЕ токены — слишком строго: один неупомянутый термин роняет
+	// требование в «не закрыто ничем», хотя ядро требования закрыто.
+	// Правило большинства: ≥ половины токенов (и ≥2) — закрыто, недостающее
+	// честно названо в ноте. Один токен — без изменений: либо есть, либо нет.
+	for _, src := range []struct {
+		label, text string
+	}{
+		{SrcLetter, letter},
+		{SrcProfile, profile},
+	} {
+		var missing []string
+		found := 0
+		for _, t := range tokens {
+			if findText(t, src.text) {
+				found++
+			} else {
+				missing = append(missing, t)
+			}
+		}
+		if found >= 2 && found > len(tokens)-found && len(missing) > 0 {
+			if src.label == SrcProfile {
+				return SrcProfile, "в профиле есть факт по большинству токенов (не упомянуты: " + strings.Join(missing, ", ") + ") — впиши в письмо, закроется полностью"
+			}
+			return SrcLetter, "закрыто в письме; не упомянуты: " + strings.Join(missing, ", ") + " — добавь"
 		}
 	}
 	// Мост: по токенам требования (Kubernetes в bridges НЕ входит —
@@ -395,7 +448,7 @@ func Evaluate(reqs Requirements, profile, letter, vacancy string) Fit {
 		case SrcProfile:
 			sum += 0.7
 			f.Covered = append(f.Covered, Req{r.Text, src, note})
-			f.Advice = append(f.Advice, "в профиле есть факт по «"+r.Text+"», но в письмо он не попал — добавь")
+			f.Advice = append(f.Advice, "в профиле есть факт по «"+r.Text+"», но в письмо он не попал — впиши в письмо, закроется полностью")
 		case SrcBridge:
 			sum += 0.5
 			f.Caveats = append(f.Caveats, Req{r.Text, src, note})
@@ -432,9 +485,11 @@ func Evaluate(reqs Requirements, profile, letter, vacancy string) Fit {
 	// друг другу они не могут. unknown не роняет вердикт сам по себе:
 	// это «нет данных», а не «нет опыта» — из шести unknown при нулевом
 	// missing нельзя делать вывод «не откликаться» (реальный кейс
-	// архитекторской вакансии). skip — только факт пробела (missing
-	// без моста), роль другого профиля или массовое «неизвестно» (данных
-	// о кандидате слишком мало, чтобы советовать отклик).
+	// архитекторской вакансии). Один missing при закрытом остальном —
+	// не «не откликаться», а серая зона: скор ~90%+ при skip —
+	// противоречие в плашке (реальный кейс анти-DDoS: 8 из 9 закрыто,
+	// один пробел UDP/TCP). skip — два и более пробела, пробел плюс
+	// массовое unknown, роль другого профиля.
 	missN, unkN, brN := len(f.Missing), 0, 0
 	for _, c := range f.Caveats {
 		switch c.Source {
@@ -445,9 +500,9 @@ func Evaluate(reqs Requirements, profile, letter, vacancy string) Fit {
 		}
 	}
 	switch {
-	case missN >= 1 || unkN >= 3 || brN >= 3 || roleMismatch(reqs, profile):
+	case missN >= 2 || (missN == 1 && unkN >= 2) || unkN >= 3 || brN >= 3 || roleMismatch(reqs, profile):
 		f.Verdict = Skip
-	case missN == 0 && (brN >= 1 || unkN >= 1):
+	case missN == 1 || brN >= 1 || unkN >= 1:
 		f.Verdict = Caveats // оговорка обязана назвать слабое место — Advice уже заполнен
 	default:
 		f.Verdict = Apply
@@ -460,7 +515,11 @@ func Evaluate(reqs Requirements, profile, letter, vacancy string) Fit {
 			f.Advice = append([]string{"не тратить время на отклик: есть незакрытые must-have"}, f.Advice...)
 		}
 	case Caveats:
-		f.Advice = append([]string{"откликаться с оговоркой — слабое место названо ниже"}, f.Advice...)
+		if missN == 1 {
+			f.Advice = append([]string{"откликаться с оговоркой: один must-have не закрыт («" + f.Missing[0].Text + "») — оцени, критичен ли он для этой вакансии"}, f.Advice...)
+		} else {
+			f.Advice = append([]string{"откликаться с оговоркой — слабое место названо ниже"}, f.Advice...)
+		}
 	case Apply:
 		f.Advice = append([]string{"все обязательные требования закрыты — откликаться"}, f.Advice...)
 	}
