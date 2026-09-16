@@ -211,6 +211,19 @@ var concepts = []concept{
 		},
 		"backend-разработка",
 	},
+	{
+		// Живое требование платёжной вакансии: «Гарантии консистентности и
+		// идемпотентности» — латиницы в нём нет, поэтому раньше уходило в
+		// unknown, хотя письмо закрывает его словами (at-least-once,
+		// идемпотентный Upsert, idempotency keys).
+		regexp.MustCompile(`(?i)консистентн|идемпотентн|целостн|гарантии доставки|exactly-once`),
+		[]signal{
+			{"at-least-once/досылка", regexp.MustCompile(`(?i)at-least-once|at least once|досылк|буфериз|retry|повторн`)},
+			{"идемпотентность/Upsert", regexp.MustCompile(`(?i)идемпотент|idempotency|upsert`)},
+			{"транзакции/fail-closed", regexp.MustCompile(`(?i)транзакц|fail-closed|exactly-once`)},
+		},
+		"гарантии консистентности и идемпотентности",
+	},
 }
 
 // hasCyrillic — есть ли в строке кириллица (для способа поиска альтов).
@@ -322,20 +335,41 @@ func findText(token, text string) bool {
 // письмо получало «закрыто в письме» по голой подстроке.
 var negRe = regexp.MustCompile(`(?i)опыта нет|нет опыта|опыта\s+(?:\S+\s+)?нет|не работал|не использ|готов освоить|освою|не приходилось`)
 
-// sentences — разбивка текста на предложения (по .!?\n): отрицание
-// действует в границах своего предложения, «не работал с Kubernetes» в
-// соседней строке не роняет валидный факт про Kafka.
+// sentences — разбивка текста на клаузы (по .!?\n;,). Область отрицания
+// клаузальная, а не «предложенческая»: буллет-пробел сплошь и рядом
+// перечисляет через запятую и пробел, и позитив — «OpenTelemetry: опыта
+// нет, observability — SQL-Top, Prometheus + Grafana». При области на всё
+// предложение позитивный observability попадал под отрицание соседней
+// клаузы и требование ронялось в unknown (живой регресс платёжной вакансии).
+// При этом «не работал с Kubernetes» в другой клаузе валидный факт про
+// Kafka не роняет.
 func sentences(text string) []string {
 	return strings.FieldsFunc(text, func(r rune) bool {
-		return r == '.' || r == '!' || r == '?' || r == '\n' || r == ';'
+		return r == '.' || r == '!' || r == '?' || r == '\n' || r == ';' || r == ','
 	})
 }
 
-// findFact — токен назван в тексте как факт: существует предложение,
-// где токен есть, а маркера отрицания в нём нет.
+// bareNegRe — клауза, состоящая ТОЛЬКО из маркера отрицания: хвостовая
+// форма «OpenTelemetry, опыта нет» — маркер относится к предыдущей клаузе.
+// «готов освоить» сюда не входит: «Kafka, готов освоить» встречается и
+// после позитивного факта, и отрицанием его считать нельзя.
+var bareNegRe = regexp.MustCompile(`(?i)^\s*(опыта нет|нет опыта|опыта\s+(?:\S+\s+)?нет|не работал[а-яё]*|не использ\w*|не приходилось)\s*[.!]?\s*$`)
+
+// clauseNegated — клауза под отрицанием: маркер в ней самой или в
+// следующей клаузе, если та состоит из одного маркера.
+func clauseNegated(clauses []string, i int) bool {
+	if negRe.MatchString(clauses[i]) {
+		return true
+	}
+	return i+1 < len(clauses) && bareNegRe.MatchString(clauses[i+1])
+}
+
+// findFact — токен назван в тексте как факт: существует клауза, где токен
+// есть, а отрицания нет.
 func findFact(token, text string) bool {
-	for _, s := range sentences(text) {
-		if findText(token, s) && !negRe.MatchString(s) {
+	clauses := sentences(text)
+	for i, c := range clauses {
+		if findText(token, c) && !clauseNegated(clauses, i) {
 			return true
 		}
 	}
@@ -346,6 +380,51 @@ func findFact(token, text string) bool {
 // (ни одного «фактового» вхождения).
 func tokenNegatedOnly(token, text string) bool {
 	return findText(token, text) && !findFact(token, text)
+}
+
+// matchTokens — покрытие требования по токенам в одном источнике: сначала
+// «все токены», затем правило большинства («Linux (systemd, cron)»: systemd
+// есть, cron нет — ядро требования закрыто, недостающее названо в ноте; один
+// неупомянутый термин не роняет требование в missing; один токен — либо есть,
+// либо нет). Проверка идёт «источник за источником»: порядок важен, иначе
+// «профиль закрывает все токены» бьёт «письмо закрывает большинство» и
+// выдаётся совет «впиши в письмо» при уже закрытом письме (живой кейс
+// DDD + Hexagonal: письмо даёт ddd/hexagonal/architecture, нет только api).
+//
+// Токен, честно отрицанный в письме («Transactional outbox не использовал»),
+// не засчитывается нигде — включая профиль: честный пробел письма
+// приоритетнее любого факта профиля, иначе matcher советует вписать
+// неприменённый опыт.
+func matchTokens(tokens []string, src, text, letter string) (string, string, bool) {
+	all := true
+	for _, t := range tokens {
+		if !findFact(t, text) || tokenNegatedOnly(t, letter) {
+			all = false
+			break
+		}
+	}
+	if all {
+		if src == SrcProfile {
+			return src, "в профиле есть факт, но в письмо не попал — впиши в письмо, закроется полностью", true
+		}
+		return src, "закрыто в письме", true
+	}
+	var missing []string
+	found := 0
+	for _, t := range tokens {
+		if findFact(t, text) && !tokenNegatedOnly(t, letter) {
+			found++
+		} else {
+			missing = append(missing, t)
+		}
+	}
+	if found >= 2 && found > len(tokens)-found && len(missing) > 0 {
+		if src == SrcProfile {
+			return src, "в профиле есть факт по большинству токенов (не упомянуты: " + strings.Join(missing, ", ") + ") — впиши в письмо, закроется полностью", true
+		}
+		return src, "закрыто в письме; не упомянуты: " + strings.Join(missing, ", ") + " — добавь", true
+	}
+	return "", "", false
 }
 
 // coverage — где требование закрыто. Порядок проверки: (1) технологии
@@ -377,60 +456,32 @@ func coverage(req Requirement, letter, profile string) (source, note string) {
 		{SrcLetter, letter},
 		{SrcProfile, profile},
 	} {
-		all := true
-		for _, t := range tokens {
-			// Токен, честно отрицанный в письме («Transactional outbox не
-			// использовал»), не засчитывается нигде — включая профиль:
-			// честный пробел письма приоритетнее любого факта профиля,
-			// иначе matcher советует вписать неприменённый опыт.
-			if !findFact(t, src.text) || tokenNegatedOnly(t, letter) {
-				all = false
-				break
-			}
-		}
-		if all {
-			if src.label == SrcProfile {
-				return SrcProfile, "в профиле есть факт, но в письмо не попал — впиши в письмо, закроется полностью"
-			}
-			return SrcLetter, "закрыто в письме"
-		}
-	}
-	// Частичное покрытие: большинство токенов найдено, но не все
-	// («Linux (systemd, cron)»: systemd в письме есть, cron нет). Требовать
-	// ВСЕ токены — слишком строго: один неупомянутый термин роняет
-	// требование в «не закрыто ничем», хотя ядро требования закрыто.
-	// Правило большинства: ≥ половины токенов (и ≥2) — закрыто, недостающее
-	// честно названо в ноте. Один токен — без изменений: либо есть, либо нет.
-	for _, src := range []struct {
-		label, text string
-	}{
-		{SrcLetter, letter},
-		{SrcProfile, profile},
-	} {
-		var missing []string
-		found := 0
-		for _, t := range tokens {
-			if findFact(t, src.text) && !tokenNegatedOnly(t, letter) {
-				found++
-			} else {
-				missing = append(missing, t)
-			}
-		}
-		if found >= 2 && found > len(tokens)-found && len(missing) > 0 {
-			if src.label == SrcProfile {
-				return SrcProfile, "в профиле есть факт по большинству токенов (не упомянуты: " + strings.Join(missing, ", ") + ") — впиши в письмо, закроется полностью"
-			}
-			return SrcLetter, "закрыто в письме; не упомянуты: " + strings.Join(missing, ", ") + " — добавь"
+		if s, note, ok := matchTokens(tokens, src.label, src.text, letter); ok {
+			return s, note
 		}
 	}
 	// Честный пробел: токены требования названы в письме, но только
 	// с отрицанием («С OpenTelemetry опыта нет, готов освоить»). Это не
 	// закрытие — но и не «в письме нет вообще»: модель отработала чек-лист,
 	// пробел назван словами. unknown с человеческой нотой, не missing.
+	// Если часть токенов в письме есть позитивно, нота это называет:
+	// «в письме есть postgresql, но outbox честно назван пробелом» —
+	// иначе кажется, что не упомянуто вообще ничего.
+	var negTokens, posTokens []string
 	for _, t := range tokens {
-		if tokenNegatedOnly(t, letter) {
-			return SrcUnknown, "в письме честно назван пробел («" + t + "»), а не молчаливый пропуск — для вердикта это «нет данных»"
+		switch {
+		case tokenNegatedOnly(t, letter):
+			negTokens = append(negTokens, t)
+		case findFact(t, letter):
+			posTokens = append(posTokens, t)
 		}
+	}
+	if len(negTokens) > 0 {
+		note := "в письме честно назван пробел («" + strings.Join(negTokens, ", ") + "»)"
+		if len(posTokens) > 0 {
+			note = "в письме есть " + strings.Join(posTokens, ", ") + ", но " + strings.Join(negTokens, ", ") + " честно назван пробелом"
+		}
+		return SrcUnknown, note + " — для вердикта это «нет данных»"
 	}
 	// Мост: по токенам требования (Kubernetes в bridges НЕ входит —
 	// must-have «K8s в проде» без опыта не закрывается соседним опытом).
@@ -553,7 +604,7 @@ func Evaluate(reqs Requirements, profile, letter, vacancy string) Fit {
 		case SrcBridge:
 			brN++
 		case SrcUnknown:
-			if strings.HasPrefix(c.Note, "в письме честно назван пробел") {
+			if isHonestGap(c.Note) {
 				// Честный пробел, названный в письме словами, — не «нет
 				// данных» в смысле риска: кандидат сам раскрыл пробел,
 				// проверять вручную нечего, а наказывать честное письмо
@@ -602,7 +653,7 @@ func Evaluate(reqs Requirements, profile, letter, vacancy string) Fit {
 	if unkN > 0 {
 		var texts []string
 		for _, c := range f.Caveats {
-			if c.Source == SrcUnknown && !strings.HasPrefix(c.Note, "в письме честно назван пробел") {
+			if c.Source == SrcUnknown && !isHonestGap(c.Note) {
 				texts = append(texts, "«"+c.Text+"»")
 			}
 		}
@@ -612,6 +663,13 @@ func Evaluate(reqs Requirements, profile, letter, vacancy string) Fit {
 	}
 	sort.SliceStable(f.Covered, func(i, j int) bool { return f.Covered[i].Source < f.Covered[j].Source })
 	return f
+}
+
+// isHonestGap — кавеат «честный пробел»: токен требования назван в письме
+// словами, но с отрицанием. Проверять вручную нечего, и наказывать такое
+// письмо skip'ом нельзя (иначе скрытие пробелов даёт лучший вердикт).
+func isHonestGap(note string) bool {
+	return strings.Contains(note, "честно назван пробел")
 }
 
 // unknownPlural — падеж слова «требование» после числительного.

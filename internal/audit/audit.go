@@ -258,15 +258,21 @@ func Check(letter, vacancy string) Result {
 		for _, term := range foreignGapTerms {
 			gap = strings.ReplaceAll(gap, term, " ")
 		}
+		gapBlocks := gapBlocksOf(gap)
 		for _, tech := range dupTechs {
 			re := regexp.MustCompile(`(?i)\b` + tech + `\b`)
 			if !re.MatchString(bullets) || !re.MatchString(gap) || dupSeen[tech] {
 				continue
 			}
 			// Пробел закрывает технологию («не работал») — тогда это честный
-			// пробел, а не дубль; дублированием считаем утвердительный тон.
-			closed := regexp.MustCompile(`(?i)[^\n]{0,60}\b` + tech + `\b[^\n]{0,80}(не работал|не применял|не использовал|не настраивал|опыта нет)`).MatchString(gap)
-			if !closed {
+			// пробел или якорь моста, а не дубль; дублированием считаем
+			// утвердительный тон. Отрицание ищем в границах всего буллета,
+			// а не только в хвосте после технологии: живое письмо называло
+			// её якорем моста («Transactional outbox: не использовал; мост —
+			// буферизация…, досылка при недоступности Kafka»), маркер стоит
+			// ДО технологии — хвостовой поиск давал ложный warning, а auto-fix
+			// по нему не мог ничего исправить и жёг генерации.
+			if !gapBlockNegated(gapBlocks, tech) {
 				dupSeen[tech] = true
 				r.Warnings = append(r.Warnings, "«"+tech+"» одновременно в буллетах и в пробелах — оставь только одно (пробел не должен повторять закрытый факт)")
 			}
@@ -317,6 +323,73 @@ func isStackLine(line string) bool {
 }
 
 // gapSectionIndex — начало секции честных пробелов (несколько формулировок).
+// gapBlocksOf разбивает секцию пробелов на буллеты: область действия
+// отрицания — свой пункт («Transactional outbox: не использовал; мост —
+// буферизация…, досылка при недоступности Kafka»), а не только хвост
+// после технологии.
+func gapBlocksOf(gap string) []string {
+	var blocks []string
+	var cur []string
+	flush := func() {
+		if len(cur) > 0 {
+			blocks = append(blocks, strings.Join(cur, "\n"))
+			cur = nil
+		}
+	}
+	for _, line := range strings.Split(gap, "\n") {
+		if isGapBulletStart(line) {
+			flush()
+		}
+		cur = append(cur, line)
+	}
+	flush()
+	return blocks
+}
+
+// isGapBulletStart — строка начинает новый пункт списка («- …», «• …», «* …»).
+func isGapBulletStart(line string) bool {
+	t := strings.TrimSpace(line)
+	return strings.HasPrefix(t, "-") || strings.HasPrefix(t, "•") || strings.HasPrefix(t, "*")
+}
+
+// gapBlockNegated — в буллете, упоминающем технологию, она названа честным
+// пробелом (или якорем моста), а не дублем факта. Тон определяется по клаузе
+// самой технологии: «Transactional outbox: не использовал; мост — …,
+// досылка при недоступности Kafka» — маркер отрицания стоит ДО технологии,
+// хвостовой поиск давал ложный warning, а auto-fix по нему не мог ничего
+// исправить и жёг генерации. Но если в клаузе технологии есть утвердительная
+// подача («с Horizon знаком, готов освоить»), это дубль/противоречие —
+// отрицание другой технологии в том же буллете его не оправдывает.
+func gapBlockNegated(blocks []string, tech string) bool {
+	reTech := regexp.MustCompile(`(?i)\b` + tech + `\b`)
+	neg := regexp.MustCompile(`(?i)не работал|не применял|не использовал|не настраивал|опыта нет|нет опыта|не приходилось`)
+	for _, b := range blocks {
+		if !reTech.MatchString(b) {
+			continue
+		}
+		if gapTechClauseAffirmative(b, tech) {
+			return false
+		}
+		return neg.MatchString(b)
+	}
+	return false
+}
+
+// gapTechClauseAffirmative — клауза, называющая технологию, подаёт её
+// утвердительно («с Horizon знаком», «Kafka использовал»).
+func gapTechClauseAffirmative(block, tech string) bool {
+	reTech := regexp.MustCompile(`(?i)\b` + tech + `\b`)
+	affirm := regexp.MustCompile(`(?i)знаком|использовал|работал|умею|готов освоить|практик|опыт`)
+	for _, c := range strings.FieldsFunc(block, func(r rune) bool {
+		return r == '.' || r == ',' || r == ';' || r == '\n' || r == '!' || r == '?'
+	}) {
+		if reTech.MatchString(c) && affirm.MatchString(c) {
+			return true
+		}
+	}
+	return false
+}
+
 func gapSectionIndex(letter string) int {
 	for _, h := range []string{"Честно о пробелах", "честно о пробел", "Пробелы:"} {
 		if i := strings.Index(strings.ToLower(letter), strings.ToLower(h)); i >= 0 {

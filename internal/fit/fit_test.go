@@ -523,6 +523,69 @@ func TestEvaluateHonestGapsDoNotSkip(t *testing.T) {
 	}
 }
 
+// Живой регресс платёжной вакансии: буллет-пробел перечисляет через
+// запятую и пробел, и позитив. «opыта нет» в клаузе OTel не должно
+// накрывать клаузу с observability — иначе закрытый факт падал в unknown.
+func TestEvaluateNegationClauseScoped(t *testing.T) {
+	reqs := mustReqs([]string{"Выстраивание observability"}, nil, "go-primary")
+	letter := "- **OpenTelemetry:** опыта нет, observability — SQL-Top, Prometheus + Grafana, готов освоить."
+	f := Evaluate(reqs, profileGo, letter, "вакансия")
+	if len(f.Covered) != 1 || f.Covered[0].Source != SrcLetter {
+		t.Fatalf("observability закрыт в письме, отрицание OTel из соседней клаузы не при чём: %+v", f)
+	}
+	// А сам OTel в той же строке остаётся честным пробелом.
+	reqs2 := mustReqs([]string{"OpenTelemetry — трейсинг на всех уровнях"}, nil, "go-primary")
+	f2 := Evaluate(reqs2, profileGo, letter, "вакансия")
+	if len(f2.Caveats) != 1 || f2.Caveats[0].Source != SrcUnknown || !isHonestGap(f2.Caveats[0].Note) {
+		t.Errorf("OTel должен остаться честным пробелом: %+v", f2.Caveats)
+	}
+}
+
+// Хвостовая форма отрицания: маркер в отдельной клаузе после токена
+// («OpenTelemetry, опыта нет») относится к предыдущей клаузе.
+func TestEvaluateTrailingNegation(t *testing.T) {
+	reqs := mustReqs([]string{"OpenTelemetry — трейсинг"}, nil, "go-primary")
+	letter := "Стек: Go, Kafka.\nOpenTelemetry, опыта нет, готов освоить."
+	f := Evaluate(reqs, profileGo, letter, "вакансия")
+	for _, c := range f.Covered {
+		if strings.Contains(c.Text, "OpenTelemetry") {
+			t.Errorf("хвостовое отрицание не распознано, факт засчитан: %+v", c)
+		}
+	}
+	if len(f.Caveats) != 1 || !isHonestGap(f.Caveats[0].Note) {
+		t.Errorf("хвостовое отрицание должно дать честный пробел: %+v", f.Caveats)
+	}
+}
+
+// Письмо закрывает большинство токенов, профиль — все: приоритет у письма
+// (вес 1.0, совет «добавь недостающее»), а не совет «впиши в письмо».
+func TestEvaluateLetterMajorityBeatsProfileAll(t *testing.T) {
+	reqs := mustReqs([]string{"Дизайн API и доменной модели в стиле DDD + Hexagonal Architecture"}, nil, "go-primary")
+	letter := "- **DDD + Hexagonal:** E-commerce-Lite (Symfony 7.2, Hexagonal Architecture, DDD — 8 entities, 6 ports), Fraud Engine (domain/application/adapters)."
+	profile := "Профиль: API (REST/gRPC), DDD, Hexagonal Architecture, доменные модели."
+	f := Evaluate(reqs, profile, letter, "вакансия")
+	if len(f.Covered) != 1 || f.Covered[0].Source != SrcLetter {
+		t.Fatalf("письмо закрывает большинство токенов — источник должен быть письмом: %+v", f.Covered)
+	}
+	if !strings.Contains(f.Covered[0].Note, "api") {
+		t.Errorf("нота должна называть недостающий токен: %q", f.Covered[0].Note)
+	}
+}
+
+// «Гарантии консистентности и идемпотентности» — латиницы в требовании нет,
+// закрывается концепт-признаками письма, а не уходит в unknown.
+func TestEvaluateConsistencyConcept(t *testing.T) {
+	reqs := mustReqs([]string{"Гарантии консистентности и идемпотентности"}, nil, "go-primary")
+	letter := "Stable ID — at-least-once + идемпотентность через ClickHouse Upsert; Fraud Engine — idempotency keys, fail-closed."
+	f := Evaluate(reqs, profileGo, letter, "вакансия")
+	if len(f.Covered) != 1 || f.Covered[0].Source != SrcLetter {
+		t.Fatalf("требование закрыто признаками письма: %+v", f)
+	}
+	if !strings.Contains(f.Covered[0].Note, "гарантии консистентности") {
+		t.Errorf("нота должна называть концепт: %q", f.Covered[0].Note)
+	}
+}
+
 // adviceHas — проверка, что среди советов есть содержащий подстроку.
 func adviceHas(list []string, sub string) bool {
 	for _, s := range list {
