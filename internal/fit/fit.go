@@ -435,6 +435,10 @@ func Evaluate(reqs Requirements, profile, letter, vacancy string) Fit {
 	}
 
 	sum, count := 0.0, 0.0
+	// Построчные советы про missing собираются отдельно: при Caveats с
+	// ровно одним missing они дублируют заголовок вердикта (два живых
+	// кейса: UDP/TCP, SQL-вакансия) — мержатся после выбора вердикта.
+	var missingAdvice []string
 	for _, r := range reqs.MustHave {
 		if plusRe.MatchString(r.Text) || softTerms.MatchString(r.Text) {
 			continue // «будет плюсом» и мягкие не требуют покрытия
@@ -460,7 +464,7 @@ func Evaluate(reqs Requirements, profile, letter, vacancy string) Fit {
 			f.Caveats = append(f.Caveats, Req{r.Text, src, note})
 		default:
 			f.Missing = append(f.Missing, Req{r.Text, SrcMissing, "в профиле и письме нет, моста нет"})
-			f.Advice = append(f.Advice, "обязательное требование «"+r.Text+"» не закрыто ничем — письмом это не лечится")
+			missingAdvice = append(missingAdvice, "обязательное требование «"+r.Text+"» не закрыто ничем — письмом это не лечится")
 		}
 	}
 
@@ -522,6 +526,14 @@ func Evaluate(reqs Requirements, profile, letter, vacancy string) Fit {
 		}
 	case Apply:
 		f.Advice = append([]string{"все обязательные требования закрыты — откликаться"}, f.Advice...)
+	}
+	// Мерж построчных missing-советов: при Caveats с ровно одним missing
+	// заголовок уже называет требование и даёт действие («оцени, критичен
+	// ли он») — построчный совет дублировал бы его. При skip заголовок
+	// без имён («не тратить время») — построчные советы обязательны,
+	// иначе непонятно, какое именно требование не закрыто.
+	if !(f.Verdict == Caveats && missN == 1) {
+		f.Advice = append(f.Advice, missingAdvice...)
 	}
 	// unknown — одним сводным советом, а не построчно: шесть одинаковых
 	// строк «проверь вручную» — шум, а не помощь.
