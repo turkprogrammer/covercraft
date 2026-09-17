@@ -18,6 +18,21 @@
      alt="CoverCraft: терминальный UI генератора сопроводительных писем"
      width="720">
 
+## Что нового в 0.2.0
+
+- **Фит-панель отклика**: вакансия разбирается на must/nice-have, панель
+  показывает вердикт (откликаться / с оговоркой / пропускать), скор 0–100
+  и расшифровку по каждому требованию. Вердикт считает код, не модель.
+- **Два движка матчинга**: детерминированный на правилах (по умолчанию —
+  ноль токенов) и гибридный `fitEngine: "llm"` — модель размечает
+  покрытие с обязательными цитатами, код проверяет цитаты и отрицания.
+- **Динамические концепты**: LLM выводит из вашего профиля концепты
+  покрытия требований и кэширует их в `~/.config/covercraft/concepts.json`
+  (инвалидация по хэшу профиля, fallback на встроенные).
+- **Чек-лист вакансии в промпте**: генератор закрывает must-have
+  требования в буллетах, аудит ловит потерянные факты.
+- 151 unit-тест. Полная история — в [CHANGELOG.md](CHANGELOG.md).
+
 ## Как это работает
 
 ```text
@@ -103,7 +118,7 @@ go build -o covercraft .
 Основной путь — готовый бинарник из [Releases](https://github.com/turkprogrammer/covercraft/releases):
 
 ```bash
-tar xzf covercraft_0.1.3_linux_amd64.tar.gz
+tar xzf covercraft_0.2.0_linux_amd64.tar.gz
 ./covercraft
 ```
 
@@ -229,9 +244,9 @@ reasoning effort), постпроверка писем (запрещённые �
 ```bash
 mkdir -p dist
 go build -o covercraft .
-tar czf dist/covercraft_0.1.3_linux_amd64.tar.gz covercraft README.md LICENSE
-sha256sum dist/covercraft_0.1.3_linux_amd64.tar.gz \
-  > dist/covercraft_0.1.3_linux_amd64.tar.gz.sha256
+tar czf dist/covercraft_0.2.0_linux_amd64.tar.gz covercraft README.md LICENSE
+sha256sum dist/covercraft_0.2.0_linux_amd64.tar.gz \
+  > dist/covercraft_0.2.0_linux_amd64.tar.gz.sha256
 ```
 
 `context/` в архив не входит: он приватен и создаётся каждым

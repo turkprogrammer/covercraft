@@ -27,7 +27,9 @@ internal/fit/               вердикт отклика: LLM разбирае�
                             must/nice (extract.go), матчинг покрытия —
                             матчер на правилах (fit.go) либо гибрид
                             «модель размечает, код проверяет цитаты»
-                            (map.go, настройка fitEngine)
+                            (map.go, настройка fitEngine); динамические
+                            концепты покрытия из профиля (concepts.go,
+                            кэш в ~/.config/covercraft/concepts.json)
 internal/audit/             постпроверка письма: дубли, стек, потерянные факты
 internal/server/            HTTP на 127.0.0.1:случайный порт,
                             /api/settings, /api/generate (letter, elapsedMs)
@@ -51,6 +53,9 @@ assets/icons/hicolor/       иконки: SVG-исходник + PNG 48–512
   размечает покрытие с обязательной цитатой, код проверяет цитату и
   отрицания («опыта нет» ≠ закрыто) и при любой ошибке откатывается на
   матчер. Вердикт в панели есть всегда.
+- Концепты покрытия генерируются LLM из профиля и кэшируются в
+  concepts.json (инвалидация по SHA-256 профиля); при любой ошибке —
+  встроенные дефолты, поведение приложения не меняется.
 
 ## API
 
@@ -59,7 +64,7 @@ assets/icons/hicolor/       иконки: SVG-исходник + PNG 48–512
 | GET   | `/`             | UI (HTML из embed) |
 | GET   | `/api/settings` | текущие настройки |
 | POST  | `/api/settings` | сохранить настройки |
-| POST  | `/api/generate` | `{vacancy}` → `{letter, elapsedMs}` |
+| POST  | `/api/generate` | `{vacancy}` → SSE: `delta`…, `done {letter, elapsedMs, warnings, fit}` |
 
 ## Сборка и тесты
 
@@ -72,4 +77,4 @@ go test ./...
 ## Стек
 
 Go 1.26 (только stdlib), GTK3, WebKit2GTK 4.1 (CGO), go:embed.
-118 unit-тестов. ~4900 строк Go. MIT.
+151 unit-тест. ~6500 строк Go. MIT.
