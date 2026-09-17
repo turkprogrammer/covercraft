@@ -912,3 +912,55 @@ func TestDeclinedInProfileForwardMarker(t *testing.T) {
 		t.Error("backward-маркер «не использовал» обязан отклонять outbox")
 	}
 }
+
+// TestSQLTokenUnstopped — «Уверенный SQL» в требовании должен матчится
+// по профилю («БД и SQL: PostgreSQL…»): sql — реальный навык в вакансиях,
+// а не эпитет, поэтому выведен из стопвордов.
+func TestSQLTokenUnstopped(t *testing.T) {
+	toks := reqTokens("Уверенный SQL, оптимизация запросов")
+	found := false
+	for _, tok := range toks {
+		if tok == "sql" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("reqTokens не содержит sql: %v", toks)
+	}
+	reqs := Requirements{
+		Role: "data",
+		MustHave: []Requirement{
+			{Text: "Уверенный SQL, оптимизация запросов, работа с большими объёмами", Kind: "must"},
+		},
+	}
+	profile := "БД и SQL: PostgreSQL, оптимизация запросов, pg_stat_statements."
+	letter := "Оптимизация запросов PostgreSQL: индексы, планы."
+	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
+	if f.Covered == nil || len(f.Covered) == 0 {
+		t.Errorf("SQL-требование должно закрываться профилем, verdict=%s caveats=%d missing=%d", f.Verdict, len(f.Caveats), len(f.Missing))
+	}
+}
+
+// TestAlertingIncidentTrigger — кириллическое требование «алертинг и
+// разбор инцидентов» должно цеплять концепт «эксплуатация и
+// observability» по новым триггерам алерт/инцидент и закрываться
+// профилем (алертинг по SLO) без ухода в «проверь вручную».
+func TestAlertingIncidentTrigger(t *testing.T) {
+	reqs := Requirements{
+		Role: "devops",
+		MustHave: []Requirement{
+			{Text: "Опыт настройки алертинга и разбора инцидентов", Kind: "must"},
+		},
+	}
+	profile := "Мониторинг: Prometheus + Grafana, алертинг (P99 > 100ms, error rate > 1%)."
+	letter := "Развернул наблюдаемость: дашборды Grafana и алерты по error rate."
+	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
+	if f.Covered == nil || len(f.Covered) == 0 {
+		t.Errorf("требование про алертинг должно закрываться концептом, verdict=%s caveats=%d", f.Verdict, len(f.Caveats))
+	}
+	for _, c := range f.Caveats {
+		if strings.Contains(c.Text, "алертинг") && c.Source == SrcUnknown {
+			t.Errorf("алертинг не должен попадать в unknown: %+v", c)
+		}
+	}
+}

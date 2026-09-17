@@ -224,7 +224,7 @@ func DefaultConcepts() []Concept {
 		},
 		{
 			Name:    "эксплуатация и observability",
-			Trigger: regexp.MustCompile(`(?i)эксплуатац|мониторинг|отказоустойч|деградац|observability|наблюдае`),
+			Trigger: regexp.MustCompile(`(?i)эксплуатац|мониторинг|отказоустойч|деградац|observability|наблюдае|алерт|инцидент`),
 			Signals: []Signal{
 				{Label: "Prometheus/Grafana", Re: regexp.MustCompile(`(?i)prometheus|grafana|метрик|монитор`)},
 				{Label: "алертинг по SLO", Re: regexp.MustCompile(`(?i)алерт|p99|p95|error rate|дашборд`)},
