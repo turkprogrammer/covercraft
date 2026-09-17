@@ -47,6 +47,11 @@ type Config struct {
 	// FitLLM — LLM для извлечения требований вакансии (internal/fit);
 	// если nil — тот же LLM, что и для письма.
 	FitLLM LLMFunc
+	// FitEngine — движок матчинга фита: "" / "deterministic" — матчер на
+	// правилах; "llm" — гибрид «модель размечает покрытие, код проверяет
+	// цитаты» (internal/fit/map.go). При ошибке модели — всегда откат на
+	// детерминированный вердикт.
+	FitEngine string
 }
 
 // Handler обрабатывает запросы UI.
@@ -235,7 +240,36 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
 		user = cover.BuildUserPrompt(h.cfg.ContextDir, req.Vacancy, musts)
 	}
 
-	streamGenerate(w, ctx, h.cfg.LLMStream, system, user, req.Vacancy, fit.LoadProfile(h.cfg.ContextDir), reqs, extractOK, timeoutSec)
+	// Движок фита: "llm" — гибридная разметка покрытия моделью (отдельный
+	// LLM-вызов после письма, всегда с откатом на детерминированный матчер),
+	// иначе — прежний матчер на правилах, без дополнительных вызовов.
+	var mapFn fit.MapFunc
+	if strings.EqualFold(h.cfg.FitEngine, "llm") {
+		mapFn = func(ctx context.Context, reqs fit.Requirements, profile, letter, vac string) (fit.Fit, error) {
+			return fit.MapCoverage(ctx, fit.LLMFunc(h.cfg.FitLLM), reqs, profile, letter, vac)
+		}
+	}
+
+	streamGenerate(w, ctx, h.cfg.LLMStream, system, user, req.Vacancy, fit.LoadProfile(h.cfg.ContextDir), reqs, extractOK, mapFn, timeoutSec)
+}
+
+// fitMapTimeout — бюджет гибридной разметки покрытия. Контекст генерации к
+// этому моменту может быть на исходе: письмо уже сгенерировано, и медленная
+// разметка не должна оставить панель без вердикта — по таймауту откат на
+// детерминированный матчер.
+const fitMapTimeout = 90 * time.Second
+
+// fitVerdict — вердикт фита: гибридный матчинг (если задан mapFn) с откатом
+// на детерминированный Evaluate при ошибке модели, таймауте или битом JSON.
+func fitVerdict(ctx context.Context, reqs fit.Requirements, profile, letter, vacancy string, mapFn fit.MapFunc) fit.Fit {
+	if mapFn != nil {
+		mctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), fitMapTimeout)
+		defer cancel()
+		if f, err := mapFn(mctx, reqs, profile, letter, vacancy); err == nil && f.Verdict != "" {
+			return f
+		}
+	}
+	return fit.Evaluate(reqs, profile, letter, vacancy)
 }
 
 // streamGenerate вызывает LLM и пишет ответ как SSE: дельты по мере
@@ -246,7 +280,7 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
 //
 // reqs/extractOK — уже выполненный шаг 1 фита (см. generate): при
 // extractOK вердикт считается детерминированно, без новых LLM-вызовов.
-func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc, system, user, vacancy, profile string, reqs fit.Requirements, extractOK bool, timeoutSec int) {
+func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc, system, user, vacancy, profile string, reqs fit.Requirements, extractOK bool, mapFn fit.MapFunc, timeoutSec int) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
@@ -286,11 +320,13 @@ func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc
 	// Постпроверка: теряемые факты и запрещённые паттерны видны в UI.
 	warnings := audit.Check(letter, vacancy).Warnings
 
-	// Шаг 2 фита — детерминированный, ноль токенов; разбор вакансии уже
-	// готов (выполнен до генерации письма и переиспользуется).
+	// Шаг 2 фита — вердикт; разбор вакансии уже готов (выполнен до генерации
+	// письма и переиспользуется). Детерминированный матчер — ноль токенов;
+	// гибрид (FitEngine="llm") добавляет один вызов модели на разметку
+	// покрытия с откатом на матчер при любой ошибке.
 	var verdict *fit.Fit
 	if extractOK {
-		f := fit.Evaluate(reqs, profile, letter, vacancy)
+		f := fitVerdict(ctx, reqs, profile, letter, vacancy, mapFn)
 		if f.Verdict != "" {
 			verdict = &f
 		}
