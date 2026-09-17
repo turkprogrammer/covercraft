@@ -5,12 +5,23 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/turkprogrammer/covercraft)](https://goreportcard.com/report/github.com/turkprogrammer/covercraft)
 [![CI](https://github.com/turkprogrammer/covercraft/actions/workflows/ci.yml/badge.svg)](https://github.com/turkprogrammer/covercraft/actions/workflows/ci.yml)
 
-Генератор сопроводительных писем: нативное окно (WebKit2GTK) + Go-бэкенд.
-Один бинарник, UI зашит внутрь через `embed`, настройки в
+Генератор сопроводительных писем с **fit-оценкой на коде** (не LLM),
+гиперперсонализацией из вашего профиля и open-source кодом под MIT.
+Нативное окно (WebKit2GTK) + Go-бэкенд, один бинарник, настройки в
 `~/.config/covercraft/settings.json`, контекст кандидата в `context/*.md`.
 
 Автор: **Robert Yusupov** — [github.com/turkprogrammer](https://github.com/turkprogrammer) ·
 [yusupov-tech.ru](https://yusupov-tech.ru/)
+
+## Уникальные преимущества
+
+| Преимущество | CoverCraft | Конкуренты |
+|---|---|---|
+| **Fit-оценка на коде, не на модели** | Вердикт `apply/skip/caveats` считает детерминированный матчер (`internal/fit`), ноль LLM-токенов по умолчанию | Rezi, Jobscan — оценка через LLM или эвристика |
+| **Гиперперсонализация** | Письмо строится из вашего реального профиля (`context/*.md`), а не generic-шаблонов | Enhancv, Novoresume — шаблоны с автозаполнением |
+| **Приватность** | Профиль и письма остаются локально; нет облака-посредника | TealHQ, Skillbuild — данные в их cloud |
+| **Open-source + один бинарь** | Go-проект под MIT, `go build` даёт один файл, нет npm/yarn/pip | Большинство — SaaS или тяжёлые зависимости |
+| **Два движка матчинга** | Детерминированный (0 токенов) и гибридный (LLM с цитатами + код-верификация) | Нет аналогов |
 
 ## Скриншоты
 
@@ -76,6 +87,16 @@
   в конце — событие с полным текстом, `elapsedMs` и предупреждениями аудита.
 - **Счётчик времени**: `/api/generate` возвращает `elapsedMs` — UI показывает
   `N chars · X.Xs` рядом с письмом (сколько отвечала модель).
+
+## Сравнение с решениями на рынке
+
+| Инструмент | Fit-оценка | Гиперперсонализация | Open-source | Локальный деплой |
+|---|---|---|---|---|
+| **CoverCraft** | ✅ код | ✅ профиль | ✅ MIT | ✅ да |
+| Rezi.ai | ❌ нет | ⚠ шаблон | ❌ нет | ❌ cloud |
+| Jobscan | ✅ эвристика | ❌ низкая | ❌ нет | ❌ cloud |
+| TealHQ | ❌ нет | ⚠ средняя | ❌ нет | ❌ cloud |
+| ChatGPT/Cursor | ❌ нет | ✅ generic | ❌ нет | ⚠ self-host |
 
 ## Reasoning-модели (glm и другие)
 
