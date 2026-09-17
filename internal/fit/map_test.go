@@ -25,7 +25,7 @@ func TestMapCoverageSemanticRequirement(t *testing.T) {
 	reqs := mustReqs([]string{"Реализация интеграций с платёжными процессингами"}, nil, "go-primary")
 	letter := "Проект «Платежи»: интеграции с эквайрингом и платёжными процессингами, каждый со своим протоколом."
 	raw := `{"items":[{"text":"Реализация интеграций с платёжными процессингами","source":"letter","quote":"интеграции с эквайрингом и платёжными процессингами","note":"есть прод-опыт"}]}`
-	f, err := MapCoverage(context.Background(), fakeMapLLM(raw), reqs, "", letter, "вакансия")
+	f, err := MapCoverage(context.Background(), fakeMapLLM(raw), DefaultConcepts(), reqs, "", letter, "вакансия")
 	if err != nil {
 		t.Fatalf("MapCoverage: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestMapCoverageUngroundedQuoteFallsBack(t *testing.T) {
 	reqs := mustReqs([]string{"Реализация интеграций с платёжными процессингами"}, nil, "go-primary")
 	letter := "Пишу про Kafka и Go, про платежи ничего."
 	raw := `{"items":[{"text":"Реализация интеграций с платёжными процессингами","source":"letter","quote":"опыт платёжных систем в финтехе восемь лет","note":"выдумка"}]}`
-	f, err := MapCoverage(context.Background(), fakeMapLLM(raw), reqs, "", letter, "вакансия")
+	f, err := MapCoverage(context.Background(), fakeMapLLM(raw), DefaultConcepts(), reqs, "", letter, "вакансия")
 	if err != nil {
 		t.Fatalf("MapCoverage: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestMapCoverageUngroundedQuoteFallsBack(t *testing.T) {
 func TestMapCoverageNegatedQuoteBecomesHonestGap(t *testing.T) {
 	reqs := mustReqs([]string{"OpenTelemetry — трейсинг на всех уровнях"}, nil, "go-primary")
 	raw := `{"items":[{"text":"OpenTelemetry — трейсинг на всех уровнях","source":"letter","quote":"OpenTelemetry: опыта нет","note":"упомянут"}]}`
-	f, err := MapCoverage(context.Background(), fakeMapLLM(raw), reqs, "", liveLetter, "вакансия")
+	f, err := MapCoverage(context.Background(), fakeMapLLM(raw), DefaultConcepts(), reqs, "", liveLetter, "вакансия")
 	if err != nil {
 		t.Fatalf("MapCoverage: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestMapCoverageNegatedQuoteBecomesHonestGap(t *testing.T) {
 func TestMapCoverageQuoteFromPositiveClause(t *testing.T) {
 	reqs := mustReqs([]string{"Выстраивание observability"}, nil, "go-primary")
 	raw := `{"items":[{"text":"Выстраивание observability","source":"letter","quote":"observability — SQL-Top, Prometheus + Grafana","note":"строил"}]}`
-	f, err := MapCoverage(context.Background(), fakeMapLLM(raw), reqs, "", liveLetter, "вакансия")
+	f, err := MapCoverage(context.Background(), fakeMapLLM(raw), DefaultConcepts(), reqs, "", liveLetter, "вакансия")
 	if err != nil {
 		t.Fatalf("MapCoverage: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestMapCoverageProfileLimiterRejected(t *testing.T) {
 	reqs := mustReqs([]string{"Проектирование event-driven цепочек через transactional outbox на PostgreSQL"}, nil, "go-primary")
 	profile := "ОБЩИЙ ПРОФИЛЬ:\n- Надёжная доставка событий (мост к outbox): буферизация, идемпотентный Upsert, at-least-once, event-driven паттерны.\nОГРАНИЧИТЕЛИ:\n- Transactional outbox на PostgreSQL: не использовал."
 	raw := `{"items":[{"text":"Проектирование event-driven цепочек через transactional outbox на PostgreSQL","source":"profile","quote":"Надёжная доставка событий (мост к outbox): буферизация, идемпотентный Upsert, at-least-once","note":"мост"}]}`
-	f, err := MapCoverage(context.Background(), fakeMapLLM(raw), reqs, profile, "", "вакансия")
+	f, err := MapCoverage(context.Background(), fakeMapLLM(raw), DefaultConcepts(), reqs, profile, "", "вакансия")
 	if err != nil {
 		t.Fatalf("MapCoverage: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestMapCoverageModelCannotDowngrade(t *testing.T) {
 	reqs := mustReqs([]string{"Опыт с Kafka и ClickHouse"}, nil, "go-primary")
 	letter := "Стек: Go, Kafka, ClickHouse."
 	raw := `{"items":[{"text":"Опыт с Kafka и ClickHouse","source":"missing","quote":"","note":"не увидел"}]}`
-	f, err := MapCoverage(context.Background(), fakeMapLLM(raw), reqs, "", letter, "вакансия")
+	f, err := MapCoverage(context.Background(), fakeMapLLM(raw), DefaultConcepts(), reqs, "", letter, "вакансия")
 	if err != nil {
 		t.Fatalf("MapCoverage: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestMapCoveragePartialQuoteRejected(t *testing.T) {
 	reqs := mustReqs([]string{"PostgreSQL для состояния и transactional outbox"}, nil, "go-primary")
 	letter := "PostgreSQL, MySQL, Redis. Честно о пробелах: transactional outbox — не использовал."
 	raw := `{"items":[{"text":"PostgreSQL для состояния и transactional outbox","source":"letter","quote":"PostgreSQL, MySQL, Redis","note":"закрыто"}]}`
-	f, err := MapCoverage(context.Background(), fakeMapLLM(raw), reqs, "", letter, "вакансия")
+	f, err := MapCoverage(context.Background(), fakeMapLLM(raw), DefaultConcepts(), reqs, "", letter, "вакансия")
 	if err != nil {
 		t.Fatalf("MapCoverage: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestMapCoverageMajorityWithoutHonestGap(t *testing.T) {
 	// outbox не отрицается — majority токенов (postgres, transactional, outbox) найден
 	letter := "PostgreSQL, transactional outbox на уровне приложения (буферизация, идемпотентность)."
 	raw := `{"items":[{"text":"PostgreSQL для состояния и transactional outbox","source":"letter","quote":"PostgreSQL, transactional outbox","note":"закрыто"}]}`
-	f, err := MapCoverage(context.Background(), fakeMapLLM(raw), reqs, "", letter, "вакансия")
+	f, err := MapCoverage(context.Background(), fakeMapLLM(raw), DefaultConcepts(), reqs, "", letter, "вакансия")
 	if err != nil {
 		t.Fatalf("MapCoverage: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestMapCoverageModelUnknownAccepted(t *testing.T) {
 	reqs := mustReqs([]string{"Опыт в финтехе или платёжных системах"}, nil, "go-primary")
 	letter := "Работал в банке Росгосстрах над внутренними сервисами."
 	raw := `{"items":[{"text":"Опыт в финтехе или платёжных системах","source":"unknown","quote":"","note":"банк упомянут, но роль неясна"}]}`
-	f, err := MapCoverage(context.Background(), fakeMapLLM(raw), reqs, "", letter, "вакансия")
+	f, err := MapCoverage(context.Background(), fakeMapLLM(raw), DefaultConcepts(), reqs, "", letter, "вакансия")
 	if err != nil {
 		t.Fatalf("MapCoverage: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestMapCoverageModelUnknownAccepted(t *testing.T) {
 func TestMapCoverageBadJSON(t *testing.T) {
 	reqs := mustReqs([]string{"Опыт с Kafka"}, nil, "go-primary")
 	for _, raw := range []string{"не JSON вовсе", `{"items":[]}`, `{"items": [{"text": "x"`} {
-		if _, err := MapCoverage(context.Background(), fakeMapLLM(raw), reqs, "", "letter", "v"); err == nil {
+		if _, err := MapCoverage(context.Background(), fakeMapLLM(raw), DefaultConcepts(), reqs, "", "letter", "v"); err == nil {
 			t.Errorf("ожидалась ошибка разбора на %q", raw)
 		}
 	}
@@ -197,7 +197,7 @@ func TestMapCoverageLLMError(t *testing.T) {
 	fn := func(ctx context.Context, system, user string) (string, error) {
 		return "", errors.New("таймаут")
 	}
-	if _, err := MapCoverage(context.Background(), fn, reqs, "", "letter", "v"); err == nil {
+	if _, err := MapCoverage(context.Background(), fn, DefaultConcepts(), reqs, "", "letter", "v"); err == nil {
 		t.Error("ошибка модели должна возвращаться наружу")
 	}
 }
@@ -209,7 +209,7 @@ func TestMapCoverageHonestGapBeatsModelQuote(t *testing.T) {
 	reqs := mustReqs([]string{"PostgreSQL для хранения состояния и transactional inbox/outbox"}, nil, "go-primary")
 	letter := "- PostgreSQL: транзакции, индексы B-tree.\nЧестно о пробелах:\n- Transactional outbox не использовал; близкий опыт — событийный журнал в БД."
 	raw := `{"items":[{"text":"PostgreSQL для хранения состояния и transactional inbox/outbox","source":"letter","quote":"PostgreSQL: транзакции, индексы B-tree.","note":"PG есть"}]}`
-	f, err := MapCoverage(context.Background(), fakeMapLLM(raw), reqs, "", letter, "вакансия")
+	f, err := MapCoverage(context.Background(), fakeMapLLM(raw), DefaultConcepts(), reqs, "", letter, "вакансия")
 	if err != nil {
 		t.Fatalf("MapCoverage: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestMapCoveragePositionalMatch(t *testing.T) {
 	reqs := mustReqs([]string{"Опыт с Kafka", "Опыт с ClickHouse"}, nil, "go-primary")
 	letter := "Стек: Go, Kafka, ClickHouse."
 	raw := `{"items":[{"text":"требование 1","source":"letter","quote":"Go, Kafka","note":""},{"text":"требование 2","source":"letter","quote":"Kafka, ClickHouse","note":""}]}`
-	f, err := MapCoverage(context.Background(), fakeMapLLM(raw), reqs, "", letter, "вакансия")
+	f, err := MapCoverage(context.Background(), fakeMapLLM(raw), DefaultConcepts(), reqs, "", letter, "вакансия")
 	if err != nil {
 		t.Fatalf("MapCoverage: %v", err)
 	}

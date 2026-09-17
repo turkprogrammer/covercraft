@@ -14,7 +14,7 @@ func TestMapCoverageQuoteAcrossComma(t *testing.T) {
 	reqs := mustReqs([]string{"PostgreSQL для состояния и transactional outbox"}, nil, "go-primary")
 	letter := "PostgreSQL, transactional outbox на уровне приложения (буферизация, идемпотентность)."
 	raw := `{"items":[{"text":"PostgreSQL для состояния и transactional outbox","source":"letter","quote":"PostgreSQL, transactional outbox","note":"закрыто"}]}`
-	f, err := MapCoverage(context.Background(), fakeMapLLM(raw), reqs, "", letter, "вакансия")
+	f, err := MapCoverage(context.Background(), fakeMapLLM(raw), DefaultConcepts(), reqs, "", letter, "вакансия")
 	if err != nil {
 		t.Fatalf("MapCoverage: %v", err)
 	}
@@ -33,7 +33,7 @@ func TestMapCoverageNegationNextSentenceNotBlocking(t *testing.T) {
 	reqs := mustReqs([]string{"PostgreSQL для хранения состояния"}, nil, "go-primary")
 	letter := "PostgreSQL: транзакции, индексы B-tree. Transactional outbox не использовал."
 	raw := `{"items":[{"text":"PostgreSQL для хранения состояния","source":"letter","quote":"PostgreSQL: транзакции, индексы B-tree","note":"PG есть"}]}`
-	f, err := MapCoverage(context.Background(), fakeMapLLM(raw), reqs, "", letter, "вакансия")
+	f, err := MapCoverage(context.Background(), fakeMapLLM(raw), DefaultConcepts(), reqs, "", letter, "вакансия")
 	if err != nil {
 		t.Fatalf("MapCoverage: %v", err)
 	}

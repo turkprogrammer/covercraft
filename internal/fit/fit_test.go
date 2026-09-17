@@ -1,6 +1,8 @@
 package fit
 
 import (
+	"bytes"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -27,7 +29,7 @@ func mustReqs(must, nice []string, role string) Requirements {
 func TestEvaluateApply(t *testing.T) {
 	reqs := mustReqs([]string{"Опыт с Kafka и ClickHouse"}, nil, "go-primary")
 	letter := "Стек: Go, Kafka, ClickHouse\nПара слов о проекте."
-	f := Evaluate(reqs, profileGo, letter, "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profileGo, letter, "вакансия")
 	if f.Verdict != Apply {
 		t.Errorf("verdict = %q, хочу %q (детали: %+v)", f.Verdict, Apply, f)
 	}
@@ -43,7 +45,7 @@ func TestEvaluateApply(t *testing.T) {
 func TestEvaluateProfileButNotLetter(t *testing.T) {
 	reqs := mustReqs([]string{"Опыт с VictoriaMetrics"}, nil, "go-primary")
 	letter := "Пишу про другой проект, метрики не упоминаю."
-	f := Evaluate(reqs, profileGo, letter, "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profileGo, letter, "вакансия")
 	if f.Verdict != Apply {
 		t.Errorf("verdict = %q, хочу %q: факт в профиле закрывает must-have", f.Verdict, Apply)
 	}
@@ -64,7 +66,7 @@ func TestEvaluateProfileButNotLetter(t *testing.T) {
 func TestEvaluateSingleMissingIsCaveats(t *testing.T) {
 	reqs := mustReqs([]string{"Опыт эксплуатации Kubernetes в проде"}, nil, "go-primary")
 	letter := "Стек: Go, Kafka"
-	f := Evaluate(reqs, profileGo, letter, "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profileGo, letter, "вакансия")
 	if f.Verdict != Caveats {
 		t.Errorf("verdict = %q, хочу %q: один пробел не роняет вердикт", f.Verdict, Caveats)
 	}
@@ -84,7 +86,7 @@ func TestEvaluateSingleMissingIsCaveats(t *testing.T) {
 func TestEvaluateSkipOnTwoMissing(t *testing.T) {
 	reqs := mustReqs([]string{"Опыт эксплуатации Kubernetes в проде", "Опыт с Docker Swarm"}, nil, "go-primary")
 	letter := "Стек: Go, Kafka"
-	f := Evaluate(reqs, profileGo, letter, "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profileGo, letter, "вакансия")
 	if f.Verdict != Skip {
 		t.Errorf("verdict = %q, хочу %q: два missing — skip", f.Verdict, Skip)
 	}
@@ -101,7 +103,7 @@ func TestEvaluateSkipOnTwoMissing(t *testing.T) {
 // caveats, заголовок называет missing; построчного дубля быть не должно.
 func TestEvaluateMixedProfileAndSingleMissing(t *testing.T) {
 	reqs := mustReqs([]string{"Опыт с ClickHouse", "Опыт эксплуатации Kubernetes в проде"}, nil, "go-primary")
-	f := Evaluate(reqs, profileGo, "Стек: Go, Kafka", "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profileGo, "Стек: Go, Kafka", "вакансия")
 	if f.Verdict != Caveats {
 		t.Errorf("verdict = %q, хочу %q: профиль-закрытие + один missing", f.Verdict, Caveats)
 	}
@@ -117,7 +119,7 @@ func TestEvaluateMixedProfileAndSingleMissing(t *testing.T) {
 func TestEvaluateUnknownSingleIsCaveats(t *testing.T) {
 	reqs := mustReqs([]string{"Опыт в финтех-домене"}, nil, "go-primary")
 	letter := "Стек: Go, Kafka, ClickHouse"
-	f := Evaluate(reqs, profileGo, letter, "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profileGo, letter, "вакансия")
 	if f.Verdict != Caveats {
 		t.Errorf("verdict = %q, хочу %q: одно unknown не роняет вердикт", f.Verdict, Caveats)
 	}
@@ -130,7 +132,7 @@ func TestEvaluateUnknownSingleIsCaveats(t *testing.T) {
 // занижения вердикта — три.
 func TestEvaluateTwoUnknownIsCaveats(t *testing.T) {
 	reqs := mustReqs([]string{"Опыт в финтех-домене", "Понимание скоринга"}, nil, "go-primary")
-	f := Evaluate(reqs, profileGo, "Стек: Go, Kafka", "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profileGo, "Стек: Go, Kafka", "вакансия")
 	if f.Verdict != Caveats {
 		t.Errorf("verdict = %q, хочу %q: два unknown — данных мало, но не приговор", f.Verdict, Caveats)
 	}
@@ -140,7 +142,7 @@ func TestEvaluateTwoUnknownIsCaveats(t *testing.T) {
 // нельзя: skip.
 func TestEvaluateThreeUnknownIsSkip(t *testing.T) {
 	reqs := mustReqs([]string{"Опыт в финтех-домене", "Понимание скоринга", "Опыт банковских интеграций"}, nil, "go-primary")
-	f := Evaluate(reqs, profileGo, "Стек: Go, Kafka", "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profileGo, "Стек: Go, Kafka", "вакансия")
 	if f.Verdict != Skip {
 		t.Errorf("verdict = %q, хочу %q: три unknown — данных нет", f.Verdict, Skip)
 	}
@@ -164,7 +166,7 @@ func TestEvaluateThreeUnknownIsSkip(t *testing.T) {
 func TestEvaluateBridge(t *testing.T) {
 	reqs := mustReqs([]string{"Опыт с Elasticsearch"}, nil, "go-primary")
 	letter := "Проект «Мониторинг»: метрики, p99."
-	f := Evaluate(reqs, profileGo, letter, "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profileGo, letter, "вакансия")
 	if f.Verdict != Caveats {
 		t.Errorf("verdict = %q, хочу %q", f.Verdict, Caveats)
 	}
@@ -180,7 +182,7 @@ func TestEvaluateBridge(t *testing.T) {
 func TestEvaluateNiceToHaveNoPenalty(t *testing.T) {
 	reqs := mustReqs([]string{"Опыт с Kafka"}, []string{"Знание ClickHouse будет плюсом"}, "go-primary")
 	letter := "Стек: Go, Kafka"
-	f := Evaluate(reqs, profileGo, letter, "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profileGo, letter, "вакансия")
 	if f.Verdict != Apply || f.Score != 100 {
 		t.Errorf("verdict = %q, score = %d: nice не должен штрафовать", f.Verdict, f.Score)
 	}
@@ -189,7 +191,7 @@ func TestEvaluateNiceToHaveNoPenalty(t *testing.T) {
 // Мягкие требования не считаются пробелами вовсе.
 func TestEvaluateSoftIgnored(t *testing.T) {
 	reqs := mustReqs([]string{"Самоорганизованность и темп работы"}, nil, "go-primary")
-	f := Evaluate(reqs, profileGo, "Стек: Go", "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profileGo, "Стек: Go", "вакансия")
 	if f.Verdict == Skip {
 		t.Errorf("soft-требования не должны ронять вердикт: %+v", f)
 	}
@@ -202,7 +204,7 @@ func TestEvaluateSoftIgnored(t *testing.T) {
 func TestEvaluateRoleMismatch(t *testing.T) {
 	reqs := mustReqs([]string{"Опыт с Laravel"}, nil, "php-primary")
 	letter := "Стек: Go, Kafka"
-	f := Evaluate(reqs, profileGo, letter, "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profileGo, letter, "вакансия")
 	if f.Verdict != Skip {
 		t.Errorf("verdict = %q, хочу %q: PHP-primary для Go-кандидата", f.Verdict, Skip)
 	}
@@ -212,7 +214,7 @@ func TestEvaluateRoleMismatch(t *testing.T) {
 func TestEvaluateSynonyms(t *testing.T) {
 	reqs := mustReqs([]string{"Опыт с K8s"}, nil, "go-primary")
 	letter := "Эксплуатировал Kubernetes в проде."
-	f := Evaluate(reqs, profileGo, letter, "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profileGo, letter, "вакансия")
 	if f.Verdict != Apply || f.Score != 100 {
 		t.Errorf("verdict = %q score = %d: K8s и Kubernetes — одно и то же", f.Verdict, f.Score)
 	}
@@ -220,7 +222,7 @@ func TestEvaluateSynonyms(t *testing.T) {
 
 // Разбор не удался (пустые списки) — вердикта нет, панель не рендерится.
 func TestEvaluateEmptyRequirementsNoVerdict(t *testing.T) {
-	f := Evaluate(Requirements{}, profileGo, "письмо", "вакансия")
+	f := Evaluate(DefaultConcepts(), Requirements{}, profileGo, "письмо", "вакансия")
 	if f.Verdict != "" {
 		t.Errorf("verdict = %q, хочу пустой — панели не должно быть", f.Verdict)
 	}
@@ -245,7 +247,7 @@ func TestEvaluateArchitectVacancyUserCase(t *testing.T) {
 		"Умение принимать решения с учётом сроков, стоимости, рисков и сложности сопровождения",
 		"Понимание эксплуатации, мониторинга, отказоустойчивости и деградации сервисов",
 	}, nil, "go-primary")
-	f := Evaluate(reqs, profile, letter, "вакансия архитектор")
+	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия архитектор")
 
 	if f.Verdict == Skip {
 		t.Errorf("verdict = skip, а в письме нет ни одного незакрытого must-have: %+v", f)
@@ -287,7 +289,7 @@ func TestEvaluateArchitectVacancyEmptyLetter(t *testing.T) {
 		"Опыт работы с высоконагруженными и критичными системами",
 		"Понимание эксплуатации, мониторинга, отказоустойчивости и деградации сервисов",
 	}, nil, "go-primary")
-	f := Evaluate(reqs, profile, "Стек: Go, Kafka", "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profile, "Стек: Go, Kafka", "вакансия")
 	if f.Verdict != Skip {
 		t.Errorf("verdict = %q, хочу %q: письмо без сигналов концептов", f.Verdict, Skip)
 	}
@@ -313,7 +315,7 @@ func TestEvaluateMajorityTokensLetter(t *testing.T) {
 	reqs := mustReqs([]string{"Знание системных сервисов ОС Linux (systemd, cron)"}, nil, "go-primary")
 	letter := "Linux 17+ лет диагностики, systemd-юниты в production, журналы."
 	profile := ""
-	f := Evaluate(reqs, profile, letter, "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
 	if f.Verdict == Skip {
 		t.Errorf("verdict = skip, но ядро требования закрыто письмом: %+v", f)
 	}
@@ -331,7 +333,7 @@ func TestEvaluateMajorityTokensProfile(t *testing.T) {
 	reqs := mustReqs([]string{"Знание системных сервисов ОС Linux (systemd, cron)"}, nil, "go-primary")
 	letter := "Про другой проект."
 	profile := "Linux 17+ лет, systemd (production), /etc/crontab."
-	f := Evaluate(reqs, profile, letter, "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
 	if len(f.Covered) != 1 || f.Covered[0].Source != SrcProfile {
 		t.Fatalf("покрытие должно быть из профиля: %+v", f.Covered)
 	}
@@ -345,7 +347,7 @@ func TestEvaluateMajorityTokensProfile(t *testing.T) {
 func TestEvaluateMinorityTokensStillMissing(t *testing.T) {
 	reqs := mustReqs([]string{"Опыт с Linux, systemd, cron и journald"}, nil, "go-primary")
 	letter := "Стек: Linux, Go, Kafka."
-	f := Evaluate(reqs, "", letter, "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, "", letter, "вакансия")
 	if f.Verdict != Caveats {
 		t.Errorf("verdict = %q, хочу caveats: 1 токен из 4 — не покрытие, но это один missing", f.Verdict)
 	}
@@ -359,7 +361,7 @@ func TestEvaluateMinorityTokensStillMissing(t *testing.T) {
 func TestEvaluateConcurrencyConceptFromLetter(t *testing.T) {
 	reqs := mustReqs([]string{"Мультипоточное программирование, диспетчеризация процессов"}, nil, "go-primary")
 	letter := "Гео-маппинг доменов: горутины, каналы; ProcessManager в Stable ID — диспетчеризация к воркерам, graceful shutdown."
-	f := Evaluate(reqs, "", letter, "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, "", letter, "вакансия")
 	if len(f.Covered) != 1 || f.Covered[0].Source != SrcLetter {
 		t.Fatalf("концепт должен закрыться письмом по признакам: %+v", f)
 	}
@@ -374,7 +376,7 @@ func TestEvaluateSolidConceptFromProfile(t *testing.T) {
 	reqs := mustReqs([]string{"ООП, SOLID, паттерны проектирования"}, nil, "go-primary")
 	letter := "Стек: Go, Kafka, ClickHouse."
 	profile := "SOLID и GRASP — Task Flow; паттерны в production: ProcessManager + Strategy, Hexagonal, DDD."
-	f := Evaluate(reqs, profile, letter, "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
 	if len(f.Covered) != 1 || f.Covered[0].Source != SrcProfile {
 		t.Fatalf("концепт должен закрыться профилем по признакам: %+v", f)
 	}
@@ -390,7 +392,7 @@ func TestEvaluateSolidConceptFromProfile(t *testing.T) {
 func TestEvaluateNegatedFactNotCovered(t *testing.T) {
 	reqs := mustReqs([]string{"OpenTelemetry для трейсинга"}, nil, "go-primary")
 	letter := "Стек: Go, Kafka, ClickHouse.\nС OpenTelemetry опыта нет, готов освоить."
-	f := Evaluate(reqs, profileGo, letter, "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profileGo, letter, "вакансия")
 	if len(f.Covered) != 0 {
 		t.Errorf("отрицание («опыта нет») не должно считаться закрытием: %+v", f.Covered)
 	}
@@ -406,7 +408,7 @@ func TestEvaluateNegatedFactNotCovered(t *testing.T) {
 func TestEvaluateNegationSentenceScoped(t *testing.T) {
 	reqs := mustReqs([]string{"Опыт с Kafka и ClickHouse"}, nil, "go-primary")
 	letter := "Не работал с Kubernetes.\nСтек: Go, Kafka, ClickHouse."
-	f := Evaluate(reqs, profileGo, letter, "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profileGo, letter, "вакансия")
 	if len(f.Covered) != 1 || f.Covered[0].Source != SrcLetter {
 		t.Errorf("факт в другом предложении должен закрывать требование письмом: %+v", f)
 	}
@@ -419,7 +421,7 @@ func TestEvaluateProfileLimiterNotFact(t *testing.T) {
 	reqs := mustReqs([]string{"OpenTelemetry — трейсинг на всех уровнях"}, nil, "go-primary")
 	profile := "СТЕК: Go, Kafka.\nОграничители:\n- OpenTelemetry: опыта интеграции НЕТ (честный пробел)."
 	letter := "Стек: Go, Kafka.\nС OpenTelemetry опыта нет, готов освоить."
-	f := Evaluate(reqs, profile, letter, "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
 	for _, c := range f.Covered {
 		if c.Source == SrcProfile {
 			t.Errorf("ограничитель профиля не должен засчитываться фактом: %+v", f.Covered)
@@ -437,7 +439,7 @@ func TestEvaluateLetterHonestGapBeatsProfile(t *testing.T) {
 	reqs := mustReqs([]string{"Проектирование event-driven цепочек через transactional outbox"}, nil, "go-primary")
 	profile := "ОБЩИЙ ПРОФИЛЬ:\n- Надёжная доставка событий (мост к outbox): буферизация, идемпотентный Upsert, at-least-once, event-driven паттерны."
 	letter := "Kafka, event-driven архитектуры.\nTransactional outbox на PostgreSQL не использовал; близкий опыт — событийный журнал в БД с polling-потребителями, готов применить паттерн."
-	f := Evaluate(reqs, profile, letter, "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
 	for _, c := range f.Covered {
 		if strings.Contains(c.Note, "впиши в письмо") {
 			t.Errorf("письмо честно отрицает outbox — совет «впиши в письмо» недопустим: %+v", c)
@@ -459,7 +461,7 @@ func TestEvaluateLetterHonestGapBeatsProfile(t *testing.T) {
 func TestEvaluateLogbrokerSynonym(t *testing.T) {
 	reqs := mustReqs([]string{"Logbroker (Kafka-like) как event bus"}, nil, "go-primary")
 	letter := "Kafka consumer groups, event-driven паттерны, at-least-once."
-	f := Evaluate(reqs, profileGo, letter, "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profileGo, letter, "вакансия")
 	if len(f.Covered) != 1 || f.Covered[0].Source != SrcLetter {
 		t.Errorf("Logbroker должен синонимично закрываться Kafka из письма: %+v", f)
 	}
@@ -471,7 +473,7 @@ func TestEvaluateLogbrokerSynonym(t *testing.T) {
 func TestEvaluateOutboxBridge(t *testing.T) {
 	reqs := mustReqs([]string{"Проектирование event-driven цепочек через transactional outbox на PostgreSQL"}, nil, "go-primary")
 	letter := "Kafka producer с буферизацией при недоступности брокера, идемпотентность через Upsert, at-least-once."
-	f := Evaluate(reqs, profileGo, letter, "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profileGo, letter, "вакансия")
 	if len(f.Caveats) != 1 || f.Caveats[0].Source != SrcBridge {
 		t.Fatalf("outbox должен закрываться мостом с оговоркой: %+v", f.Caveats)
 	}
@@ -485,7 +487,7 @@ func TestEvaluateOutboxBridge(t *testing.T) {
 func TestEvaluateObservabilityBridge(t *testing.T) {
 	reqs := mustReqs([]string{"Выстраивание observability"}, nil, "go-primary")
 	letter := "Prometheus + Grafana: 3 дашборда, 23 панели, алертинг."
-	f := Evaluate(reqs, profileGo, letter, "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profileGo, letter, "вакансия")
 	if len(f.Caveats) != 1 || f.Caveats[0].Source != SrcBridge {
 		t.Errorf("observability должен закрываться мостом: %+v", f.Caveats)
 	}
@@ -509,7 +511,7 @@ func TestEvaluateHonestGapsDoNotSkip(t *testing.T) {
 		"С OpenTelemetry опыта нет, готов освоить.\n" +
 		"Transactional outbox не использовал; близкий опыт — событийный журнал в БД, готов применить паттерн.\n" +
 		"С Kubernetes опыта эксплуатации нет, понимаю архитектуру, готов освоить."
-	f := Evaluate(reqs, profile, letter, "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
 	if f.Verdict == Skip {
 		t.Fatalf("честное письмо не должно получать skip: %+v", f)
 	}
@@ -529,13 +531,13 @@ func TestEvaluateHonestGapsDoNotSkip(t *testing.T) {
 func TestEvaluateNegationClauseScoped(t *testing.T) {
 	reqs := mustReqs([]string{"Выстраивание observability"}, nil, "go-primary")
 	letter := "- **OpenTelemetry:** опыта нет, observability — SQL-Top, Prometheus + Grafana, готов освоить."
-	f := Evaluate(reqs, profileGo, letter, "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profileGo, letter, "вакансия")
 	if len(f.Covered) != 1 || f.Covered[0].Source != SrcLetter {
 		t.Fatalf("observability закрыт в письме, отрицание OTel из соседней клаузы не при чём: %+v", f)
 	}
 	// А сам OTel в той же строке остаётся честным пробелом.
 	reqs2 := mustReqs([]string{"OpenTelemetry — трейсинг на всех уровнях"}, nil, "go-primary")
-	f2 := Evaluate(reqs2, profileGo, letter, "вакансия")
+	f2 := Evaluate(DefaultConcepts(), reqs2, profileGo, letter, "вакансия")
 	if len(f2.Caveats) != 1 || f2.Caveats[0].Source != SrcUnknown || !isHonestGap(f2.Caveats[0].Note) {
 		t.Errorf("OTel должен остаться честным пробелом: %+v", f2.Caveats)
 	}
@@ -546,7 +548,7 @@ func TestEvaluateNegationClauseScoped(t *testing.T) {
 func TestEvaluateTrailingNegation(t *testing.T) {
 	reqs := mustReqs([]string{"OpenTelemetry — трейсинг"}, nil, "go-primary")
 	letter := "Стек: Go, Kafka.\nOpenTelemetry, опыта нет, готов освоить."
-	f := Evaluate(reqs, profileGo, letter, "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profileGo, letter, "вакансия")
 	for _, c := range f.Covered {
 		if strings.Contains(c.Text, "OpenTelemetry") {
 			t.Errorf("хвостовое отрицание не распознано, факт засчитан: %+v", c)
@@ -563,7 +565,7 @@ func TestEvaluateLetterMajorityBeatsProfileAll(t *testing.T) {
 	reqs := mustReqs([]string{"Дизайн доменной модели в стиле DDD + Hexagonal Architecture + CQRS"}, nil, "go-primary")
 	letter := "- **DDD + Hexagonal:** E-commerce-Lite (Symfony 7.2, Hexagonal Architecture, DDD — 8 entities, 6 ports), Fraud Engine (domain/application/adapters)."
 	profile := "Профиль: DDD, Hexagonal Architecture, CQRS, доменные модели."
-	f := Evaluate(reqs, profile, letter, "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
 	if len(f.Covered) != 1 || f.Covered[0].Source != SrcLetter {
 		t.Fatalf("письмо закрывает большинство токенов — источник должен быть письмом: %+v", f.Covered)
 	}
@@ -577,7 +579,7 @@ func TestEvaluateLetterMajorityBeatsProfileAll(t *testing.T) {
 func TestEvaluateConsistencyConcept(t *testing.T) {
 	reqs := mustReqs([]string{"Гарантии консистентности и идемпотентности"}, nil, "go-primary")
 	letter := "Stable ID — at-least-once + идемпотентность через ClickHouse Upsert; Fraud Engine — idempotency keys, fail-closed."
-	f := Evaluate(reqs, profileGo, letter, "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profileGo, letter, "вакансия")
 	if len(f.Covered) != 1 || f.Covered[0].Source != SrcLetter {
 		t.Fatalf("требование закрыто признаками письма: %+v", f)
 	}
@@ -595,7 +597,7 @@ func TestEvaluateProfileLimiterBeatsBridgeLabel(t *testing.T) {
 	reqs := mustReqs([]string{"Проектирование event-driven цепочек через transactional outbox на PostgreSQL"}, nil, "go-primary")
 	profile := "ОБЩИЙ ПРОФИЛЬ:\n- Надёжная доставка событий (мост к outbox): буферизация, идемпотентный Upsert, at-least-once, event-driven паттерны, PostgreSQL.\nОГРАНИЧИТЕЛИ:\n- Transactional outbox на PostgreSQL: не использовал."
 	letter := "Event-driven архитектура: Kafka consumer groups, буферизация при недоступности брокера, идемпотентность, at-least-once; PostgreSQL."
-	f := Evaluate(reqs, profile, letter, "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
 	for _, c := range f.Covered {
 		if c.Source == SrcProfile {
 			t.Errorf("ограничитель «не использовал» должен перевесить метку моста: %+v", f.Covered)
@@ -629,7 +631,7 @@ func adviceHas(list []string, sub string) bool {
 func TestEvaluateConceptNegationRespected(t *testing.T) {
 	reqs := mustReqs([]string{"Опыт интеграции с платёжными процессингами"}, nil, "go-primary")
 	letter := "Интеграции строил через REST API. С платёжными процессингами не работал, отсутствует опыт транзакций, готов освоить."
-	f := Evaluate(reqs, profileGo, letter, "вакансия")
+	f := Evaluate(DefaultConcepts(), reqs, profileGo, letter, "вакансия")
 	if len(f.Covered) > 0 {
 		t.Errorf("концептное требование с честным отрицанием не должно попасть в Covered: %+v", f.Covered)
 	}
@@ -643,5 +645,270 @@ func TestEvaluateConceptNegationRespected(t *testing.T) {
 		if strings.Contains(a, "проверь вручную") {
 			t.Errorf("честный пробел не должен попадать в свод «проверь вручную»: %q", a)
 		}
+	}
+}
+
+// TestSynonymsLimitsLimiting — регресс: «rate limits» в требовании и
+// «rate limiting» в письме должны закрываться через синонимы. Без
+// синонима токен-матчинг промахивается (limits ≠ limiting).
+func TestSynonymsLimitsLimiting(t *testing.T) {
+	reqs := Requirements{
+		Role: "go-primary",
+		MustHave: []Requirement{
+			{Text: "Опыт работы с rate limits, пагинацией и курсорами внешних API", Kind: "must"},
+		},
+	}
+	letter := "Реализовал rate limiting (token bucket) + gobreaker, исчерпывающие ретраи."
+	profile := "Опыт: rate limiter, троттлинг на уровне шлюза."
+	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "rate limits")
+	if f.Score < 20 {
+		t.Errorf("score = %d, ожидаю покрытие через синонимы limits/limiting", f.Score)
+	}
+	// Проверяем, что токен limits нашёл «limiting» и «rate limiting» в письме.
+	if !findText("limits", letter) {
+		t.Error("findText(\"limits\", letter) == false — синоним не сработал")
+	}
+	if !findText("limits", profile) {
+		t.Error("findText(\"limits\", profile) == false — синоним не сработал")
+	}
+}
+
+// TestRoleMismatchBilingualProfile — регресс: билингвальный профиль
+// (Go + PHP с продакшн-опытом) на PHP-вакансии не должен давать roleMismatch.
+// Раньше phpCand требовал «php-разработчик» или «основн...php» — узко,
+// и кандидат с «PHP — PRODUCTION (17 ЛЕТ ОПЫТА)» ловил ложное срабатывание.
+func TestRoleMismatchBilingualProfile(t *testing.T) {
+	reqs := Requirements{Role: "php-primary", MustHave: []Requirement{{Text: "PHP в проде"}}}
+	profile := "Go (3 года), PHP (2005+). PHP — PRODUCTION (17 ЛЕТ ОПЫТА), production-инциденты."
+	if roleMismatch(reqs, profile) {
+		t.Error("roleMismatch сработал на билингвальном профиле с 17-летним PHP в проде")
+	}
+	// Контр-кейс: чистый Go-разработчик на PHP-вакансии — должно сработать.
+	profileGoOnly := "Go-разработчик, 3 года, Kafka и gRPC."
+	if !roleMismatch(reqs, profileGoOnly) {
+		t.Error("roleMismatch НЕ сработал на чистом Go-разработчике на PHP-вакансии")
+	}
+	// Контр-кейс: только PHP в профиле — не должно сработать (нет goCand).
+	profilePhpOnly := "PHP-разработчик, 17 лет, Symfony, Laravel."
+	if roleMismatch(reqs, profilePhpOnly) {
+		t.Error("roleMismatch сработал на чистом PHP-разработчике на PHP-вакансии")
+	}
+}
+
+// TestRestAPITokenMatch — регресс: требование «REST API» должно матчиться
+// по токенам rest/api через профиль и письмо. Раньше rest/api были в
+// stopwords, токены отбрасывались, и требование уходило в concept-путь,
+// где нет ни одного подходящего концепта → «нет признаков».
+func TestRestAPITokenMatch(t *testing.T) {
+	reqs := Requirements{
+		Role: "go-primary",
+		MustHave: []Requirement{
+			{Text: "Опыт проектирования и разработки REST API", Kind: "must"},
+		},
+	}
+	letter := "Проектирование публичных API сервиса и механизмы интеграции сторонних сервисов."
+	profile := "Fraud Engine: API — REST (JSON), X-API-Key аутентификация, endpoints: POST /v1/score."
+	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
+	if f.Score < 20 {
+		t.Errorf("score = %d, REST API должен закрываться по токенам из профиля", f.Score)
+	}
+	// Токены rest/api не должны поглощаться stopwords.
+	toks := reqTokens("Опыт разработки REST API")
+	for _, want := range []string{"rest", "api"} {
+		found := false
+		for _, got := range toks {
+			if got == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("reqTokens не содержит %q: %v", want, toks)
+		}
+	}
+}
+
+// TestTestingConceptMatch — модульное тестирование должно закрываться
+// концептом «тестирование и качество кода». Раньше требования про
+// тестирование не триггерили ни один концепт → «нет данных».
+func TestTestingConceptMatch(t *testing.T) {
+	reqs := Requirements{
+		Role: "go-primary",
+		MustHave: []Requirement{
+			{Text: "Знание технологий и методик проведения модульного тестирования", Kind: "must"},
+		},
+	}
+	letter := "155+ тестов (unit, интеграционные, E2E) в Go-проектах."
+	profile := "SQL-Top: 44 unit-теста (hexagonal); Task Flow: dockertest; E-commerce-Lite: TDD."
+	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
+	if f.Score < 20 {
+		t.Errorf("score = %d, тестирование должно закрываться концептом", f.Score)
+	}
+	// Концепт должен триггериться на слове «тестирования» в требовании.
+	if name, _ := conceptHit(DefaultConcepts(), reqs.MustHave[0].Text, profile, 2); name == "" {
+		t.Error("conceptHit не нашёл концепт для «модульного тестирования»")
+	}
+}
+
+// TestLoadProfileEmptyDirLogs — пустой каталог context должен вернуть
+// пустую строку И залогировать предупреждение. Иначе пустой профиль
+// тихо ломает матчинг: концепты не получают сигналов из профиля.
+func TestLoadProfileEmptyDirLogs(t *testing.T) {
+	dir := t.TempDir()
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+
+	got := LoadProfile(dir)
+	if got != "" {
+		t.Errorf("LoadProfile(%q) = %q, хочу пустую строку", dir, got)
+	}
+	if !strings.Contains(buf.String(), "profile") {
+		t.Errorf("нет предупреждения о пустом профиле; вывод: %q", buf.String())
+	}
+}
+
+// TestEvaluateBusinessCriticalConcept — регресс: составное требование
+// «высоконагруженных, распределённых и отказоустойчивых систем ...
+// уровня business critical» НЕ должно уходить в token-путь из-за латинских
+// слов business/critical. Это концептное требование («распределённые
+// системы»), а «business critical» — не технология: токен-матчинг по
+// нему всегда промахивается.
+func TestEvaluateBusinessCriticalConcept(t *testing.T) {
+	reqs := Requirements{
+		Role: "go-primary",
+		MustHave: []Requirement{
+			{Text: "Опыт проектирования и разработки высоконагруженных, распределённых и отказоустойчивых систем реального времени уровня business critical", Kind: "must"},
+		},
+	}
+	if len(reqTokens(reqs.MustHave[0].Text)) != 0 {
+		t.Fatalf("reqTokens должен быть пустым (business/critical — не технологии), получил: %v", reqTokens(reqs.MustHave[0].Text))
+	}
+	letter := "Stable ID: Kafka, 10 000 RPS, event-driven, at-least-once, 20+ воркеров."
+	profile := "Kafka consumer groups, event-driven, партиционирование, отказоустойчивость, 10 000 RPS, P99 < 46ms."
+	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
+	if f.Score < 20 {
+		t.Errorf("score = %d, концепт «распределённые системы» должен закрыть требование", f.Score)
+	}
+}
+
+// TestEvaluateSystemIntegrationConcept — «Понимание принципов системной
+// интеграции» должно закрываться концептом. В профиле есть gRPC
+// (межсервисное взаимодействие), REST API, event-driven (Kafka),
+// микросервисы — но концепта про интеграцию не было → unknown.
+func TestEvaluateSystemIntegrationConcept(t *testing.T) {
+	reqs := Requirements{
+		Role: "go-primary",
+		MustHave: []Requirement{
+			{Text: "Понимание современных принципов и технологий системной интеграции", Kind: "must"},
+		},
+	}
+	letter := "REST API и интеграции: проектирование публичных API, gRPC в микросервисах банка."
+	profile := "gRPC (межсервисное взаимодействие), REST API, event-driven (Kafka), микросервисы."
+	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
+	if f.Score < 20 {
+		t.Errorf("score = %d, системная интеграция должна закрываться концептом", f.Score)
+	}
+	if name, _ := conceptHit(DefaultConcepts(), reqs.MustHave[0].Text, profile, 2); name == "" {
+		t.Error("conceptHit не нашёл концепт для «системной интеграции»")
+	}
+}
+
+// TestEvaluateAgileConcept — «по гибким методологиям» без слова «Agile»
+// должно закрываться концептом процессов разработки. Вакансия может
+// сформулировать требование по-русски, и токен-путь тут бессилен.
+func TestEvaluateAgileConcept(t *testing.T) {
+	reqs := Requirements{
+		Role: "go-primary",
+		MustHave: []Requirement{
+			{Text: "Опыт работы в продуктовой команде по гибким методологиям", Kind: "must"},
+		},
+	}
+	letter := "Работал в продуктовой команде."
+	profile := "Agile (Scrum и Kanban): планирование спринтов, стендапы, ретроспективы, story points."
+	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
+	if len(f.Covered) == 0 {
+		t.Errorf("score = %d, концепт Agile должен закрыть требование", f.Score)
+	}
+	if name, _ := conceptHit(DefaultConcepts(), reqs.MustHave[0].Text, profile, 2); name == "" {
+		t.Error("conceptHit не нашёл концепт для «гибких методологий»")
+	}
+}
+
+// TestEvaluateBrokerAlternatives — «(Kafka, RabbitMQ)» это OR-список:
+// факта Kafka достаточно, честный пробел по RabbitMQ не роняет требование
+// в unknown. Семантика совпадает с правилом «слэш = ИЛИ» в промпте письма.
+func TestEvaluateBrokerAlternatives(t *testing.T) {
+	reqs := Requirements{
+		Role: "go-primary",
+		MustHave: []Requirement{
+			{Text: "Опыт работы с брокерами очередей (Kafka, RabbitMQ)", Kind: "must"},
+		},
+	}
+	letter := "Kafka — основной брокер в Stable ID. RabbitMQ — опыта нет, готов освоить."
+	profile := "Kafka consumer groups, event-driven, партиционирование."
+	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
+	if len(f.Covered) == 0 {
+		t.Errorf("score = %d, Kafka должна закрывать OR-список (Kafka, RabbitMQ)", f.Score)
+	}
+}
+
+// TestEvaluateNonAlternativeStillCaveat — страховка: OR-правило не должно
+// распространяться на обычные перечисления без скобок/слэша/«или». «Kafka,
+// PostgreSQL» — оба нужны, отсутствие PostgreSQL остаётся неполным.
+func TestEvaluateNonAlternativeStillCaveat(t *testing.T) {
+	reqs := Requirements{
+		Role: "go-primary",
+		MustHave: []Requirement{
+			{Text: "Опыт работы с Kafka, PostgreSQL", Kind: "must"},
+		},
+	}
+	letter := "Kafka: продовый опыт. PostgreSQL — опыта нет."
+	profile := "Kafka consumer groups, event-driven."
+	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
+	if len(f.Covered) > 0 {
+		t.Errorf("требование не должно закрываться по Kafka: %+v", f.Covered)
+	}
+}
+
+// TestEvaluateBashProfileBridge — Bash есть в профиле (строка «Языки» и
+// раздел BASH / DATA PIPELINE — GeoMapping), но мост «bash-автоматизация →
+// готов освоить Python/Airflow» ложно помечал его отклонённым в профиле.
+// Требование про Bash обязано закрываться.
+func TestEvaluateBashProfileBridge(t *testing.T) {
+	reqs := Requirements{
+		Role: "go-primary",
+		MustHave: []Requirement{
+			{Text: "Опыт работы с Bash", Kind: "must"},
+		},
+	}
+	letter := "Стек: Go, Docker, Kafka."
+	profile := "Языки: Go, PHP, Bash, SQL.\n" +
+		"## BASH / DATA PIPELINE — GeoMapping\n" +
+		"Bash-based data pipeline: auto_sync_geodata.sh, rebuild_fixed_from_mapping.sh.\n" +
+		"Мост: bash-автоматизация → готов освоить Python/Airflow."
+	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
+	if len(f.Covered) == 0 {
+		t.Fatalf("Bash должен закрываться профилем: caveats=%+v missing=%+v", f.Caveats, f.Missing)
+	}
+}
+
+// TestDeclinedInProfileForwardMarker — «готов освоить» отрицает только то,
+// что стоит ПОСЛЕ него: в мосте «bash-автоматизация → готов освоить
+// Python/Airflow» пробел — Python/Airflow, а Bash остаётся фактом.
+func TestDeclinedInProfileForwardMarker(t *testing.T) {
+	profile := "Мост: bash-автоматизация → готов освоить Python/Airflow."
+	if declinedInProfile("bash", profile) {
+		t.Error("bash стоит до «готов освоить» — не должен быть declined")
+	}
+	if !declinedInProfile("python", profile) {
+		t.Error("python стоит после «готов освоить» — должен быть declined")
+	}
+	if !declinedInProfile("airflow", profile) {
+		t.Error("airflow стоит после «готов освоить» — должен быть declined")
+	}
+	if !declinedInProfile("outbox", "Transactional outbox на PostgreSQL: не использовал.") {
+		t.Error("backward-маркер «не использовал» обязан отклонять outbox")
 	}
 }

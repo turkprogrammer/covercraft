@@ -19,8 +19,11 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/turkprogrammer/covercraft/frontend"
@@ -57,6 +60,12 @@ type Config struct {
 // Handler обрабатывает запросы UI.
 type Handler struct {
 	cfg Config
+	// concepts — динамические концепты, инициализируются лениво при
+	// первом generate() через sync.Once (initConcepts). Хранятся
+	// в Handler, чтобы не пересчитывать на каждый запрос.
+	concepts        []fit.Concept
+	conceptsOnce    sync.Once
+	conceptsInitErr error
 }
 
 // New собирает хендлер. LLM == nil означает «прод»: LLMStream — realLLMStream.
@@ -190,6 +199,15 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Lazy-инициализация концептов через sync.Once: блокирующий LLM-вызов
+	// при первом generate() вместо New() — иначе 18 тестов server_test.go
+	// с fake-LLM висели бы 30 секунд на старте.
+	h.conceptsOnce.Do(h.initConcepts)
+	if h.conceptsInitErr != nil {
+		log.Printf("init concepts failed: %v — using defaults", h.conceptsInitErr)
+		h.concepts = fit.DefaultConcepts()
+	}
+
 	// Таймаут из настроек (UI ограничивает 5–900, дефолт 60): free-tier
 	// не должен висеть минутами — по истечении понятная ошибка.
 	timeoutSec := 60
@@ -245,12 +263,12 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
 	// иначе — прежний матчер на правилах, без дополнительных вызовов.
 	var mapFn fit.MapFunc
 	if strings.EqualFold(h.cfg.FitEngine, "llm") {
-		mapFn = func(ctx context.Context, reqs fit.Requirements, profile, letter, vac string) (fit.Fit, error) {
-			return fit.MapCoverage(ctx, fit.LLMFunc(h.cfg.FitLLM), reqs, profile, letter, vac)
+		mapFn = func(ctx context.Context, concepts []fit.Concept, reqs fit.Requirements, profile, letter, vac string) (fit.Fit, error) {
+			return fit.MapCoverage(ctx, fit.LLMFunc(h.cfg.FitLLM), concepts, reqs, profile, letter, vac)
 		}
 	}
 
-	streamGenerate(w, ctx, h.cfg.LLMStream, system, user, req.Vacancy, fit.LoadProfile(h.cfg.ContextDir), reqs, extractOK, mapFn, timeoutSec)
+	streamGenerate(w, ctx, h.cfg.LLMStream, system, user, req.Vacancy, fit.LoadProfile(h.cfg.ContextDir), reqs, extractOK, mapFn, h.concepts, timeoutSec)
 }
 
 // fitMapTimeout — бюджет гибридной разметки покрытия. Контекст генерации к
@@ -261,15 +279,15 @@ const fitMapTimeout = 90 * time.Second
 
 // fitVerdict — вердикт фита: гибридный матчинг (если задан mapFn) с откатом
 // на детерминированный Evaluate при ошибке модели, таймауте или битом JSON.
-func fitVerdict(ctx context.Context, reqs fit.Requirements, profile, letter, vacancy string, mapFn fit.MapFunc) fit.Fit {
+func fitVerdict(ctx context.Context, concepts []fit.Concept, reqs fit.Requirements, profile, letter, vacancy string, mapFn fit.MapFunc) fit.Fit {
 	if mapFn != nil {
 		mctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), fitMapTimeout)
 		defer cancel()
-		if f, err := mapFn(mctx, reqs, profile, letter, vacancy); err == nil && f.Verdict != "" {
+		if f, err := mapFn(mctx, concepts, reqs, profile, letter, vacancy); err == nil && f.Verdict != "" {
 			return f
 		}
 	}
-	return fit.Evaluate(reqs, profile, letter, vacancy)
+	return fit.Evaluate(concepts, reqs, profile, letter, vacancy)
 }
 
 // streamGenerate вызывает LLM и пишет ответ как SSE: дельты по мере
@@ -280,7 +298,7 @@ func fitVerdict(ctx context.Context, reqs fit.Requirements, profile, letter, vac
 //
 // reqs/extractOK — уже выполненный шаг 1 фита (см. generate): при
 // extractOK вердикт считается детерминированно, без новых LLM-вызовов.
-func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc, system, user, vacancy, profile string, reqs fit.Requirements, extractOK bool, mapFn fit.MapFunc, timeoutSec int) {
+func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc, system, user, vacancy, profile string, reqs fit.Requirements, extractOK bool, mapFn fit.MapFunc, concepts []fit.Concept, timeoutSec int) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
@@ -326,7 +344,7 @@ func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc
 	// покрытия с откатом на матчер при любой ошибке.
 	var verdict *fit.Fit
 	if extractOK {
-		f := fitVerdict(ctx, reqs, profile, letter, vacancy, mapFn)
+		f := fitVerdict(ctx, concepts, reqs, profile, letter, vacancy, mapFn)
 		if f.Verdict != "" {
 			verdict = &f
 		}
@@ -427,4 +445,64 @@ func ListenAndServeRandomPort(h http.Handler) (addr string, err error) {
 		h.ServeHTTP(w, r)
 	}))
 	return "http://127.0.0.1:" + strconv.Itoa(l.Addr().(*net.TCPAddr).Port), nil
+}
+
+// conceptsCachePath — путь к кэшу концептов. Тот же XDG, что и settings.json
+// (консистентно с settings.go:59–63).
+func conceptsCachePath() (string, error) {
+	base, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(base, "covercraft")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "concepts.json"), nil
+}
+
+// initConcepts — ленивая инициализация концептов: читает кэш, при
+// несовпадении хэша или отсутствии файла — пробует LLM-генерацию.
+// При любой ошибке (нет LLM, таймаут, битый JSON) использует DefaultConcepts.
+func (h *Handler) initConcepts() {
+	defer func() {
+		if r := recover(); r != nil {
+			h.conceptsInitErr = fmt.Errorf("panic: %v", r)
+		}
+	}()
+	cachePath, err := conceptsCachePath()
+	if err != nil {
+		h.conceptsInitErr = err
+		return
+	}
+	hash := fit.ProfileHash(h.cfg.ContextDir)
+	if hash != "" {
+		if concepts, savedHash, err := fit.LoadConcepts(cachePath); err == nil && savedHash == hash {
+			h.concepts = concepts
+			return
+		}
+	}
+	// Нет валидного кэша. LLM-генерация концептов — только в гибридном
+	// режиме: детерминированный движок не требует дополнительных вызовов
+	// модели (TestGenerateDeterministicFitEngineDefault проверяет это).
+	if strings.EqualFold(h.cfg.FitEngine, "llm") && h.cfg.FitLLM != nil && h.cfg.ContextDir != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		profile := fit.LoadProfile(h.cfg.ContextDir)
+		if profile != "" {
+			concepts, raw, err := fit.GenerateConcepts(ctx, fit.LLMFunc(h.cfg.FitLLM), profile)
+			if err == nil && len(concepts) > 0 {
+				h.concepts = concepts
+				// raw-структура нужна для roundtrip Save → Load: без неё
+				// кэш запишет только имена и LoadConcepts отбросит всё
+				// (P0: ранее здесь сохранялся мусор).
+				if saveErr := fit.SaveConceptsFile(cachePath, raw, hash); saveErr != nil {
+					log.Printf("сохранение кэша концептов: %v", saveErr)
+				}
+				return
+			}
+		}
+	}
+	// Fallback на дефолты — лучше устаревший набор, чем ничего.
+	h.concepts = fit.DefaultConcepts()
 }
