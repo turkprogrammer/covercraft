@@ -197,11 +197,13 @@ var stopwords = map[string]bool{
 	"senior": true, "middle": true, "junior": true, "lead": true,
 	"years": true, "year": true, "experience": true, "work": true,
 	"com": true, "http": true, "https": true, "www": true,
-	// rest/api — НЕ стоп-слова: «Опыт разработки REST API» матчится по
-	// токенам (профиль: «REST (JSON), X-API-Key»), а не через концепты.
-	// sql/rpc/business/critical — операторы и эпитеты, не технологические
+	// rest/api/sql — НЕ стоп-слова: «Опыт разработки REST API» и
+	// «Уверенный SQL» матчатся по токенам (профиль: «REST (JSON)»,
+	// «БД и SQL: PostgreSQL»), а не через концепты. sql выведен из
+	// стопвордов: в вакансиях он — реальный навык, а не эпитет.
+	// rpc/business/critical — операторы и эпитеты, не технологические
 	// навыки: токен по ним даёт ложный шум («business critical level»).
-	"sql": true, "rpc": true, "business": true, "critical": true,
+	"rpc": true, "business": true, "critical": true,
 }
 
 // normToken приводит токен к каноническому имени по таблице синонимов.
