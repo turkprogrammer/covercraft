@@ -564,7 +564,7 @@ func TestGenerateHybridFitEngine(t *testing.T) {
 			return "Письмо готово.", nil
 		},
 		FitLLM: func(ctx context.Context, system, user string) (string, error) {
-			if strings.Contains(system, "аудитор") {
+			if strings.Contains(system, "сопроводительного письма") {
 				mapCalled = true
 				if !strings.Contains(user, "Письмо готово.") {
 					t.Errorf("в промпт разметки не попало письмо: %q", user)

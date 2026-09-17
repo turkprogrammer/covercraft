@@ -50,7 +50,7 @@ func TestTmpLiveHybrid(t *testing.T) {
 	profile := LoadProfile("../../context")
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	f, err := MapCoverage(ctx, fn, reqs, profile, letter, vacancy)
+	f, err := MapCoverage(ctx, fn, DefaultConcepts(), reqs, profile, letter, vacancy)
 	if err != nil {
 		t.Fatalf("MapCoverage (живая модель): %v", err)
 	}
@@ -64,7 +64,7 @@ func TestTmpLiveHybrid(t *testing.T) {
 	for _, m := range f.Missing {
 		t.Logf("MS %s", m.Text)
 	}
-	fd := Evaluate(reqs, profile, letter, vacancy)
+	fd := Evaluate(DefaultConcepts(), reqs, profile, letter, vacancy)
 	t.Logf("DETERMINISTIC verdict=%s score=%d", fd.Verdict, fd.Score)
 	if !strings.Contains(f.Verdict, "") {
 		t.Logf("ok")

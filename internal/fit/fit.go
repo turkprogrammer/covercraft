@@ -16,9 +16,11 @@
 package fit
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -85,6 +87,9 @@ var synonyms = map[string][]string{
 	"argocd":          {"argocd", "argo cd", "argo-cd"},
 	"1c":              {"1с", "1c", "битрикс"},
 	"kafka":           {"kafka", "logbroker"}, // Logbroker — «Kafka-like» event bus (формулировка вакансий)
+	// «rate limits» в требовании → «rate limiting» в письме: разные словоформы
+	// одного и того же опыта, токен-матчинг без синонима промахивается.
+	"limits": {"limit", "limiting", "rate limit", "rate limiting", "rate-limit", "троттлинг"},
 }
 
 // bridge — мост: требование без прямого факта, но с соседним опытом
@@ -111,147 +116,20 @@ var bridges = map[string]bridge{
 // считает незакрытыми.
 var softTerms = regexp.MustCompile(`(?i)самоорганиз|темп|стрессоустойч|командн|коммуника|внимательн|ответственн|инициативн`)
 
-// signal — один признак концепта с человекочитаемой меткой для ноты.
-type signal struct {
-	label string
-	re    *regexp.Regexp
-}
-
-// concept — концептное требование: навык, названный словами, а не
-// технологией («опыт проектирования распределённых систем»). Токенов у
-// такого требования нет, но его можно закрыть ПО ПРИЗНАКАМ в письме/
-// профиле: сигналы — конкретные технологии и факты, из которых концепт
-// следует. Зачёт только при ≥2 разных сигналах: одно слово — ещё не
-// концепт.
-type concept struct {
-	re      *regexp.Regexp // где требование говорит об этом концепте
-	signals []signal       // чем концепт проявляется в тексте
-	note    string         // человеческое имя концепта
-}
-
-// concepts — таблица концептов. Применяется ТОЛЬКО к требованиям без
-// распознаваемых технологий: у требования с токенами (Kubernetes, Kafka)
-// своя честная проверка, и признаки не должны маскировать реальный пробел
-// (письмо с Prometheus+Grafana не закрывает must-have «K8s в проде»).
-var concepts = []concept{
-	{
-		regexp.MustCompile(`(?i)распредел[её]нн|event-driven|микросервисн|микросервис`),
-		[]signal{
-			{"Kafka/брокеры сообщений", regexp.MustCompile(`(?i)\bkafka\b|очеред|брокер`)},
-			{"event-driven паттерны", regexp.MustCompile(`(?i)event-driven|consumer group|at-least-once|партици|offset|dead letter`)},
-			{"микросервисы/RPC", regexp.MustCompile(`(?i)микросервис|grpc|rpc`)},
-		},
-		"распределённые системы",
-	},
-	{
-		regexp.MustCompile(`(?i)высоконагруж|нагруженн|критичн|highload|производительн`),
-		[]signal{
-			{"нагрузочные метрики RPS/QPS", regexp.MustCompile(`(?i)\brps\b|\bqps\b|highload|запросов в секунду`)},
-			{"латентность P99/P95", regexp.MustCompile(`(?i)\bp99\b|\bp95\b|latency|эл/с`)},
-			{"идемпотентность/лимиты", regexp.MustCompile(`(?i)идемпотент|rate limit|нагрузочн`)},
-		},
-		"высоконагруженные системы",
-	},
-	{
-		regexp.MustCompile(`(?i)эксплуатац|мониторинг|отказоустойч|деградац|observability|наблюдае`),
-		[]signal{
-			{"Prometheus/Grafana", regexp.MustCompile(`(?i)prometheus|grafana|метрик|монитор`)},
-			{"алертинг по SLO", regexp.MustCompile(`(?i)алерт|p99|p95|error rate|дашборд`)},
-			{"SQL-Top/профайлинг", regexp.MustCompile(`(?i)sql.?top|профайлер|pg_stat|explain`)},
-		},
-		"эксплуатация и observability",
-	},
-	{
-		regexp.MustCompile(`(?i)архитектурн|архитектор|техническое ревью|code review|прототип`),
-		[]signal{
-			{"ADR", regexp.MustCompile(`(?i)\badr\b|архитектурн`)},
-			{"архитектурные стили/ревью", regexp.MustCompile(`(?i)hexagonal|ddd|ревью|review`)},
-			{"прототипы/стандарты", regexp.MustCompile(`(?i)прототип|стандарт|рефакторин`)},
-		},
-		"архитектурное управление",
-	},
-	{
-		regexp.MustCompile(`(?i)модернизац|legacy|наследи`),
-		[]signal{
-			{"миграции", regexp.MustCompile(`(?i)миграц|legacy`)},
-			{"модернизация без даунтайма", regexp.MustCompile(`(?i)модернизац|рефакторин|даунтайм`)},
-		},
-		"модернизация legacy",
-	},
-	{
-		regexp.MustCompile(`(?i)многопоточн|мультипоточн|межпроцесс|межпоточн|диспетчеризац|синхронизац|параллельн|конкурентн|жизненн.{0,12}цикл|goroutine`),
-		[]signal{
-			{"горутины/каналы", regexp.MustCompile(`(?i)горутин|канал|goroutine|channel|воркер|worker`)},
-			{"lock-free/синхронизация", regexp.MustCompile(`(?i)lock-free|lockfree|atomic|mutex|мьютекс|блокировк|синхронизац`)},
-			{"диспетчеризация/жизненный цикл", regexp.MustCompile(`(?i)processmanager|process manager|диспетчериз|graceful|пул|pool|shutdown`)},
-		},
-		"многопоточность и жизненный цикл",
-	},
-	{
-		regexp.MustCompile(`(?i)ооп|solid|паттерн|проектирова.{0,15}шаблон|принципы`),
-		[]signal{
-			{"SOLID/GRASP", regexp.MustCompile(`(?i)solid|grasp|ооп|объектно-ориент`)},
-			{"паттерны/архитектурные стили", regexp.MustCompile(`(?i)паттерн|шаблон|hexagonal|ddd|strategy|слой|layer`)},
-		},
-		"ООП/SOLID/паттерны",
-	},
-	{
-		regexp.MustCompile(`(?i)алгоритм|структур.{0,15}данн`),
-		[]signal{
-			{"алгоритмы/данные в проектах", regexp.MustCompile(`(?i)очеред|приоритет|индекс|классификац|алгоритм|дерев|кэш|хеш`)},
-			{"нагрузочная практика", regexp.MustCompile(`(?i)rps|p99|p95|throughput|эл/с`)},
-		},
-		"алгоритмы и структуры данных",
-	},
-	{
-		regexp.MustCompile(`(?i)backend|бэкенд|бекенд|серверн`),
-		[]signal{
-			{"серверные языки", regexp.MustCompile(`(?i)\bgo\b|\bgolang\b|php|python|java`)},
-			{"API/сервисы", regexp.MustCompile(`(?i)api|grpc|http|сервис`)},
-		},
-		"backend-разработка",
-	},
-	{
-		// Живое требование платёжной вакансии: «Гарантии консистентности и
-		// идемпотентности» — латиницы в нём нет, поэтому раньше уходило в
-		// unknown, хотя письмо закрывает его словами (at-least-once,
-		// идемпотентный Upsert, idempotency keys).
-		regexp.MustCompile(`(?i)консистентн|идемпотентн|целостн|гарантии доставки|exactly-once`),
-		[]signal{
-			{"at-least-once/досылка", regexp.MustCompile(`(?i)at-least-once|at least once|досылк|буфериз|retry|повторн`)},
-			{"идемпотентность/Upsert", regexp.MustCompile(`(?i)идемпотент|idempotency|upsert`)},
-			{"транзакции/fail-closed", regexp.MustCompile(`(?i)транзакц|fail-closed|exactly-once`)},
-		},
-		"гарантии консистентности и идемпотентности",
-	},
-	{
-		// Живой кейс платёжной вакансии: «Интеграция с платёжными
-		// процессингами» — латиницы нет, токенов нет, но по сигналам
-		// (банк/финтех, транзакции, платежи) письмо его закрывает.
-		regexp.MustCompile(`(?i)платёжн|процессинг|эквайринг|payment|acquiring`),
-		[]signal{
-			{"финтех/банкинг", regexp.MustCompile(`(?i)финтех|fintech|банкинг|банковск|эквайринг`)},
-			{"платежи/payment", regexp.MustCompile(`(?i)платёж|платеж|payment|биллинг|billing`)},
-			{"процессинг/шлюзы", regexp.MustCompile(`(?i)процессинг|шлюз|gateway|webhook|acquiring|эквайринг`)},
-		},
-		"интеграция с платёжными процессингами",
-	},
-}
-
 // conceptHonestGap — концептное требование честно названо пробелом: тема
 // требования (её regex) упомянута в письме, но только в клаузах под
 // отрицанием («С платёжными процессингами не работал»). Это не «нет данных»,
 // а раскрытый кандидатом пробел — вердикт не должен наказывать честность
 // сильнее, чем молчание.
-func conceptHonestGap(reqText, letter string) (string, bool) {
+func conceptHonestGap(concepts []Concept, reqText, letter string) (string, bool) {
 	clauses := sentences(letter)
 	for _, c := range concepts {
-		if !c.re.MatchString(strings.ToLower(reqText)) {
+		if !c.Trigger.MatchString(strings.ToLower(reqText)) {
 			continue
 		}
 		negated := false
 		for i, cl := range clauses {
-			if !c.re.MatchString(strings.ToLower(cl)) {
+			if !c.Trigger.MatchString(strings.ToLower(cl)) {
 				continue
 			}
 			if clauseNegated(clauses, i) {
@@ -262,7 +140,7 @@ func conceptHonestGap(reqText, letter string) (string, bool) {
 			return "", false
 		}
 		if negated {
-			return "в письме честно назван пробел («" + c.note + "») — для вердикта это «нет данных»", true
+			return "в письме честно назван пробел («" + c.Name + "») — для вердикта это «нет данных»", true
 		}
 	}
 	return "", false
@@ -283,24 +161,24 @@ func hasCyrillic(s string) bool {
 // сработавших сигналов. Сигналы, найденные в клаузах под отрицанием,
 // не засчитываются: «С платёжными процессингами не работал» не закрывает
 // «опыт интеграции с платёжными процессингами».
-func conceptHit(reqText, text string, minSignals int) (name string, hits []string) {
+func conceptHit(concepts []Concept, reqText, text string, minSignals int) (name string, hits []string) {
 	clauses := sentences(text)
 	for _, c := range concepts {
-		if !c.re.MatchString(strings.ToLower(reqText)) {
+		if !c.Trigger.MatchString(strings.ToLower(reqText)) {
 			continue
 		}
 		hits = nil
-		for _, s := range c.signals {
+		for _, s := range c.Signals {
 			// Ищем сигнал в клаузах: засчитываем, только если он не под отрицанием.
 			for i, cl := range clauses {
-				if s.re.MatchString(strings.ToLower(cl)) && !clauseNegated(clauses, i) {
-					hits = append(hits, s.label)
+				if s.Re.MatchString(strings.ToLower(cl)) && !clauseNegated(clauses, i) {
+					hits = append(hits, s.Label)
 					break // один хит на сигнал достаточно
 				}
 			}
 		}
 		if len(hits) >= minSignals {
-			return c.note, hits
+			return c.Name, hits
 		}
 	}
 	return "", nil
@@ -319,7 +197,11 @@ var stopwords = map[string]bool{
 	"senior": true, "middle": true, "junior": true, "lead": true,
 	"years": true, "year": true, "experience": true, "work": true,
 	"com": true, "http": true, "https": true, "www": true,
-	"api": true, "sql": true, "rest": true, "rpc": true,
+	// rest/api — НЕ стоп-слова: «Опыт разработки REST API» матчится по
+	// токенам (профиль: «REST (JSON), X-API-Key»), а не через концепты.
+	// sql/rpc/business/critical — операторы и эпитеты, не технологические
+	// навыки: токен по ним даёт ложный шум («business critical level»).
+	"sql": true, "rpc": true, "business": true, "critical": true,
 }
 
 // normToken приводит токен к каноническому имени по таблице синонимов.
@@ -384,6 +266,17 @@ func findText(token, text string) bool {
 // письмо получало «закрыто в письме» по голой подстроке.
 var negRe = regexp.MustCompile(`(?i)опыта нет|нет опыта|опыта\s+(?:\S+\s+)?нет|не работал|не использ|отсутствует|не зафиксирован|не применял|готов освоить|освою|не приходилось`)
 
+// backwardNegRe — маркеры, отрицающие клаузу целиком, включая стоящее до
+// них: «Transactional outbox на PostgreSQL: НЕ использовал» — отклоняет
+// outbox, хотя тот стоит впереди маркера.
+var backwardNegRe = regexp.MustCompile(`(?i)опыта нет|нет опыта|опыта\s+(?:\S+\s+)?нет|не работал|не использ|отсутствует|не зафиксирован|не применял|не приходилось`)
+
+// forwardNegRe — маркеры «готов освоить X»: отрицают только то, что стоит
+// ПОСЛЕ них. В профиле мост «bash-автоматизация → готов освоить
+// Python/Airflow» называет пробелом Python/Airflow, а Bash-автоматизация
+// остаётся положительным якорем — old-логика роняла Bash как declined.
+var forwardNegRe = regexp.MustCompile(`(?i)готов освоить|освою`)
+
 // sentences — разбивка текста на клаузы (по .!?\n;,). Область отрицания
 // клаузальная, а не «предложенческая»: буллет-пробел сплошь и рядом
 // перечисляет через запятую и пробел, и позитив — «OpenTelemetry: опыта
@@ -431,20 +324,81 @@ func tokenNegatedOnly(token, text string) bool {
 	return findText(token, text) && !findFact(token, text)
 }
 
+// altListRe — OR-списки технологий в тексте требования. Вакансия
+// перечисляет взаимозаменяемые варианты: «(Kafka, RabbitMQ)»,
+// «RabbitMQ/Kafka», «Kafka или RabbitMQ». Факта по любой позиции
+// достаточно для закрытия — то же правило «слэш = ИЛИ», что в промпте
+// письма. Обычное перечисление через запятую без скобок/слэша/«или»
+// OR-списком НЕ считается: «Kafka, PostgreSQL» — оба нужны.
+var (
+	parenAltRe = regexp.MustCompile(`\(([^()]*)\)`)
+	slashAltRe = regexp.MustCompile(`(?i)[a-z][a-z0-9+#.-]{1,30}\s*/\s*[a-z][a-z0-9+#.-]{1,30}`)
+	orAltRe    = regexp.MustCompile(`(?i)[a-z][a-z0-9+#.-]{1,30}(?:\s*,?\s+или\s+[a-z][a-z0-9+#.-]{1,30})+`)
+)
+
+// altGroups — группы альтернатив требования, каждая как список
+// канонических токенов.
+func altGroups(reqText string) [][]string {
+	var groups [][]string
+	add := func(s string) {
+		if toks := reqTokens(s); len(toks) >= 2 {
+			groups = append(groups, toks)
+		}
+	}
+	for _, m := range parenAltRe.FindAllStringSubmatch(reqText, -1) {
+		add(m[1])
+	}
+	for _, m := range slashAltRe.FindAllString(reqText, -1) {
+		add(m)
+	}
+	for _, m := range orAltRe.FindAllString(reqText, -1) {
+		add(m)
+	}
+	return groups
+}
+
+// alternativesOnly — каждый недостающий токен входит в OR-группу вместе
+// с каким-нибудь найденным токеном. Тогда требование закрыто: найденный
+// факт замещает альтернативу. Если хоть один missing вне OR-связи с
+// found (или групп нет вовсе) — правило не применяется.
+func alternativesOnly(missing []string, found map[string]bool, reqText string) bool {
+	groups := altGroups(reqText)
+	if len(groups) == 0 {
+		return false
+	}
+	for _, mt := range missing {
+		ok := false
+		for _, g := range groups {
+			if !slices.Contains(g, mt) {
+				continue
+			}
+			if slices.ContainsFunc(g, func(t string) bool { return found[t] }) {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // matchTokens — покрытие требования по токенам в одном источнике: сначала
-// «все токены», затем правило большинства («Linux (systemd, cron)»: systemd
-// есть, cron нет — ядро требования закрыто, недостающее названо в ноте; один
-// неупомянутый термин не роняет требование в missing; один токен — либо есть,
-// либо нет). Проверка идёт «источник за источником»: порядок важен, иначе
-// «профиль закрывает все токены» бьёт «письмо закрывает большинство» и
-// выдаётся совет «впиши в письмо» при уже закрытом письме (живой кейс
-// DDD + Hexagonal: письмо даёт ddd/hexagonal/architecture, нет только api).
+// «все токены», затем OR-список альтернатив, затем правило большинства
+// («Linux (systemd, cron)»: systemd есть, cron нет — ядро требования
+// закрыто, недостающее названо в ноте; один неупомянутый термин не роняет
+// требование в missing; один токен — либо есть, либо нет). Проверка идёт
+// «источник за источником»: порядок важен, иначе «профиль закрывает все
+// токены» бьёт «письмо закрывает большинство» и выдаётся совет «впиши в
+// письмо» при уже закрытом письме (живой кейс DDD + Hexagonal: письмо даёт
+// ddd/hexagonal/architecture, нет только api).
 //
 // Токен, честно отрицанный в письме («Transactional outbox не использовал»),
 // не засчитывается нигде — включая профиль: честный пробел письма
 // приоритетнее любого факта профиля, иначе matcher советует вписать
 // неприменённый опыт.
-func matchTokens(tokens []string, src, text, letter string) (string, string, bool) {
+func matchTokens(tokens []string, reqText, src, text, letter string) (string, string, bool) {
 	all := true
 	for _, t := range tokens {
 		if !countsAsFact(t, src, text, letter) {
@@ -459,13 +413,23 @@ func matchTokens(tokens []string, src, text, letter string) (string, string, boo
 		return src, "закрыто в письме", true
 	}
 	var missing []string
-	found := 0
+	foundSet := map[string]bool{}
 	for _, t := range tokens {
 		if countsAsFact(t, src, text, letter) {
-			found++
+			foundSet[t] = true
 		} else {
 			missing = append(missing, t)
 		}
+	}
+	// OR-список: «(Kafka, RabbitMQ)» при факте Kafka закрыт, даже если
+	// RabbitMQ честно назван пробелом — технологии в списке взаимозаменяемы.
+	// Проверяем до честного пробела: иначе OR-требование уходило в unknown.
+	if len(missing) > 0 && len(foundSet) > 0 && alternativesOnly(missing, foundSet, reqText) {
+		note := "; не обязательны (альтернативы): " + strings.Join(missing, ", ")
+		if src == SrcProfile {
+			return src, "в профиле есть факт по альтернативному списку (не обязательны: " + strings.Join(missing, ", ") + ") — впиши в письмо, закроется полностью", true
+		}
+		return src, "закрыто в письме по альтернативному списку" + note, true
 	}
 	// Majority может закрыть, только если missing не содержит
 	// честно отрицаемых токенов: «почти всё, но один честно назван
@@ -477,7 +441,7 @@ func matchTokens(tokens []string, src, text, letter string) (string, string, boo
 			}
 		}
 	}
-	if found >= 2 && found > len(tokens)-found && len(missing) > 0 {
+	if len(foundSet) >= 2 && len(foundSet) > len(tokens)-len(foundSet) && len(missing) > 0 {
 		if src == SrcProfile {
 			return src, "в профиле есть факт по большинству токенов (не упомянуты: " + strings.Join(missing, ", ") + ") — впиши в письмо, закроется полностью", true
 		}
@@ -506,10 +470,23 @@ func countsAsFact(t, src, text, letter string) bool {
 
 // declinedInProfile — токен назван в отрицающей клаузе профиля: это
 // ограничитель («НЕ использовал», «опыта нет»), а не факт для письма.
+// Отрицание направленное: backward-маркеры («не использовал») гасят всю
+// клаузу, forward-маркеры («готов освоить Python/Airflow») — только то,
+// что стоит после них, поэтому положительный якорь моста до маркера
+// («bash-автоматизация») фактом остаётся.
 func declinedInProfile(token, profile string) bool {
 	clauses := sentences(profile)
 	for i, c := range clauses {
-		if findText(token, c) && clauseNegated(clauses, i) {
+		if !findText(token, c) {
+			continue
+		}
+		if backwardNegRe.MatchString(c) {
+			return true
+		}
+		if loc := forwardNegRe.FindStringIndex(c); loc != nil && !findText(token, c[:loc[0]]) {
+			return true
+		}
+		if i+1 < len(clauses) && bareNegRe.MatchString(clauses[i+1]) {
 			return true
 		}
 	}
@@ -520,12 +497,12 @@ func declinedInProfile(token, profile string) bool {
 // требования есть в тексте целиком; (2) требование без технологий — по
 // концепт-признакам (≥2 сигнала). Источники по приоритету: письмо,
 // профиль, мост, неизвестно.
-func coverage(req Requirement, letter, profile string) (source, note string) {
+func coverage(concepts []Concept, req Requirement, letter, profile string) (source, note string) {
 	tokens := reqTokens(req.Text)
 	if len(tokens) == 0 {
 		// Концептное требование: проверяем честный пробел до проверки признаков,
 		// чтобы «С платёжными процессингами не работал» не засчитался как покрытие.
-		if note, ok := conceptHonestGap(req.Text, letter); ok {
+		if note, ok := conceptHonestGap(concepts, req.Text, letter); ok {
 			return SrcUnknown, note
 		}
 		// Ищем признаки в письме, потом в профиле.
@@ -535,7 +512,7 @@ func coverage(req Requirement, letter, profile string) (source, note string) {
 			{SrcLetter, letter},
 			{SrcProfile, profile},
 		} {
-			if name, hits := conceptHit(req.Text, src.text, 2); name != "" {
+			if name, hits := conceptHit(concepts, req.Text, src.text, 2); name != "" {
 				if src.label == SrcProfile {
 					return SrcProfile, "закрыто по признакам («" + name + "»: " + strings.Join(hits, ", ") + "), но в письмо не попало — впиши в письмо, закроется полностью"
 				}
@@ -550,7 +527,7 @@ func coverage(req Requirement, letter, profile string) (source, note string) {
 		{SrcLetter, letter},
 		{SrcProfile, profile},
 	} {
-		if s, note, ok := matchTokens(tokens, src.label, src.text, letter); ok {
+		if s, note, ok := matchTokens(tokens, req.Text, src.label, src.text, letter); ok {
 			return s, note
 		}
 	}
@@ -613,6 +590,7 @@ func LoadProfile(contextDir string) string {
 	var b strings.Builder
 	entries, err := os.ReadDir(contextDir)
 	if err != nil {
+		slog.Warn("context profile unreachable — fit matching will use the letter only", "context_dir", contextDir, "err", err)
 		return ""
 	}
 	names := make([]string, 0, len(entries))
@@ -620,6 +598,10 @@ func LoadProfile(contextDir string) string {
 		if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
 			names = append(names, e.Name())
 		}
+	}
+	if len(names) == 0 {
+		slog.Warn("no context/*.md found — profile empty, fit matching will use the letter only", "context_dir", contextDir)
+		return ""
 	}
 	sort.Strings(names)
 	for i, name := range names {
@@ -641,6 +623,7 @@ func LoadProfile(contextDir string) string {
 // JSON-представление Fit не меняется: служебные поля живут в билдере.
 type fitBuilder struct {
 	f             Fit
+	concepts      []Concept
 	sum           float64
 	count         int
 	missingAdvice []string
@@ -683,7 +666,7 @@ func (b *fitBuilder) finish(reqs Requirements, profile, letter string) Fit {
 		if softTerms.MatchString(r.Text) {
 			continue
 		}
-		if src, _ := coverage(r, letter, profile); src == SrcLetter {
+		if src, _ := coverage(b.concepts, r, letter, profile); src == SrcLetter {
 			b.sum += 0.05 * float64(b.count) // бонус +5% от базы must-have за каждый
 		}
 	}
@@ -777,10 +760,10 @@ func (b *fitBuilder) finish(reqs Requirements, profile, letter string) Fit {
 //
 // Веса покрытия (must-have): письмо 1.0, профиль 0.7 (совет «добавь в
 // письмо»), мост 0.5 (слабое место), unknown 0.2 («проверь вручную»),
-// не закрыто 0. Nice-to-have: закрыт — небольшой бонус, не закрыт — без
+// не закрыто 0. Nice-to-have: закрыт — небольшой бонус, незакрыт — без
 // штрафа. «Будет плюсом» и мягкие требования покрытием не считаются.
-func Evaluate(reqs Requirements, profile, letter, vacancy string) Fit {
-	b := &fitBuilder{f: Fit{Role: reqs.Role}}
+func Evaluate(concepts []Concept, reqs Requirements, profile, letter, vacancy string) Fit {
+	b := &fitBuilder{f: Fit{Role: reqs.Role}, concepts: concepts}
 	if reqs.MustHave == nil && reqs.NiceToHave == nil {
 		// Разбор не удался — вердикта быть не должно, панель не рендерится.
 		b.f.Verdict = ""
@@ -790,7 +773,7 @@ func Evaluate(reqs Requirements, profile, letter, vacancy string) Fit {
 		if plusRe.MatchString(r.Text) || softTerms.MatchString(r.Text) {
 			continue // «будет плюсом» и мягкие не требуют покрытия
 		}
-		src, note := coverage(r, letter, profile)
+		src, note := coverage(concepts, r, letter, profile)
 		b.addMust(r, src, note)
 	}
 	return b.finish(reqs, profile, letter)
@@ -820,7 +803,12 @@ func roleMismatch(reqs Requirements, profile string) bool {
 		return false
 	}
 	phpRole := strings.Contains(role, "php")
+	// goCand: Go-специалист без PHP-маркеров — откликаться на PHP-вакансию рискованно.
 	goCand := regexp.MustCompile(`(?i)go-разработчик|golang|основн.{0,15}\bgo\b`).MatchString(profile)
-	phpCand := regexp.MustCompile(`(?i)php-разработчик|основн.{0,15}php`).MatchString(profile)
+	// phpCand: кандидат с сильным PHP-маркером. Раньше регулярка требовала
+	// «php-разработчик» или «основн...php» — узко, не ловило билингвальный
+	// профиль с «PHP — PRODUCTION (17 ЛЕТ ОПЫТА)». Расширяем до факта
+	// продакшн-опыта на PHP, не только «названия профессии».
+	phpCand := regexp.MustCompile(`(?i)php-разработчик|основн.{0,15}php|\bphp\b.{0,40}(production|prod|лет|опыт)|(production|prod|лет|опыт).{0,40}\bphp\b`).MatchString(profile)
 	return phpRole && goCand && !phpCand
 }

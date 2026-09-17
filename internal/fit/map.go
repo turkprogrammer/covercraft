@@ -53,7 +53,7 @@ type Coverage struct {
 
 // MapFunc — шов гибридного матчинга: сервер подменяет его в тестах, а при
 // ошибке (таймаут, битый JSON) откатывается на Evaluate.
-type MapFunc func(ctx context.Context, reqs Requirements, profile, letter, vacancy string) (Fit, error)
+type MapFunc func(ctx context.Context, concepts []Concept, reqs Requirements, profile, letter, vacancy string) (Fit, error)
 
 // minQuoteLen — минимальная длина цитаты-доказательства: короткие обрывки
 // вроде «go» находятся в любом тексте и доказательством не являются.
@@ -117,7 +117,7 @@ func ParseCoverage(raw string) (Coverage, error) {
 // верификатор проверяет цитаты и отрицания, скор и вердикт считает код.
 // Ошибка — сигнал вызывающему откатиться на детерминированный Evaluate
 // (вердикт в панели не теряется).
-func MapCoverage(ctx context.Context, fn LLMFunc, reqs Requirements, profile, letter, vacancy string) (Fit, error) {
+func MapCoverage(ctx context.Context, fn LLMFunc, concepts []Concept, reqs Requirements, profile, letter, vacancy string) (Fit, error) {
 	if fn == nil {
 		return Fit{}, errors.New("нет LLM-функции для разметки покрытия")
 	}
@@ -153,13 +153,13 @@ func MapCoverage(ctx context.Context, fn LLMFunc, reqs Requirements, profile, le
 	}
 	positional := len(cov.Items) == len(prompted)
 
-	b := &fitBuilder{f: Fit{Role: reqs.Role}}
+	b := &fitBuilder{f: Fit{Role: reqs.Role}, concepts: concepts}
 	for i, r := range prompted {
 		it, ok := byText[itemKey(r.Text)]
 		if !ok && positional {
 			it, ok = cov.Items[i], true
 		}
-		src, note := verifyItem(it, ok, r, letter, profile)
+		src, note := verifyItem(concepts, it, ok, r, letter, profile)
 		b.addMust(r, src, note)
 	}
 	return b.finish(reqs, profile, letter), nil
@@ -167,7 +167,7 @@ func MapCoverage(ctx context.Context, fn LLMFunc, reqs Requirements, profile, le
 
 // verifyItem — верификатор записи модели: принимаем только доказанное,
 // остальное откатываем на детерминированный матчер.
-func verifyItem(it CoverageItem, ok bool, r Requirement, letter, profile string) (string, string) {
+func verifyItem(concepts []Concept, it CoverageItem, ok bool, r Requirement, letter, profile string) (string, string) {
 	tokens := reqTokens(r.Text)
 	if ok {
 		switch strings.ToLower(strings.TrimSpace(it.Source)) {
@@ -181,7 +181,7 @@ func verifyItem(it CoverageItem, ok bool, r Requirement, letter, profile string)
 			// большинству остальных токенов — тогда письмо действительно
 			// сильнее, и с моделью соглашаемся.
 			if note, gap := honestGapNote(tokens, letter); gap {
-				if src, _, _ := matchTokens(tokens, SrcLetter, letter, letter); src != SrcLetter {
+				if src, _, _ := matchTokens(tokens, r.Text, SrcLetter, letter, letter); src != SrcLetter {
 					return SrcUnknown, note
 				}
 			}
@@ -215,7 +215,7 @@ func verifyItem(it CoverageItem, ok bool, r Requirement, letter, profile string)
 		}
 	}
 	// Откат: детерминированный результат сильнее недоказанной записи.
-	src, note := coverage(r, letter, profile)
+	src, note := coverage(concepts, r, letter, profile)
 	switch src {
 	case SrcLetter, SrcProfile, SrcBridge:
 		return src, note
