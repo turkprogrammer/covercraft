@@ -548,3 +548,131 @@ func failIfCalled(t *testing.T) func(ctx context.Context, system, user string) (
 		return "", nil
 	}
 }
+
+// Гибридный движок фита (fitEngine="llm"): модель размечает покрытие после
+// генерации письма, код проверяет цитату и считает вердикт. Разметка
+// отличима от извлечения по системному промпту («аудитор»).
+func TestGenerateHybridFitEngine(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	ctxDir := t.TempDir()
+	os.WriteFile(filepath.Join(ctxDir, "01-profile.md"), []byte("Профиль: Go-разработчик."), 0o600)
+	mapCalled := false
+	h := New(Config{
+		ContextDir: ctxDir,
+		FitEngine:  "llm",
+		LLM: func(ctx context.Context, system, user string) (string, error) {
+			return "Письмо готово.", nil
+		},
+		FitLLM: func(ctx context.Context, system, user string) (string, error) {
+			if strings.Contains(system, "аудитор") {
+				mapCalled = true
+				if !strings.Contains(user, "Письмо готово.") {
+					t.Errorf("в промпт разметки не попало письмо: %q", user)
+				}
+				if !strings.Contains(user, "Платежи") {
+					t.Errorf("в промпт разметки не попал список требований: %q", user)
+				}
+				return `{"items":[{"text":"Платежи","source":"letter","quote":"Письмо готово.","note":"есть"}]}`, nil
+			}
+			return `{"role":"go-primary","mustHave":[{"text":"Платежи","kind":"must","category":"domain"}]}`, nil
+		},
+	})
+
+	body, _ := json.Marshal(map[string]string{"vacancy": "Нужны платежи."})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+
+	ev := parseSSE(t, rec.Body.String())
+	if ev.Err != "" {
+		t.Fatalf("ошибка в стриме: %q", ev.Err)
+	}
+	if !mapCalled {
+		t.Fatal("гибридный матчинг не вызван при fitEngine=llm")
+	}
+	if ev.Done == nil || ev.Done.Fit == nil {
+		t.Fatal("нет вердикта фита в done-событии")
+	}
+	if len(ev.Done.Fit.Covered) != 1 || !strings.Contains(ev.Done.Fit.Covered[0].Note, "цитата") {
+		t.Errorf("вердикт должен быть построен по цитате модели: %+v", ev.Done.Fit)
+	}
+	if ev.Done.Fit.Verdict != "apply" {
+		t.Errorf("verdict = %q, хочу apply", ev.Done.Fit.Verdict)
+	}
+}
+
+// Ошибка разметки (мусор вместо JSON) — откат на детерминированный матчер:
+// панель вердикта не исчезает.
+func TestGenerateHybridFitFallsBackOnBadJSON(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	ctxDir := t.TempDir()
+	os.WriteFile(filepath.Join(ctxDir, "01-profile.md"), []byte("Профиль: Go-разработчик."), 0o600)
+	h := New(Config{
+		ContextDir: ctxDir,
+		FitEngine:  "llm",
+		LLM: func(ctx context.Context, system, user string) (string, error) {
+			return "Письмо готово.", nil
+		},
+		FitLLM: func(ctx context.Context, system, user string) (string, error) {
+			if strings.Contains(system, "аудитор") {
+				return "извините, не могу", nil // битая разметка
+			}
+			return `{"role":"go-primary","mustHave":[{"text":"Kubernetes в проде","kind":"must","category":"stack"}]}`, nil
+		},
+	})
+
+	body, _ := json.Marshal(map[string]string{"vacancy": "Нужен Kubernetes."})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+
+	ev := parseSSE(t, rec.Body.String())
+	if ev.Err != "" {
+		t.Fatalf("ошибка в стриме: %q", ev.Err)
+	}
+	if ev.Done == nil || ev.Done.Fit == nil {
+		t.Fatal("откат не сработал: вердикта нет")
+	}
+	if len(ev.Done.Fit.Missing) != 1 {
+		t.Errorf("детерминированный вердикт должен найти пробел: %+v", ev.Done.Fit)
+	}
+	if ev.Done.Fit.Verdict != "apply_with_caveats" {
+		t.Errorf("verdict = %q, хочу apply_with_caveats", ev.Done.Fit.Verdict)
+	}
+}
+
+// Без fitEngine вердикт считается матчером на правилах: разметка не вызывается.
+func TestGenerateDeterministicFitEngineDefault(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	ctxDir := t.TempDir()
+	os.WriteFile(filepath.Join(ctxDir, "01-profile.md"), []byte("Профиль: Go-разработчик."), 0o600)
+	mapCalled := false
+	h := New(Config{
+		ContextDir: ctxDir,
+		LLM: func(ctx context.Context, system, user string) (string, error) {
+			return "Письмо готово.", nil
+		},
+		FitLLM: func(ctx context.Context, system, user string) (string, error) {
+			if strings.Contains(system, "аудитор") {
+				mapCalled = true
+			}
+			return `{"role":"go-primary","mustHave":[{"text":"Go","kind":"must","category":"stack"}]}`, nil
+		},
+	})
+
+	body, _ := json.Marshal(map[string]string{"vacancy": "Нужен Go."})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+
+	if mapCalled {
+		t.Error("при пустом fitEngine модель разметки вызываться не должна")
+	}
+	ev := parseSSE(t, rec.Body.String())
+	if ev.Done == nil || ev.Done.Fit == nil || ev.Done.Fit.Verdict == "" {
+		t.Fatalf("детерминированный вердикт должен быть на месте: %+v", ev.Done)
+	}
+}

@@ -13,12 +13,21 @@ import (
 	"path/filepath"
 
 	"github.com/turkprogrammer/covercraft/internal/server"
+	"github.com/turkprogrammer/covercraft/internal/settings"
 	"github.com/turkprogrammer/covercraft/internal/window"
 )
 
 func main() {
+	// Движок фита задаётся в settings.json (fitEngine: "llm" — гибридная
+	// разметка покрытия моделью). Ошибка чтения настроек не фатальна: тогда
+	// работает детерминированный матчер, как и раньше.
+	engine := ""
+	if s, err := settings.Load(); err == nil {
+		engine = s.FitEngine
+	}
 	addr, err := server.ListenAndServeRandomPort(server.New(server.Config{
 		ContextDir: contextDir(),
+		FitEngine:  engine,
 	}))
 	if err != nil {
 		fail(err)

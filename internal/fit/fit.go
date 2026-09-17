@@ -156,8 +156,8 @@ var concepts = []concept{
 		regexp.MustCompile(`(?i)эксплуатац|мониторинг|отказоустойч|деградац|observability|наблюдае`),
 		[]signal{
 			{"Prometheus/Grafana", regexp.MustCompile(`(?i)prometheus|grafana|метрик|монитор`)},
-			{"алертинг по SLO", regexp.MustCompile(`(?i)алерт|p99|p95|error rate`)},
-			{"rollback/отказоустойчивые релизы", regexp.MustCompile(`(?i)rollback|graceful|blue-green|откат|shutdown`)},
+			{"алертинг по SLO", regexp.MustCompile(`(?i)алерт|p99|p95|error rate|дашборд`)},
+			{"SQL-Top/профайлинг", regexp.MustCompile(`(?i)sql.?top|профайлер|pg_stat|explain`)},
 		},
 		"эксплуатация и observability",
 	},
@@ -224,6 +224,48 @@ var concepts = []concept{
 		},
 		"гарантии консистентности и идемпотентности",
 	},
+	{
+		// Живой кейс платёжной вакансии: «Интеграция с платёжными
+		// процессингами» — латиницы нет, токенов нет, но по сигналам
+		// (банк/финтех, транзакции, платежи) письмо его закрывает.
+		regexp.MustCompile(`(?i)платёжн|процессинг|эквайринг|payment|acquiring`),
+		[]signal{
+			{"финтех/банкинг", regexp.MustCompile(`(?i)финтех|fintech|банкинг|банковск|эквайринг`)},
+			{"платежи/payment", regexp.MustCompile(`(?i)платёж|платеж|payment|биллинг|billing`)},
+			{"процессинг/шлюзы", regexp.MustCompile(`(?i)процессинг|шлюз|gateway|webhook|acquiring|эквайринг`)},
+		},
+		"интеграция с платёжными процессингами",
+	},
+}
+
+// conceptHonestGap — концептное требование честно названо пробелом: тема
+// требования (её regex) упомянута в письме, но только в клаузах под
+// отрицанием («С платёжными процессингами не работал»). Это не «нет данных»,
+// а раскрытый кандидатом пробел — вердикт не должен наказывать честность
+// сильнее, чем молчание.
+func conceptHonestGap(reqText, letter string) (string, bool) {
+	clauses := sentences(letter)
+	for _, c := range concepts {
+		if !c.re.MatchString(strings.ToLower(reqText)) {
+			continue
+		}
+		negated := false
+		for i, cl := range clauses {
+			if !c.re.MatchString(strings.ToLower(cl)) {
+				continue
+			}
+			if clauseNegated(clauses, i) {
+				negated = true
+				continue
+			}
+			// Тема упомянута позитивно — это не честный пробел.
+			return "", false
+		}
+		if negated {
+			return "в письме честно назван пробел («" + c.note + "») — для вердикта это «нет данных»", true
+		}
+	}
+	return "", false
 }
 
 // hasCyrillic — есть ли в строке кириллица (для способа поиска альтов).
@@ -238,17 +280,23 @@ func hasCyrillic(s string) bool {
 
 // conceptHit — требование говорит о концепте, и текст проявляет его
 // достаточным числом сигналов. Возвращает имя концепта и метки
-// сработавших сигналов.
+// сработавших сигналов. Сигналы, найденные в клаузах под отрицанием,
+// не засчитываются: «С платёжными процессингами не работал» не закрывает
+// «опыт интеграции с платёжными процессингами».
 func conceptHit(reqText, text string, minSignals int) (name string, hits []string) {
-	lt := strings.ToLower(text)
+	clauses := sentences(text)
 	for _, c := range concepts {
 		if !c.re.MatchString(strings.ToLower(reqText)) {
 			continue
 		}
 		hits = nil
 		for _, s := range c.signals {
-			if s.re.MatchString(lt) {
-				hits = append(hits, s.label)
+			// Ищем сигнал в клаузах: засчитываем, только если он не под отрицанием.
+			for i, cl := range clauses {
+				if s.re.MatchString(strings.ToLower(cl)) && !clauseNegated(clauses, i) {
+					hits = append(hits, s.label)
+					break // один хит на сигнал достаточно
+				}
 			}
 		}
 		if len(hits) >= minSignals {
@@ -271,6 +319,7 @@ var stopwords = map[string]bool{
 	"senior": true, "middle": true, "junior": true, "lead": true,
 	"years": true, "year": true, "experience": true, "work": true,
 	"com": true, "http": true, "https": true, "www": true,
+	"api": true, "sql": true, "rest": true, "rpc": true,
 }
 
 // normToken приводит токен к каноническому имени по таблице синонимов.
@@ -333,7 +382,7 @@ func findText(token, text string) bool {
 // называющее пробел («С OpenTelemetry опыта нет, готов освоить»), не
 // должно считаться закрытием требования — это живой кейс, когда честное
 // письмо получало «закрыто в письме» по голой подстроке.
-var negRe = regexp.MustCompile(`(?i)опыта нет|нет опыта|опыта\s+(?:\S+\s+)?нет|не работал|не использ|готов освоить|освою|не приходилось`)
+var negRe = regexp.MustCompile(`(?i)опыта нет|нет опыта|опыта\s+(?:\S+\s+)?нет|не работал|не использ|отсутствует|не зафиксирован|не применял|готов освоить|освою|не приходилось`)
 
 // sentences — разбивка текста на клаузы (по .!?\n;,). Область отрицания
 // клаузальная, а не «предложенческая»: буллет-пробел сплошь и рядом
@@ -353,7 +402,7 @@ func sentences(text string) []string {
 // форма «OpenTelemetry, опыта нет» — маркер относится к предыдущей клаузе.
 // «готов освоить» сюда не входит: «Kafka, готов освоить» встречается и
 // после позитивного факта, и отрицанием его считать нельзя.
-var bareNegRe = regexp.MustCompile(`(?i)^\s*(опыта нет|нет опыта|опыта\s+(?:\S+\s+)?нет|не работал[а-яё]*|не использ\w*|не приходилось)\s*[.!]?\s*$`)
+var bareNegRe = regexp.MustCompile(`(?i)^\s*(опыта нет|нет опыта|опыта\s+(?:\S+\s+)?нет|не работал[а-яё]*|не использ\w*|отсутствует|не зафиксирован|не применял|не приходилось)\s*[.!]?\s*$`)
 
 // clauseNegated — клауза под отрицанием: маркер в ней самой или в
 // следующей клаузе, если та состоит из одного маркера.
@@ -418,6 +467,16 @@ func matchTokens(tokens []string, src, text, letter string) (string, string, boo
 			missing = append(missing, t)
 		}
 	}
+	// Majority может закрыть, только если missing не содержит
+	// честно отрицаемых токенов: «почти всё, но один честно назван
+	// пробелом» — это unknown, а не letter/profile.
+	for _, mt := range missing {
+		if tokenNegatedOnly(mt, letter) {
+			if note, ok := honestGapNote(tokens, letter); ok {
+				return "", note, false
+			}
+		}
+	}
 	if found >= 2 && found > len(tokens)-found && len(missing) > 0 {
 		if src == SrcProfile {
 			return src, "в профиле есть факт по большинству токенов (не упомянуты: " + strings.Join(missing, ", ") + ") — впиши в письмо, закроется полностью", true
@@ -464,7 +523,12 @@ func declinedInProfile(token, profile string) bool {
 func coverage(req Requirement, letter, profile string) (source, note string) {
 	tokens := reqTokens(req.Text)
 	if len(tokens) == 0 {
-		// Концептное требование: ищем признаки в письме, потом в профиле.
+		// Концептное требование: проверяем честный пробел до проверки признаков,
+		// чтобы «С платёжными процессингами не работал» не засчитался как покрытие.
+		if note, ok := conceptHonestGap(req.Text, letter); ok {
+			return SrcUnknown, note
+		}
+		// Ищем признаки в письме, потом в профиле.
 		for _, src := range []struct {
 			label, text string
 		}{
@@ -478,7 +542,7 @@ func coverage(req Requirement, letter, profile string) (source, note string) {
 				return SrcLetter, "закрыто по признакам («" + name + "»: " + strings.Join(hits, ", ") + ")"
 			}
 		}
-		return SrcUnknown, "в требовании нет распознаваемых технологий и признаков — проверь вручную"
+		return SrcUnknown, "в письме и профиле нет достаточных признаков по этому требованию — проверь вручную"
 	}
 	for _, src := range []struct {
 		label, text string
@@ -494,9 +558,23 @@ func coverage(req Requirement, letter, profile string) (source, note string) {
 	// с отрицанием («С OpenTelemetry опыта нет, готов освоить»). Это не
 	// закрытие — но и не «в письме нет вообще»: модель отработала чек-лист,
 	// пробел назван словами. unknown с человеческой нотой, не missing.
-	// Если часть токенов в письме есть позитивно, нота это называет:
-	// «в письме есть postgresql, но outbox честно назван пробелом» —
-	// иначе кажется, что не упомянуто вообще ничего.
+	if note, ok := honestGapNote(tokens, letter); ok {
+		return SrcUnknown, note
+	}
+	// Мост: по токенам требования (Kubernetes в bridges НЕ входит —
+	// must-have «K8s в проде» без опыта не закрывается соседним опытом).
+	if note, ok := bridgeHit(tokens, letter, profile); ok {
+		return SrcBridge, note
+	}
+	return "", ""
+}
+
+// honestGapNote — нота честного пробела: токены требования названы в письме
+// только с отрицанием. Если часть токенов в письме есть позитивно, нота это
+// называет («в письме есть postgresql, но outbox честно назван пробелом») —
+// иначе кажется, что не упомянуто вообще ничего. ok=false, когда честно
+// отрицанных токенов нет.
+func honestGapNote(tokens []string, letter string) (string, bool) {
 	var negTokens, posTokens []string
 	for _, t := range tokens {
 		switch {
@@ -506,21 +584,26 @@ func coverage(req Requirement, letter, profile string) (source, note string) {
 			posTokens = append(posTokens, t)
 		}
 	}
-	if len(negTokens) > 0 {
-		note := "в письме честно назван пробел («" + strings.Join(negTokens, ", ") + "»)"
-		if len(posTokens) > 0 {
-			note = "в письме есть " + strings.Join(posTokens, ", ") + ", но " + strings.Join(negTokens, ", ") + " честно назван пробелом"
-		}
-		return SrcUnknown, note + " — для вердикта это «нет данных»"
+	if len(negTokens) == 0 {
+		return "", false
 	}
-	// Мост: по токенам требования (Kubernetes в bridges НЕ входит —
-	// must-have «K8s в проде» без опыта не закрывается соседним опытом).
+	note := "в письме честно назван пробел («" + strings.Join(negTokens, ", ") + "»)"
+	if len(posTokens) > 0 {
+		note = "в письме есть " + strings.Join(posTokens, ", ") + ", но " + strings.Join(negTokens, ", ") + " честно назван пробелом"
+	}
+	return note + " — для вердикта это «нет данных»", true
+}
+
+// bridgeHit — мост по токенам требования подтверждён якорями в письме или
+// профиле. Kubernetes в bridges НЕ входит: must-have «K8s в проде» без опыта
+// не закрывается соседним опытом.
+func bridgeHit(tokens []string, letter, profile string) (string, bool) {
 	for _, t := range tokens {
 		if b, ok := bridges[t]; ok && b.re.MatchString(letter+profile) {
-			return SrcBridge, b.note
+			return b.note, true
 		}
 	}
-	return "", ""
+	return "", false
 }
 
 // LoadProfile читает context/*.md для матчинга фита (тот же набор
@@ -552,68 +635,61 @@ func LoadProfile(contextDir string) string {
 	return b.String()
 }
 
-// Evaluate — детерминированный вердикт: покрытие must-have против письма
-// и профиля, взвешенный скор и три состояния. Чистая функция: без LLM,
-// без IO — тестируется на фикстурах.
-//
-// Веса покрытия (must-have): письмо 1.0, профиль 0.7 (совет «добавь в
-// письмо»), мост 0.5 (слабое место), unknown 0.2 («проверь вручную»),
-// не закрыто 0. Nice-to-have: закрыт — небольшой бонус, не закрыт — без
-// штрафа. «Будет плюсом» и мягкие требования покрытием не считаются.
-func Evaluate(reqs Requirements, profile, letter, vacancy string) Fit {
-	f := Fit{Role: reqs.Role}
-	if reqs.MustHave == nil && reqs.NiceToHave == nil {
-		// Разбор не удался — вердикта быть не должно, панель не рендерится.
-		f.Verdict = ""
-		return f
-	}
+// fitBuilder собирает Fit по мере обхода must-have: держит сумму весов,
+// базу скора и отложенные советы, чтобы детерминированный матчер (Evaluate)
+// и гибридный LLM-путь (MapCoverage) делили один скоринг, вердикт и советы.
+// JSON-представление Fit не меняется: служебные поля живут в билдере.
+type fitBuilder struct {
+	f             Fit
+	sum           float64
+	count         int
+	missingAdvice []string
+}
 
-	sum, count := 0.0, 0.0
-	// Построчные советы про missing собираются отдельно: при Caveats с
-	// ровно одним missing они дублируют заголовок вердикта (два живых
-	// кейса: UDP/TCP, SQL-вакансия) — мержатся после выбора вердикта.
-	var missingAdvice []string
-	for _, r := range reqs.MustHave {
-		if plusRe.MatchString(r.Text) || softTerms.MatchString(r.Text) {
-			continue // «будет плюсом» и мягкие не требуют покрытия
-		}
-		count++
-		src, note := coverage(r, letter, profile)
-		switch src {
-		case SrcLetter:
-			sum += 1.0
-			f.Covered = append(f.Covered, Req{r.Text, src, note})
-		case SrcProfile:
-			sum += 0.7
-			f.Covered = append(f.Covered, Req{r.Text, src, note})
-			f.Advice = append(f.Advice, "в профиле есть факт по «"+r.Text+"», но в письмо он не попал — впиши в письмо, закроется полностью")
-		case SrcBridge:
-			sum += 0.5
-			f.Caveats = append(f.Caveats, Req{r.Text, src, note})
-			f.Advice = append(f.Advice, note+" — в письме и на собеседовании это будет слабое место")
-		case SrcUnknown:
-			sum += 0.2
-			// Построчного совета нет: все unknown сведены в одну строку
-			// после цикла (шесть одинаковых «проверь вручную» — шум).
-			f.Caveats = append(f.Caveats, Req{r.Text, src, note})
-		default:
-			f.Missing = append(f.Missing, Req{r.Text, SrcMissing, "в профиле и письме нет, моста нет"})
-			missingAdvice = append(missingAdvice, "обязательное требование «"+r.Text+"» не закрыто ничем — письмом это не лечится")
-		}
+// addMust — вклад одного must-have: веса 1.0 (письмо), 0.7 (профиль),
+// 0.5 (мост), 0.2 (unknown), 0 (не закрыто) плюс советы.
+func (b *fitBuilder) addMust(r Requirement, src, note string) {
+	b.count++
+	switch src {
+	case SrcLetter:
+		b.sum += 1.0
+		b.f.Covered = append(b.f.Covered, Req{r.Text, src, note})
+	case SrcProfile:
+		b.sum += 0.7
+		b.f.Covered = append(b.f.Covered, Req{r.Text, src, note})
+		b.f.Advice = append(b.f.Advice, "в профиле есть факт по «"+r.Text+"», но в письмо он не попал — впиши в письмо, закроется полностью")
+	case SrcBridge:
+		b.sum += 0.5
+		b.f.Caveats = append(b.f.Caveats, Req{r.Text, src, note})
+		b.f.Advice = append(b.f.Advice, note+" — в письме и на собеседовании это будет слабое место")
+	case SrcUnknown:
+		b.sum += 0.2
+		// Построчного совета нет: все unknown сведены в одну строку
+		// после обхода (шесть одинаковых «проверь вручную» — шум).
+		b.f.Caveats = append(b.f.Caveats, Req{r.Text, src, note})
+	default:
+		b.f.Missing = append(b.f.Missing, Req{r.Text, SrcMissing, "в профиле и письме нет, моста нет"})
+		b.missingAdvice = append(b.missingAdvice, "обязательное требование «"+r.Text+"» не закрыто ничем — письмом это не лечится")
 	}
+}
 
+// finish — nice-to-have бонус, скор, вердикт и советы: точка сходимости
+// обоих движков. Вердикт и проценты всегда считает код по таблице весов,
+// а не модель — иначе они невоспроизводимы и не тестируются.
+func (b *fitBuilder) finish(reqs Requirements, profile, letter string) Fit {
+	f := b.f
 	// Nice-to-have: закрытый в письме — небольшой бонус, незакрытый — без штрафа.
 	for _, r := range reqs.NiceToHave {
 		if softTerms.MatchString(r.Text) {
 			continue
 		}
 		if src, _ := coverage(r, letter, profile); src == SrcLetter {
-			sum += 0.05 * count // бонус +5% от базы must-have за каждый
+			b.sum += 0.05 * float64(b.count) // бонус +5% от базы must-have за каждый
 		}
 	}
 
-	if count > 0 {
-		f.Score = int(sum/count*100 + 0.5)
+	if b.count > 0 {
+		f.Score = int(b.sum/float64(b.count)*100 + 0.5)
 	}
 	if f.Score > 100 {
 		f.Score = 100
@@ -646,7 +722,7 @@ func Evaluate(reqs Requirements, profile, letter, vacancy string) Fit {
 		}
 	}
 	switch {
-	case missN >= 2 || (missN == 1 && unkN >= 2) || unkN >= 3 || brN >= 3 || roleMismatch(reqs, profile):
+	case missN >= 2 || (missN == 1 && unkN >= 2) || unkN >= 3 || roleMismatch(reqs, profile):
 		f.Verdict = Skip
 	case missN == 1 || brN >= 1 || unkN >= 1 || len(f.Caveats) > 0:
 		f.Verdict = Caveats // оговорка обязана назвать слабое место — Advice уже заполнен
@@ -675,7 +751,7 @@ func Evaluate(reqs Requirements, profile, letter, vacancy string) Fit {
 	// без имён («не тратить время») — построчные советы обязательны,
 	// иначе непонятно, какое именно требование не закрыто.
 	if !(f.Verdict == Caveats && missN == 1) {
-		f.Advice = append(f.Advice, missingAdvice...)
+		f.Advice = append(f.Advice, b.missingAdvice...)
 	}
 	// unknown — одним сводным советом, а не построчно: шесть одинаковых
 	// строк «проверь вручную» — шум, а не помощь. Честные пробелы письма
@@ -693,6 +769,31 @@ func Evaluate(reqs Requirements, profile, letter, vacancy string) Fit {
 	}
 	sort.SliceStable(f.Covered, func(i, j int) bool { return f.Covered[i].Source < f.Covered[j].Source })
 	return f
+}
+
+// Evaluate — детерминированный вердикт: покрытие must-have против письма
+// и профиля, взвешенный скор и три состояния. Чистая функция: без LLM,
+// без IO — тестируется на фикстурах.
+//
+// Веса покрытия (must-have): письмо 1.0, профиль 0.7 (совет «добавь в
+// письмо»), мост 0.5 (слабое место), unknown 0.2 («проверь вручную»),
+// не закрыто 0. Nice-to-have: закрыт — небольшой бонус, не закрыт — без
+// штрафа. «Будет плюсом» и мягкие требования покрытием не считаются.
+func Evaluate(reqs Requirements, profile, letter, vacancy string) Fit {
+	b := &fitBuilder{f: Fit{Role: reqs.Role}}
+	if reqs.MustHave == nil && reqs.NiceToHave == nil {
+		// Разбор не удался — вердикта быть не должно, панель не рендерится.
+		b.f.Verdict = ""
+		return b.f
+	}
+	for _, r := range reqs.MustHave {
+		if plusRe.MatchString(r.Text) || softTerms.MatchString(r.Text) {
+			continue // «будет плюсом» и мягкие не требуют покрытия
+		}
+		src, note := coverage(r, letter, profile)
+		b.addMust(r, src, note)
+	}
+	return b.finish(reqs, profile, letter)
 }
 
 // isHonestGap — кавеат «честный пробел»: токен требования назван в письме

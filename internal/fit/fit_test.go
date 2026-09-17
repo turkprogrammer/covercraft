@@ -560,14 +560,14 @@ func TestEvaluateTrailingNegation(t *testing.T) {
 // Письмо закрывает большинство токенов, профиль — все: приоритет у письма
 // (вес 1.0, совет «добавь недостающее»), а не совет «впиши в письмо».
 func TestEvaluateLetterMajorityBeatsProfileAll(t *testing.T) {
-	reqs := mustReqs([]string{"Дизайн API и доменной модели в стиле DDD + Hexagonal Architecture"}, nil, "go-primary")
+	reqs := mustReqs([]string{"Дизайн доменной модели в стиле DDD + Hexagonal Architecture + CQRS"}, nil, "go-primary")
 	letter := "- **DDD + Hexagonal:** E-commerce-Lite (Symfony 7.2, Hexagonal Architecture, DDD — 8 entities, 6 ports), Fraud Engine (domain/application/adapters)."
-	profile := "Профиль: API (REST/gRPC), DDD, Hexagonal Architecture, доменные модели."
+	profile := "Профиль: DDD, Hexagonal Architecture, CQRS, доменные модели."
 	f := Evaluate(reqs, profile, letter, "вакансия")
 	if len(f.Covered) != 1 || f.Covered[0].Source != SrcLetter {
 		t.Fatalf("письмо закрывает большинство токенов — источник должен быть письмом: %+v", f.Covered)
 	}
-	if !strings.Contains(f.Covered[0].Note, "api") {
+	if !strings.Contains(f.Covered[0].Note, "cqrs") {
 		t.Errorf("нота должна называть недостающий токен: %q", f.Covered[0].Note)
 	}
 }
@@ -619,4 +619,29 @@ func adviceHas(list []string, sub string) bool {
 		}
 	}
 	return false
+}
+
+// Живой регресс: честное отрицание «С платёжными процессингами не работал»
+// в концептном требовании (вместо названия технологии — описание области опыта)
+// должно давать пробел в Caveats, а не покрытие в Covered. До исправления
+// conceptHit не проверял отрицания в клаузах сигналов, находил «интеграция»,
+// «транзакции», «платежи» и засчитывал как закрытие.
+func TestEvaluateConceptNegationRespected(t *testing.T) {
+	reqs := mustReqs([]string{"Опыт интеграции с платёжными процессингами"}, nil, "go-primary")
+	letter := "Интеграции строил через REST API. С платёжными процессингами не работал, отсутствует опыт транзакций, готов освоить."
+	f := Evaluate(reqs, profileGo, letter, "вакансия")
+	if len(f.Covered) > 0 {
+		t.Errorf("концептное требование с честным отрицанием не должно попасть в Covered: %+v", f.Covered)
+	}
+	if len(f.Caveats) == 0 {
+		t.Fatalf("честный пробел должен дать запись в Caveats: %+v", f)
+	}
+	if f.Caveats[0].Source != SrcUnknown || !isHonestGap(f.Caveats[0].Note) {
+		t.Errorf("кавеат должен быть распознан как честный пробел: %+v", f.Caveats[0])
+	}
+	for _, a := range f.Advice {
+		if strings.Contains(a, "проверь вручную") {
+			t.Errorf("честный пробел не должен попадать в свод «проверь вручную»: %q", a)
+		}
+	}
 }
