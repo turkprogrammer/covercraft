@@ -640,6 +640,60 @@ async function generate() {
 
 /* ---------- постпроверка письма ---------- */
 let lastWarnings = [];
+// lastFit — последние данные fit, используются fit-fix для повторных вызовов.
+let lastFit = null;
+// lastFitCaveats — строки caveat вида «текст — примечание», передаваемые в fitFix.
+let lastFitCaveats = [];
+
+function hasFixableCaveats(fit) {
+  if (!fit) return false;
+  const checks = (arr) => Array.isArray(arr) && arr.some(c => {
+    const n = (c.note || "");
+    return n.includes("впиши") || n.includes("не упомянуты");
+  });
+  return checks(fit.caveats) || checks(fit.covered);
+}
+
+function buildFitCaveatsList(fit) {
+  if (!fit) return [];
+  const results = [];
+  const seen = new Set();
+  for (const arr of [fit.caveats, fit.covered]) {
+    if (!Array.isArray(arr)) continue;
+    for (const c of arr) {
+      const n = (c.note || "");
+      if (n.includes("впиши") || n.includes("не упомянуты")) {
+        const key = c.text + c.source;
+        if (!seen.has(key)) {
+          seen.add(key);
+          results.push(c.text + (c.note ? " — " + c.note : ""));
+        }
+      }
+    }
+  }
+  return results;
+}
+
+function showFitFixButton(fit) {
+  // Рендерим в панель фита, а не audit-warns — audit-warns прячется при 0 замечаний.
+  const box = els.fitVerdict;
+  if (!box) return;
+  const old = document.getElementById("fitFix");
+  if (old) old.remove();
+  if (!fit || !hasFixableCaveats(fit)) {
+    return;
+  }
+  const fixable = buildFitCaveatsList(fit);
+  if (fixable.length === 0) return;
+  const btn = document.createElement("button");
+  btn.className = "btn term";
+  btn.id = "fitFix";
+  btn.type = "button";
+  btn.style.marginTop = "8px";
+  btn.innerHTML = "<span>fit-fix (" + fixable.length + ")</span>";
+  btn.addEventListener("click", () => fitFix(3));
+  box.appendChild(btn);
+}
 
 function showAuditWarnings(warnings) {
   lastWarnings = Array.isArray(warnings) ? warnings : [];
@@ -678,6 +732,8 @@ function showAuditWarnings(warnings) {
 // showFitVerdict рендерит вердикт фита из события done. fit == null —
 // разбор вакансии не удался, панель просто не выходит (письмо важнее).
 function showFitVerdict(fit) {
+  lastFit = fit;
+  lastFitCaveats = buildFitCaveatsList(fit);
   const box = els.fitVerdict;
   if (!fit || !fit.verdict) {
     box.hidden = true;
@@ -729,6 +785,7 @@ function showFitVerdict(fit) {
     box.appendChild(ul);
   }
   box.hidden = false;
+  showFitFixButton(fit);
 }
 
 // Автоправка: сервер отдаёт письмо обратно модели с списком замечаний,
@@ -773,6 +830,68 @@ async function auditFix() {
     if (e.name === "AbortError") setStatus("автоправка остановлена (esc).");
     else setStatus("err: автоправка не удалась: " + e.message, "err");
     btn.disabled = false;
+  } finally {
+    clearInterval(liveTimer);
+    setBusy(false);
+  }
+}
+
+// Fit-fix: цикл автоисправления по fit-caveats (максимум maxIter итераций).
+// Аналог auditFix, но использует fitCaveats вместо warnings.
+async function fitFix(maxIter) {
+  const btn = document.getElementById("fitFix");
+  if (!btn || btn.disabled) return;
+  btn.disabled = true;
+  setBusy(true);
+  const t0 = performance.now();
+  setStatus("fit-fix… 0 сек");
+  startTimer("fit-fix", t0);
+  let remaining = maxIter || 3;
+  let caveats = [...lastFitCaveats];
+  try {
+    while (remaining > 0 && caveats.length > 0) {
+      const letter = els.result.textContent;
+      els.result.textContent = "";
+      let live = 0;
+      const data = await streamGenerate(
+        {
+          vacancy: els.vacancy.value,
+          systemPrompt: els.systemPrompt.value,
+          fitFix: true,
+          letter: letter,
+          fitCaveats: caveats,
+        },
+        delta => {
+          els.result.textContent += delta;
+          els.result.scrollTop = els.result.scrollHeight;
+          live += delta.length;
+          els.count.textContent = live + " chars";
+        },
+      );
+        showAuditWarnings(data.warnings);
+        showFitVerdict(data.fit);
+        countChars(data.elapsedMs);
+        els.copy.disabled = !data.letter;
+        const newFixable = (data.fitFixable != null) ? data.fitFixable
+          : buildFitCaveatsList(data.fit).length;
+      if (newFixable === 0) {
+        setStatus("ok — fit-fix завершён (" + (maxIter - remaining + 1) + " итер.)");
+        break;
+      }
+      caveats = buildFitCaveatsList(data.fit);
+      remaining--;
+      if (remaining > 0) {
+        setStatus("fit-fix… " + (maxIter - remaining) + "/" + maxIter);
+      } else {
+        setStatus("fit-fix: достигнут лимит итераций, попробуйте вручную");
+      }
+    }
+  } catch (e) {
+    if (e.name === "AbortError") setStatus("fit-fix остановлен (esc).");
+    else setStatus("err: fit-fix не удался: " + e.message, "err");
+    // Сбрасываем стейт только при ошибке/прерывании — при успешном выходе
+    // (в т.ч. по лимиту итераций) lastFit остаётся, чтобы кнопка fit-fix
+    // была доступна для повторного клика с актуальным списком caveat.
   } finally {
     clearInterval(liveTimer);
     setBusy(false);
@@ -837,6 +956,7 @@ async function boot() {
       if (genAbort) genAbort.abort();
       els.result.textContent = ""; els.copy.disabled = true; countChars();
       showAuditWarnings([]);
+      lastFit = null; lastFitCaveats = [];
     }
   });
   els.vacancy.focus();

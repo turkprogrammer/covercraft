@@ -676,3 +676,74 @@ func TestGenerateDeterministicFitEngineDefault(t *testing.T) {
 		t.Fatalf("детерминированный вердикт должен быть на месте: %+v", ev.Done)
 	}
 }
+
+// TestGenerateEndpointFitFix — режим fitFix: сервер отдаёт письмо с
+// fit-caveats обратно модели и возвращает исправленный результат с повторной
+// проверкой. Проверяет, что fitFixable считается верно.
+func TestGenerateEndpointFitFix(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	var gotUser string
+	h := New(Config{ContextDir: t.TempDir(), LLM: func(ctx context.Context, system, user string) (string, error) {
+		gotUser = user
+		return "Стек: Go, PHP, ML, PostgreSQL.", nil
+	}, FitLLM: func(ctx context.Context, system, user string) (string, error) {
+		return "{}", nil
+	}})
+	body, _ := json.Marshal(map[string]any{
+		"vacancy":    "PHP Laravel",
+		"fitFix":     true,
+		"letter":     "Стек: Go, PHP, ML, Laravel.",
+		"fitCaveats": []string{"vet — не упомянуты"},
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("код = %d, тело: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(gotUser, "vet") {
+		t.Errorf("в промпт fit-fix не попали caveats: %q", gotUser)
+	}
+	if !strings.Contains(gotUser, "Стек: Go, PHP, ML, Laravel.") {
+		t.Errorf("в промпт fit-fix не попало письмо: %q", gotUser)
+	}
+	ev := parseSSE(t, rec.Body.String())
+	if ev.Done == nil {
+		t.Fatal("нет done-события")
+	}
+	if ev.Done.FitFixable < 0 {
+		t.Errorf("fitFixable не должен быть отрицательным: %d", ev.Done.FitFixable)
+	}
+	// Контр-риск F1: omitempty при нуле может схлопнуть поле из JSON,
+	// тогда фронтенд не увидит fitFixable и кнопка не появится.
+	// Проверяем что сырой JSON содержит ключ "fitFixable".
+	raw := rec.Body.String()
+	if !strings.Contains(raw, `"fitFixable"`) {
+		t.Errorf("fitFixable отсутствует в JSON-ответе (возможно omitempty схлопнул): %s", raw)
+	}
+}
+
+func TestGenerateEndpointFitFixRequiresFields(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	h := New(Config{ContextDir: t.TempDir(), LLM: failIfCalled(t)})
+	// Нет ничего — 400.
+	body, _ := json.Marshal(map[string]any{"vacancy": "PHP", "fitFix": true})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("код = %d, хочу 400 (нет letter/fitCaveats)", rec.Code)
+	}
+	// Letter есть, fitCaveats нет — тоже 400.
+	body2, _ := json.Marshal(map[string]any{"vacancy": "PHP", "fitFix": true, "letter": "текст"})
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewReader(body2))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("код = %d, хочу 400 (letter есть, fitCaveats нет)", rec.Code)
+	}
+}
