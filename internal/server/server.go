@@ -160,6 +160,11 @@ type generateRequest struct {
 	AuditFix bool     `json:"auditFix,omitempty"`
 	Letter   string   `json:"letter,omitempty"`
 	Warnings []string `json:"warnings,omitempty"`
+	// FitFix — режим автоправки по результату fit: письмо + список
+	// «впиши в письмо» caveat от fit-engine. Модель дописывает недостающие
+	// факты в существующие буллеты, сохраняя остальной текст без изменений.
+	FitFix     bool     `json:"fitFix,omitempty"`
+	FitCaveats []string `json:"fitCaveats,omitempty"`
 }
 
 // sseDelta — событие дельты в SSE-потоке /api/generate: кусок письма
@@ -171,15 +176,18 @@ type sseDelta struct {
 // sseDone — финальное событие done в SSE-потоке /api/generate.
 // ElapsedMs — сколько отвечала модель. Warnings — результаты постпроверки
 // письма (internal/audit): пустой срез, если письмо чистое.
+// FitFixable — сколько caveats вида «впиши в письмо» ещё остались после
+// генерации; UI использует это для решения, показывать ли кнопку fit-fix.
 type sseDone struct {
 	Done      bool     `json:"done"`
 	Letter    string   `json:"letter"`
 	ElapsedMs int64    `json:"elapsedMs"`
 	Warnings  []string `json:"warnings,omitempty"`
-	// Fit — рекомендация отклика (internal/fit): вердикт, скор
-	// соответствия и расшифровка покрытия. nil — если разбор вакансии
-	// не удался или не успел: письмо важнее фита, панель не рендерится.
-	Fit *fit.Fit `json:"fit,omitempty"`
+	Fit       *fit.Fit `json:"fit,omitempty"`
+	// FitFixable всегдаserialизуется (без omitempty): фронтенд проверяет
+	// presence of the field to decide whether to show the fit-fix button.
+	// При 0 поле равно 0, не опускается — JS видит 0 и скрывает кнопку.
+	FitFixable int `json:"fitFixable"`
 }
 
 // sseError — событие ошибки внутри SSE-потока: после старта стрима код
@@ -233,6 +241,11 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "auditFix требует letter и warnings", http.StatusBadRequest)
 		return
 	}
+	// FitFix аналогично: требуется и письмо, и список caveat строк.
+	if req.FitFix && (strings.TrimSpace(req.Letter) == "" || len(req.FitCaveats) == 0) {
+		http.Error(w, "fitFix требует letter и fitCaveats", http.StatusBadRequest)
+		return
+	}
 
 	// Извлечение требований вакансии — ДО генерации письма: must-have идут
 	// в промпт письма чек-листом, а тот же разбор переиспользуется в фите
@@ -248,12 +261,15 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Режим автоправки: письмо + замечания аудита → модель переписывает.
-	// Контекст профиля не пересобираем — правки только по списку замечаний.
 	var user string
-	if req.AuditFix {
+	switch {
+	case req.AuditFix:
 		user = fixPrompt(req.Letter, req.Warnings) + "\n\n" +
 			cover.BuildUserPrompt(h.cfg.ContextDir, req.Vacancy, musts)
-	} else {
+	case req.FitFix:
+		user = fitFixPrompt(req.Letter, req.FitCaveats) + "\n\n" +
+			cover.BuildUserPrompt(h.cfg.ContextDir, req.Vacancy, musts)
+	default:
 		// User-промпт собирает сервер: context/*.md + вакансия + чек-лист.
 		user = cover.BuildUserPrompt(h.cfg.ContextDir, req.Vacancy, musts)
 	}
@@ -351,7 +367,14 @@ func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc
 	}
 
 	if !writeErr {
-		_ = writeSSE(w, sseDone{Done: true, Letter: letter, ElapsedMs: elapsed.Milliseconds(), Warnings: warnings, Fit: verdict}) // best-effort
+		fixableN := 0
+		if verdict != nil {
+			fixableN = len(fit.FitFixableCaveats(*verdict))
+		}
+		_ = writeSSE(w, sseDone{
+			Done: true, Letter: letter, ElapsedMs: elapsed.Milliseconds(),
+			Warnings: warnings, Fit: verdict, FitFixable: fixableN,
+		}) // best-effort
 	}
 	flush()
 }
@@ -385,6 +408,31 @@ func fixPrompt(letter string, warnings []string) string {
 	for _, w := range warnings {
 		b.WriteString("- ")
 		b.WriteString(w)
+		b.WriteString("\n")
+	}
+	b.WriteString("\nПисьмо:\n")
+	b.WriteString(letter)
+	return b.String()
+}
+
+// fitFixPrompt — user-промпт режима автоправки по результату fit.
+// Модель получает конкретный список «чего не хватило в письме» от fit-engine
+// и инструкцию дописать недостающие факты в существующие буллеты, не
+// переписывая письмо заново.
+func fitFixPrompt(letter string, caveats []string) string {
+	var b strings.Builder
+	b.WriteString("Ниже — сопроводительное письмо и список того, чего fit-движок не нашёл в письме.\n")
+	b.WriteString("Каждая строка — это требование, у которого в профиле ЕСТЬ факт, но он НЕ попал в письмо.\n")
+	b.WriteString("Твоя задача: добавить отсутствующие факты в соответствующие буллеты, сохранив остальной текст без изменений.\n")
+	b.WriteString("Правила (важно):\n")
+	b.WriteString("- НЕ меняй уже написанные буллеты — только ДОПОЛНЯЙ недостающие факты;\n")
+	b.WriteString("- Не добавляй новые буллеты, если факт можно вписать в существующий;\n")
+	b.WriteString("- Все факты бери ТОЛЬКО из профиля кандидата ниже — НЕ выдумывай;\n")
+	b.WriteString("- Верни полный исправленный текст письма, без пояснений.\n\n")
+	b.WriteString("Что нужно добавить в письмо:\n")
+	for _, c := range caveats {
+		b.WriteString("- ")
+		b.WriteString(c)
 		b.WriteString("\n")
 	}
 	b.WriteString("\nПисьмо:\n")

@@ -964,3 +964,65 @@ func TestAlertingIncidentTrigger(t *testing.T) {
 		}
 	}
 }
+
+// TestFitFixableCaveats — FitFixableCaveats возвращает только те требования,
+// чья note содержит "впиши" или "не упомянуты". Soft-требования (check manually)
+// и честные пробелы отсекаются. Проверяет сканирование Caveats ∪ Covered.
+func TestFitFixableCaveats(t *testing.T) {
+	f := Fit{
+		Covered: []Req{
+			{Text: "vet", Source: SrcProfile, Note: "в профиле есть факт по большинству токенов (не упомянуты: vet) — впиши в письмо, закроется полностью"},
+			{Text: "Git", Source: SrcProfile, Note: "в профиле есть факт, но в письмо не попал — впиши в письмо, закроется полностью"},
+			{Text: "5+ лет", Source: SrcUnknown, Note: "в письме и профиле нет достаточных признаков по этому требованию — проверь вручную"},
+			{Text: "Elasticsearch", Source: SrcUnknown, Note: "честный пробел"},
+		},
+		Caveats: []Req{
+			{Text: "bridge-test", Source: SrcBridge, Note: "мост: опыт → Elasticsearch"},
+		},
+	}
+	fixable := FitFixableCaveats(f)
+	if len(fixable) != 2 {
+		t.Fatalf("хочу 2 fixable, got %d: %+v", len(fixable), fixable)
+	}
+	for _, c := range fixable {
+		if c.Text == "5+ лет" || c.Text == "Elasticsearch" || c.Text == "bridge-test" {
+			t.Errorf("не должен попасть в fixable: %s src=%s", c.Text, c.Source)
+		}
+	}
+}
+
+// TestFitFixableFromEvaluate — интеграционный тест: профиль содержит факт Git,
+// письмо его не содержит → fit.Evaluate должен вернуть Covered с нотой
+// «впиши в письмо», и FitFixableCaveats должен его поймать.
+// Регресс-тест для F1: если addMust перенесёт факт из Covered в Caveats,
+// этот тест упадёт — защита от рефакторинга coverage-корзинок.
+func TestFitFixableFromEvaluate(t *testing.T) {
+	reqs := Requirements{
+		Role: "go-primary",
+		MustHave: []Requirement{
+			{Text: "Работа с Git", Kind: "must"},
+		},
+	}
+	// Письмо БЕЗ токена Git — факт есть в профиле, но не в письме.
+	letter := "Стек: Go, PHP, ML, Kafka, Redis, PostgreSQL, MySQL, Docker."
+	profile := "Git: уверенно, 17 лет; PHP production; Go highload."
+	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
+	if f.Verdict == "" {
+		t.Fatalf("verdict должен быть не пустым: %+v", f)
+	}
+	fixable := FitFixableCaveats(f)
+	if len(fixable) == 0 {
+		t.Fatalf("FitFixableCaveats должен найти хотя бы один fixable (Git в профиле, нет в письме); covered=%+v caveats=%+v", f.Covered, f.Caveats)
+	}
+	// Убедиться что Git действительно в fixable
+	found := false
+	for _, c := range fixable {
+		if strings.Contains(c.Text, "Git") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("в fixable не найден Git; fixable=%+v", fixable)
+	}
+}

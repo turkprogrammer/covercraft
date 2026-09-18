@@ -76,6 +76,38 @@ type Fit struct {
 	Advice  []string `json:"advice,omitempty"`
 }
 
+// FitFixableCaveats возвращает подмножество требований Fit, которые LLM может
+// исправить добавлением факта в письмо. Ищет маркеры «впиши в письмо» и
+// «не упомянуты» в Caveats и Covered — именно в этих полях генератор нот
+// ставит маркер, когда факт есть в профиле, но не попал в письмо.
+// Soft-требования (check manually) и честные пробелы отсекаются.
+func FitFixableCaveats(fit Fit) []Req {
+	var fixable []Req
+	// Cover both caveats и covered — маркер «впиши в письмо» попадает в
+	// обе корзины в зависимости от пути матчинга (bridge vs profile).
+	for _, c := range fit.Caveats {
+		if strings.Contains(c.Note, "впиши") || strings.Contains(c.Note, "не упомянуты") {
+			fixable = append(fixable, c)
+		}
+	}
+	for _, c := range fit.Covered {
+		if strings.Contains(c.Note, "впиши") || strings.Contains(c.Note, "не упомянуты") {
+			// Не дублируем, если уже добавили из caveats
+			dup := false
+			for _, fc := range fixable {
+				if fc.Text == c.Text && fc.Source == c.Source {
+					dup = true
+					break
+				}
+			}
+			if !dup {
+				fixable = append(fixable, c)
+			}
+		}
+	}
+	return fixable
+}
+
 // synonyms — альтернативные написания технологий: требование может
 // назвать технологию сокращением, профиль — полным именем.
 var synonyms = map[string][]string{
