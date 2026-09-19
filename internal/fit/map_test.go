@@ -242,7 +242,7 @@ func TestCoveragePromptContent(t *testing.T) {
 }
 
 // Позиционное сопоставление: модель вернула записи без точного текста
-// требований, но в том же порядке.
+// Требования, но в том же порядке.
 func TestMapCoveragePositionalMatch(t *testing.T) {
 	reqs := mustReqs([]string{"Опыт с Kafka", "Опыт с ClickHouse"}, nil, "go-primary")
 	letter := "Стек: Go, Kafka, ClickHouse."
@@ -253,5 +253,32 @@ func TestMapCoveragePositionalMatch(t *testing.T) {
 	}
 	if len(f.Covered) != 2 || f.Verdict != Apply {
 		t.Fatalf("позиционное сопоставление должно закрыть оба: %+v", f)
+	}
+}
+
+// Регресс пропуска модели (defect 2): модель обязана дать запись по каждому
+// must-have. Если требование пропущено, MapCoverage fallback-ит на
+// coverage() напрямую — иначе оно тихо уходило бы в src=unknown.
+func TestMapCoverageMissingItemFallbackToCoverage(t *testing.T) {
+	reqs := mustReqs([]string{"Опыт с Kafka", "Опыт с ClickHouse", "OpenTelemetry для трейсинга"}, nil, "go-primary")
+	// Модель закрыла только первые два, третье — «сделала вид, что проигнорировала».
+	raw := `{"items":[{"text":"Опыт с Kafka","source":"letter","quote":"Стек: Go, Kafka","note":""},{"text":"Опыт с ClickHouse","source":"letter","quote":"Go, Kafka, ClickHouse","note":""}]}`
+	letter := "Стек: Go, Kafka, ClickHouse."
+	f, err := MapCoverage(context.Background(), fakeMapLLM(raw), DefaultConcepts(), reqs, "", letter, "вакансия")
+	if err != nil {
+		t.Fatalf("MapCoverage: %v", err)
+	}
+	// Позиционный fallback отключён (2 записи != 3 prompted), поэтому
+	// пропущенное требование должно быть пересчитано через coverage().
+	// OpenTelemetry в письме отсутствует — покрытие пустое, требование уходит в missing.
+	var foundMissing bool
+	for _, m := range f.Missing {
+		if strings.Contains(m.Text, "OpenTelemetry") {
+			foundMissing = true
+		}
+	}
+	// Требование не должно исчезнуть бесследно: fallback должен был его обработать.
+	if !foundMissing {
+		t.Fatalf("пропущенное требование должно fallback-иться на покрытие, а не исчезать; covered=%+v caveats=%+v missing=%+v", f.Covered, f.Caveats, f.Missing)
 	}
 }

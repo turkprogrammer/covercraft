@@ -63,7 +63,8 @@ const minQuoteLen = 8
 // нумерованный список must-have, по одной записи на каждое.
 func CoveragePrompt(reqs Requirements, profile, letter, vacancy string) (system, user string) {
 	system = `Ты — аудитор сопроводительного письма. Для КАЖДОГО требования из списка определи, закрыто ли оно письмом или профилем кандидата.
-Верни ТОЛЬКО JSON без markdown-обёрток и пояснений:
+	Верни ОБЯЗАТЕЛЬНО ПО ОДНОЙ записи на каждое требование списка — по одной строке JSON в items. Не пропускай ни одного требования молча: даже если данных недостаточно для уверенного ответа, поставь source="unknown" с короткой нотой; не пиши «proпуск»/«опущено» — неизвестность тоже результат проверки.
+	Верни ТОЛЬКО JSON без markdown-обёрток и пояснений:
 {"items":[{"text":"<требование — ровно как в списке>","source":"letter|profile|bridge|unknown|missing","quote":"<дословная цитата из письма или профиля>","note":"<одна короткая строка>"}]}
 Правила:
 - letter — требование закрыто письмом: quote обязательно, дословно из письма;
@@ -138,12 +139,15 @@ func MapCoverage(ctx context.Context, fn LLMFunc, concepts []Concept, reqs Requi
 	for _, it := range cov.Items {
 		byText[itemKey(it.Text)] = it
 	}
-	// Позиционный фолбэк: модель вернула столько же записей, сколько
-	// требований попало в промпт (плюс/мягкие CoveragePrompt пропускает).
-	// Сравнивать с len(reqs.MustHave) нельзя: одно «будет плюсом» в списке —
+	// Позиционный фолбэк: модель обязана вернуть по записи на каждое
+	// requirement из prompted (CoveragePrompt запрещает пропуски молча);
+	// сравнивать с len(reqs.MustHave) нельзя: одно «будет плюсом» в списке —
 	// и порядок уже не совпадает, записи модели уезжают не тем требованиям
 	// (живой кейс платёжной вакансии: требование без латиницы осталось без
 	// цитаты и ушло в unknown, хотя модель его закрыла).
+	// Если len(cov.Items) != len(prompted) — модель нарушила правило
+	// промпта, фолбэк выключен (записи могут быть не на своих местах); по
+	// каждому отсутствующему требованию вызовем coverage() напрямую.
 	prompted := make([]Requirement, 0, len(reqs.MustHave))
 	for _, r := range reqs.MustHave {
 		if plusRe.MatchString(r.Text) || softTerms.MatchString(r.Text) {
@@ -158,6 +162,13 @@ func MapCoverage(ctx context.Context, fn LLMFunc, concepts []Concept, reqs Requi
 		it, ok := byText[itemKey(r.Text)]
 		if !ok && positional {
 			it, ok = cov.Items[i], true
+		}
+		if !ok {
+			// Пропуск модели: покрытие считаю детерминированно, иначе
+			// требование просто исчезло бы из вердикта.
+			src, note := coverage(concepts, r, letter, profile)
+			b.addMust(r, src, note)
+			continue
 		}
 		src, note := verifyItem(concepts, it, ok, r, letter, profile)
 		b.addMust(r, src, note)

@@ -128,8 +128,29 @@ func TestEvaluateUnknownSingleIsCaveats(t *testing.T) {
 	}
 }
 
-// Два unknown — caveats: это «нет данных», а не «нет опыта», порог
-// занижения вердикта — три.
+// Регресс живого кейса (Evolution CMS, повторная генерация): 5 must-have
+// закрыты, 0 missing, 3 unknown («проверь вручную») — вердикт обязан быть
+// Caveats, не Skip: unknown = «нет данных», а не «нет опыта» (комментарий
+// finish, fit.go:755-763). Массовое unknown без единого missing не может
+// давать «не откликаться».
+func TestEvaluateMassUnknownWithoutMissingNotSkip(t *testing.T) {
+	reqs := mustReqs([]string{
+		"Опыт в финтех-домене",
+		"Опыт работы в продуктовой компании",
+		"Знание предметной области логистики",
+	}, nil, "go-primary")
+	letter := "Стек: Go, Kafka, ClickHouse"
+	f := Evaluate(DefaultConcepts(), reqs, profileGo, letter, "вакансия")
+	if len(f.Missing) != 0 {
+		t.Fatalf("missing должен быть пуст, получено: %+v", f.Missing)
+	}
+	if f.Verdict != Caveats {
+		t.Errorf("verdict = %q, хочу %q: три unknown при нулевом missing — серая зона, не skip", f.Verdict, Caveats)
+	}
+}
+
+// Два unknown — caveats: это «нет данных», а не «нет опыта». Unknown сам
+// по себе вердикт до skip не роняет — только missing и roleMismatch.
 func TestEvaluateTwoUnknownIsCaveats(t *testing.T) {
 	reqs := mustReqs([]string{"Опыт в финтех-домене", "Понимание скоринга"}, nil, "go-primary")
 	f := Evaluate(DefaultConcepts(), reqs, profileGo, "Стек: Go, Kafka", "вакансия")
@@ -138,13 +159,15 @@ func TestEvaluateTwoUnknownIsCaveats(t *testing.T) {
 	}
 }
 
-// Три unknown — данных о кандидате слишком мало, советовать отклик
-// нельзя: skip.
-func TestEvaluateThreeUnknownIsSkip(t *testing.T) {
+// Три unknown — это «нет данных», а не «нет опыта»: caveats, не skip.
+// Skip по массовому unknown без единого missing противоречил спецификации
+// finish (fit.go) и давал ложное «не откликаться» при закрытых must-have
+// (живой регресс Evolution CMS: 5 закрыто цитатами, 0 missing, 3 unknown).
+func TestEvaluateThreeUnknownIsCaveats(t *testing.T) {
 	reqs := mustReqs([]string{"Опыт в финтех-домене", "Понимание скоринга", "Опыт банковских интеграций"}, nil, "go-primary")
 	f := Evaluate(DefaultConcepts(), reqs, profileGo, "Стек: Go, Kafka", "вакансия")
-	if f.Verdict != Skip {
-		t.Errorf("verdict = %q, хочу %q: три unknown — данных нет", f.Verdict, Skip)
+	if f.Verdict != Caveats {
+		t.Errorf("verdict = %q, хочу %q: три unknown — серая зона, не skip", f.Verdict, Caveats)
 	}
 	// Сводный совет по unknown — одна строка со всеми требованиями.
 	if adviceHas(f.Advice, "это не значит «опыта нет»: «Опыт в финтех-домене», «Понимание скоринга», «Опыт банковских интеграций»") == false {
@@ -281,7 +304,8 @@ func TestEvaluateArchitectVacancyUserCase(t *testing.T) {
 }
 
 // Негатив: то же вакансия, письмо без сигналов концептов — все концепты
-// unknown, вердикт честно роняется в skip.
+// unknown. Это «нет данных», а не «нет опыта»: вердикт caveats с советом
+// «проверь вручную», а не skip — незакрытых must-have (missing) нет.
 func TestEvaluateArchitectVacancyEmptyLetter(t *testing.T) {
 	profile := "Основной язык — Go. Backend: 10 лет."
 	reqs := mustReqs([]string{
@@ -290,8 +314,8 @@ func TestEvaluateArchitectVacancyEmptyLetter(t *testing.T) {
 		"Понимание эксплуатации, мониторинга, отказоустойчивости и деградации сервисов",
 	}, nil, "go-primary")
 	f := Evaluate(DefaultConcepts(), reqs, profile, "Стек: Go, Kafka", "вакансия")
-	if f.Verdict != Skip {
-		t.Errorf("verdict = %q, хочу %q: письмо без сигналов концептов", f.Verdict, Skip)
+	if f.Verdict != Caveats {
+		t.Errorf("verdict = %q, хочу %q: письмо без сигналов концептов — unknown, не missing", f.Verdict, Caveats)
 	}
 	if len(f.Missing) != 0 {
 		t.Errorf("unknown не должен превращаться в missing: %+v", f.Missing)

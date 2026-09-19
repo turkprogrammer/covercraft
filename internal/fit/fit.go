@@ -760,7 +760,11 @@ func (b *fitBuilder) finish(reqs Requirements, profile, letter string) Fit {
 	// не «не откликаться», а серая зона: скор ~90%+ при skip —
 	// противоречие в плашке (реальный кейс анти-DDoS: 8 из 9 закрыто,
 	// один пробел UDP/TCP). skip — два и более пробела, пробел плюс
-	// массовое unknown, роль другого профиля.
+	// массовое unknown, роль другого профиля. Массовое unknown БЕЗ
+	// missing — НЕ skip: клауза unkN >= 3 противоречила спецификации
+	// выше и давала «не откликаться» при полностью закрытых must-have
+	// (живой регресс Evolution CMS: 5 закрыто цитатами, 0 missing,
+	// 3 unknown → skip).
 	missN, unkN, brN := len(f.Missing), 0, 0
 	for _, c := range f.Caveats {
 		switch c.Source {
@@ -779,7 +783,7 @@ func (b *fitBuilder) finish(reqs Requirements, profile, letter string) Fit {
 		}
 	}
 	switch {
-	case missN >= 2 || (missN == 1 && unkN >= 2) || unkN >= 3 || roleMismatch(reqs, profile):
+	case missN >= 2 || (missN == 1 && unkN >= 2) || roleMismatch(reqs, profile):
 		f.Verdict = Skip
 	case missN == 1 || brN >= 1 || unkN >= 1 || len(f.Caveats) > 0:
 		f.Verdict = Caveats // оговорка обязана назвать слабое место — Advice уже заполнен
