@@ -29,6 +29,20 @@
      alt="CoverCraft: терминальный UI генератора сопроводительных писем"
      width="720">
 
+## Что нового в 0.2.2
+
+- **Fit-вердикт без ложных «не откликаться»**: ограничитель в одной
+  клаузе профиля («Transactional outbox на PostgreSQL: НЕ использовал»)
+  больше не отменяет факты в других клаузах («PostgreSQL (глубокое
+  знание)»). Раньше must-have «Опыт работы с SQL БД (Postgres)» уходил
+  в missing и давал вердикт `skip`, хотя требование закрыто профилем.
+- Отрицание стало клаузным, а не профилем целиком: глобальные вето
+  («готов освоить X», «X, опыта нет») + клаузные ограничители; метка
+  моста и заглавная «НЕ» фактами не считаются; честные пробелы
+  (Python, Airflow, OpenTelemetry…) остаются пробелами.
+- 168 unit-тестов (+7 стражей конвенций профиля). Полная история — в
+  [CHANGELOG.md](CHANGELOG.md).
+
 ## Что нового в 0.2.1
 
 - **Fit-fix — автоисправление по fit-caveats**: fit-движок нашёл факт в
@@ -139,7 +153,7 @@ go build -o covercraft .
 Основной путь — готовый бинарник из [Releases](https://github.com/turkprogrammer/covercraft/releases):
 
 ```bash
-tar xzf covercraft_0.2.1_linux_amd64.tar.gz
+tar xzf covercraft_0.2.2_linux_amd64.tar.gz
 ./covercraft
 ```
 
@@ -267,9 +281,9 @@ reasoning effort), постпроверка писем (запрещённые �
 ```bash
 mkdir -p dist
 go build -o covercraft .
-tar czf dist/covercraft_0.2.1_linux_amd64.tar.gz covercraft README.md LICENSE
-sha256sum dist/covercraft_0.2.1_linux_amd64.tar.gz \
-  > dist/covercraft_0.2.1_linux_amd64.tar.gz.sha256
+tar czf dist/covercraft_0.2.2_linux_amd64.tar.gz covercraft README.md LICENSE
+sha256sum dist/covercraft_0.2.2_linux_amd64.tar.gz \
+  > dist/covercraft_0.2.2_linux_amd64.tar.gz.sha256
 ```
 
 `context/` в архив не входит: он приватен и создаётся каждым
