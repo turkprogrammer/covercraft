@@ -326,6 +326,14 @@ func DefaultConcepts() []Concept {
 				{Label: "оценка и бэклог", Re: regexp.MustCompile(`(?i)story ?point|бэклог|backlog|оценк|estimation|user story`)},
 			},
 		},
+		{
+			Name:    "реляционные БД и SQL",
+			Trigger: regexp.MustCompile(`(?i)реляционн|база данных|баз данных|\bбд\b|\bsql\b|sql-запрос|sql запрос|эффективн.{0,15}запрос`),
+			Signals: []Signal{
+				{Label: "СУБД", Re: regexp.MustCompile(`(?i)postgres|postgresql|mysql|mariadb|oracle|sqlite`)},
+				{Label: "оптимизация SQL", Re: regexp.MustCompile(`(?i)pg_stat|stat.?statements|explain|execution plan|индекс|b-tree|gin|covering|shared_buffers|work_mem|autovacuum|sql.?top|профайлер sql`)},
+			},
+		},
 	}
 }
 
