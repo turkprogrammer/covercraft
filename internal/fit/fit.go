@@ -302,8 +302,12 @@ var negRe = regexp.MustCompile(`(?i)опыта нет|нет опыта|опыт
 
 // backwardNegRe — маркеры, отрицающие клаузу целиком, включая стоящее до
 // них: «Transactional outbox на PostgreSQL: НЕ использовал» — отклоняет
-// outbox, хотя тот стоит впереди маркера.
-var backwardNegRe = regexp.MustCompile(`(?i)опыта нет|нет опыта|опыта\s+(?:\S+\s+)?нет|не работал|не использ|отсутствует|не зафиксирован|не применял|не приходилось`)
+// outbox, хотя тот стоит впереди маркера. «не заявля/не говор» — маркеры
+// аннотаций-ограничителей профиля («НЕ заявлять как outbox» context/01:256,
+// «НЕ говорить «17+ лет PostgreSQL»» context/01:251). В negRe (маркеры
+// отрицания в ПИСЬМЕ) они НЕ добавлены: кандидат так свой опыт не
+// описывает, а клаузная логика письма уже отлажена.
+var backwardNegRe = regexp.MustCompile(`(?i)опыта нет|нет опыта|опыта\s+(?:\S+\s+)?нет|не работал|не использ|отсутствует|не зафиксирован|не применял|не приходилось|не заявля|не говор`)
 
 // forwardNegRe — маркеры «готов освоить X»: отрицают только то, что стоит
 // ПОСЛЕ них. В профиле мост «bash-автоматизация → готов освоить
@@ -502,20 +506,42 @@ func countsAsFact(t, src, text, letter string) bool {
 	return src != SrcProfile || !declinedInProfile(t, text)
 }
 
-// declinedInProfile — токен назван в отрицающей клаузе профиля: это
-// ограничитель («НЕ использовал», «опыта нет»), а не факт для письма.
-// Отрицание направленное: backward-маркеры («не использовал») гасят всю
-// клаузу, forward-маркеры («готов освоить Python/Airflow») — только то,
-// что стоит после них, поэтому положительный якорь моста до маркера
-// («bash-автоматизация») фактом остаётся.
+// bridgeLabelRe — метка моста в профиле («(мост к outbox)», «мост: polling-журнал»).
+// Метка называет смежный опыт, а не владение технологией требования, поэтому
+// чистым фактом такая клауза не считается. Живой регресс платёжной вакансии:
+// метка «(мост к outbox)» в блоке фактов перебивала ограничитель
+// «Transactional outbox: не использовал» (TestEvaluateProfileLimiterBeatsBridgeLabel).
+var bridgeLabelRe = regexp.MustCompile(`(?i)(^|[^а-яё])мост`)
+
+// notPartRe — заглавная частица «НЕ» как ограничитель профиля: «…bash
+// (LLM-конвейеры), НЕ Python» (context/01:261), «НЕ Kafka» (context/02:77).
+// Только заглавная форма: строчное «не» в прозе («не пробел», «не только»,
+// «не значит») ограничителем не является.
+var notPartRe = regexp.MustCompile(`(^|[^а-яёА-ЯЁ])НЕ([^а-яёА-ЯЁ]|$)`)
+
+// declinedInProfile — токен назван ограничителем профиля: профиль-фактом он
+// не считается. Два прохода, потому что у ограничений разная область действия:
+//
+//  1. Глобальные вето — прямое признание пробела профилем («готов освоить X»)
+//     и хвостовое «X, опыта нет». Это заявления о себе, они авторитетны для
+//     всего профиля: «Airflow» не становится фактом оттого, что рядом есть
+//     клауза «принципы ETL переносятся на Airflow».
+//  2. Клаузные ограничители — backward-маркеры («НЕ использовал») и частица
+//     «НЕ» гасят токен в СВОЕЙ клаузе, но не отменяют факты профиля в других
+//     клаузах. Регресс 2026-09-19: ограничитель «Transactional outbox на
+//     PostgreSQL: НЕ использовал» ронял требование «Опыт работы с SQL БД
+//     (Postgres)» при живом факте «PostgreSQL (глубокое знание)» (context/01:7,439).
+//
+// Токен declined ⇔ он упомянут в профиле и ни одной чистой клаузы у него нет
+// (метки моста чистыми не считаются). Направленность сохранена: backward гасит
+// всю клаузу, forward («готов освоить Python/Airflow») — только то, что стоит
+// после него, поэтому положительный якорь моста до маркера («bash-автоматизация»)
+// фактом остаётся (TestDeclinedInProfileForwardMarker).
 func declinedInProfile(token, profile string) bool {
 	clauses := sentences(profile)
 	for i, c := range clauses {
 		if !findText(token, c) {
 			continue
-		}
-		if backwardNegRe.MatchString(c) {
-			return true
 		}
 		if loc := forwardNegRe.FindStringIndex(c); loc != nil && !findText(token, c[:loc[0]]) {
 			return true
@@ -524,7 +550,21 @@ func declinedInProfile(token, profile string) bool {
 			return true
 		}
 	}
-	return false
+	declined := false
+	for _, c := range clauses {
+		if !findText(token, c) {
+			continue
+		}
+		if backwardNegRe.MatchString(c) || notPartRe.MatchString(c) {
+			declined = true
+			continue
+		}
+		if bridgeLabelRe.MatchString(c) {
+			continue
+		}
+		return false
+	}
+	return declined
 }
 
 // coverage — где требование закрыто. Порядок проверки: (1) технологии
