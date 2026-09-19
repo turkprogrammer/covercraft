@@ -1026,3 +1026,97 @@ func TestFitFixableFromEvaluate(t *testing.T) {
 		t.Errorf("в fixable не найден Git; fixable=%+v", fixable)
 	}
 }
+
+// T1: ограничитель в одной клаузе не отменяет факт профиля в других клаузах.
+// Регресс 2026-09-19: «Опыт работы с SQL БД (Postgres)» уходил в missing
+// при живом факте «PostgreSQL (глубокое знание)».
+func TestProfileLimiterDoesNotLeakToOtherTokens(t *testing.T) {
+	reqs := mustReqs([]string{"Опыт работы с SQL БД (Postgres)"}, nil, "go-primary")
+	profile := "## Навыки\n- **БД и SQL:** PostgreSQL (глубокое знание), MySQL, ClickHouse.\n" +
+		"### PostgreSQL (Основной опыт)\n- Covering Index — PostgreSQL.\n" +
+		"## Ограничители\n- **Transactional outbox на PostgreSQL:** НЕ использовал.\n"
+	f := Evaluate(DefaultConcepts(), reqs, profile, "", "вакансия")
+	if len(f.Missing) > 0 {
+		t.Errorf("postgres не должен быть missing: %+v", f.Missing)
+	}
+	found := false
+	for _, c := range append(f.Covered, f.Caveats...) {
+		if c.Source == SrcProfile {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("ожидался факт из профиля: covered=%+v caveats=%+v", f.Covered, f.Caveats)
+	}
+}
+
+// T2: аннотация «НЕ заявлять как outbox» — ограничитель, а не факт
+// (реальная строка профиля разбивается запятой на отдельные клаузы).
+func TestProfileAnnotationOutboxStillDeclines(t *testing.T) {
+	profile := "## Ограничители\n- **Transactional outbox на PostgreSQL:** НЕ использовал. " +
+		"Близкий опыт (мост с оговоркой, НЕ заявлять как outbox): событийный журнал в БД, идемпотентный Upsert.\n"
+	if !declinedInProfile("outbox", profile) {
+		t.Error("outbox назван ограничителем — обязан остаться declined")
+	}
+	reqs := mustReqs([]string{"Проектирование event-driven цепочек через transactional outbox"}, nil, "go-primary")
+	f := Evaluate(DefaultConcepts(), reqs, profile, "", "вакансия")
+	for _, c := range append(f.Covered, f.Caveats...) {
+		if strings.Contains(c.Note, "впиши в письмо") {
+			t.Errorf("совет вписать неприменённый паттерн: %+v", c)
+		}
+	}
+}
+
+// T3: хвостовой маркер «X, опыта нет» остаётся отрицанием (lookahead).
+func TestDeclinedInProfileTailMarkerPreserved(t *testing.T) {
+	if !declinedInProfile("opentelemetry", "Ограничители:\n- OpenTelemetry, опыта нет") {
+		t.Error("хвостовой маркер должен отклонять токен")
+	}
+}
+
+// T4: метка моста («(мост к outbox)») — не факт владения технологией.
+func TestBridgeLabelIsNotFact(t *testing.T) {
+	profile := "ФАКТЫ:\n- Надёжная доставка (мост к outbox): буферизация, идемпотентный Upsert.\n" +
+		"ОГРАНИЧИТЕЛИ:\n- Transactional outbox: не использовал.\n"
+	if !declinedInProfile("outbox", profile) {
+		t.Error("метка моста не должна перебивать ограничитель")
+	}
+}
+
+// T5: честные пробелы профиля («НЕ Python», «готов освоить Airflow»)
+// не превращаются в факты.
+func TestHonestGapsStayDeclined(t *testing.T) {
+	profile := "- **Границы ML:** ML-опыт — Go, bash, НЕ Python\n" +
+		"- Перенос принципов: мост «bash-автоматизация → готов освоить Python/Airflow»\n"
+	for _, tok := range []string{"python", "airflow"} {
+		if !declinedInProfile(tok, profile) {
+			t.Errorf("%s назван пробелом — обязан остаться declined", tok)
+		}
+	}
+	reqs := mustReqs([]string{"Опыт работы с Python"}, nil, "go-primary")
+	f := Evaluate(DefaultConcepts(), reqs, profile, "", "вакансия")
+	for _, c := range append(f.Covered, f.Caveats...) {
+		if strings.Contains(c.Note, "впиши в письмо") {
+			t.Errorf("совет вписать Python при честном пробеле: %+v", c)
+		}
+	}
+}
+
+// T6: ограничитель под-клейма не отменяет сам токен, если профиль называет
+// его фактом в других клаузах (Kafka — транспорт заявлен, «гарантия
+// порядка» — нет).
+func TestFactClauseWinsOverSubClaimLimiter(t *testing.T) {
+	profile := "ФАКТЫ:\n- Kafka consumer groups, MinBytes 10KB, at-least-once.\n" +
+		"ОГРАНИЧИТЕЛИ:\n- **Гарантия порядка в Kafka НЕ заявлять:** только at-least-once.\n"
+	if declinedInProfile("kafka", profile) {
+		t.Error("kafka назван фактом в отдельной клаузе — declined недопустим")
+	}
+}
+
+// T7: veto гибридного LLM-пути (map.go) видит аннотацию-ограничитель.
+func TestTokensDeclinedSeesAnnotation(t *testing.T) {
+	profile := "## Ограничители\n- **Transactional outbox:** НЕ использовал. Близкий опыт (мост, НЕ заявлять как outbox): журнал в БД.\n"
+	if !tokensDeclinedInProfile([]string{"outbox"}, profile) {
+		t.Error("модельная запись source=profile по outbox обязана быть отклонена")
+	}
+}
