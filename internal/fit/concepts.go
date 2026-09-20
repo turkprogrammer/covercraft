@@ -215,7 +215,7 @@ func DefaultConcepts() []Concept {
 		},
 		{
 			Name:    "высоконагруженные системы",
-			Trigger: regexp.MustCompile(`(?i)высоконагруж|нагруженн|критичн|highload|производительн`),
+			Trigger: regexp.MustCompile(`(?i)высоконагр|нагруженн|критичн|highload|производительн|high.{0,5}load`),
 			Signals: []Signal{
 				{Label: "нагрузочные метрики RPS/QPS", Re: regexp.MustCompile(`(?i)\brps\b|\bqps\b|highload|запросов в секунду`)},
 				{Label: "латентность P99/P95", Re: regexp.MustCompile(`(?i)\bp99\b|\bp95\b|latency|эл/с`)},
@@ -229,6 +229,8 @@ func DefaultConcepts() []Concept {
 				{Label: "Prometheus/Grafana", Re: regexp.MustCompile(`(?i)prometheus|grafana|метрик|монитор`)},
 				{Label: "алертинг по SLO", Re: regexp.MustCompile(`(?i)алерт|p99|p95|error rate|дашборд`)},
 				{Label: "SQL-Top/профайлинг", Re: regexp.MustCompile(`(?i)sql.?top|профайлер|pg_stat|explain`)},
+				{Label: "retries/deadlines/идемпотентность", Re: regexp.MustCompile(`(?i)retries|deadlines|идемпотентн|консистентн|at-least-once`)},
+				{Label: "uptime/sla/релизы", Re: regexp.MustCompile(`(?i)uptime|sla|релизн|degrad|fallback`)},
 			},
 		},
 		{
@@ -255,6 +257,7 @@ func DefaultConcepts() []Concept {
 				{Label: "горутины/каналы", Re: regexp.MustCompile(`(?i)горутин|канал|goroutine|channel|воркер|worker`)},
 				{Label: "lock-free/синхронизация", Re: regexp.MustCompile(`(?i)lock-free|lockfree|atomic|mutex|мьютекс|блокировк|синхронизац`)},
 				{Label: "диспетчеризация/жизненный цикл", Re: regexp.MustCompile(`(?i)processmanager|process manager|диспетчериз|graceful|пул|pool|shutdown`)},
+				{Label: "race condition/deadlock/goroutine leak", Re: regexp.MustCompile(`(?i)race.?condition|deadlock|goroutine.?leak|без.?гон.{0,5}данных|гонк.{0,5}данных|конкурентн.{0,10}код`)},
 			},
 		},
 		{
@@ -332,6 +335,61 @@ func DefaultConcepts() []Concept {
 			Signals: []Signal{
 				{Label: "СУБД", Re: regexp.MustCompile(`(?i)postgres|postgresql|mysql|mariadb|oracle|sqlite`)},
 				{Label: "оптимизация SQL", Re: regexp.MustCompile(`(?i)pg_stat|stat.?statements|explain|execution plan|индекс|b-tree|gin|covering|shared_buffers|work_mem|autovacuum|sql.?top|профайлер sql`)},
+			},
+		},
+		{
+			Name:    "system design и архитектурное проектирование",
+			Trigger: regexp.MustCompile(`(?i)system.{0,5}design|system.?design|системн.{0,8}дизайн|архитектурн.{0,15}проект|архитектурн.{0,10}решен`),
+			Signals: []Signal{
+				{Label: "ADR", Re: regexp.MustCompile(`(?i)\badr\b|architecture decision record`)},
+				{Label: "архитектурные стили", Re: regexp.MustCompile(`(?i)hexagonal|ddd|ports.{0,5}adapters|чистая архитектура|clean.arch`)},
+				{Label: "техническое проектирование", Re: regexp.MustCompile(`(?i)техническ.{0,10}проект|техдизайн|design.doc|специфик`)},
+			},
+		},
+		{
+			Name:    "коммерческий опыт и production-разработка",
+			Trigger: regexp.MustCompile(`(?i)коммерч.{0,5}разраб.{0,5}(от.|с|—|;)?\s*\d+\s*лет|коммерч.{0,5}опыт.{0,10}\d+\s*лет|опыт production.{0,10}разраб|full-time`),
+			Signals: []Signal{
+				{Label: "коммерческий стаж", Re: regexp.MustCompile(`(?i)\d+\s*лет.*(коммерч|backend|разраб)|production.*\d+\s*лет|full-time.*\d+\s*лет|коммерч.*\d+\s*лет`)},
+				{Label: "production-системы", Re: regexp.MustCompile(`(?i)production|коммерч|банковск|финтех|bank|fintech|промышленн`)},
+				{Label: "завершённые продукты", Re: regexp.MustCompile(`(?i)завершённ.{0,5}продукт|commercial product|закрыт.{0,5}релиз|выпущен`)},
+			},
+		},
+		{
+			Name:    "сеть и сетевое программирование",
+			Trigger: regexp.MustCompile(`(?i)сетев.{0,15}программир|network.{0,10}programm|networking|tcp.?ip|сетевой.{0,5}стек|сетевая.{0,5}диагност|сетев.{0,5}диагност`),
+			Signals: []Signal{
+				{Label: "TCP/IP и сетевой стек", Re: regexp.MustCompile(`(?i)tcp|udp|tcp.?ip|сетевой.{0,5}стек|networking|socket`)},
+				{Label: "Linux network diagnostics", Re: regexp.MustCompile(`(?i)/sys/class/net|netstat|ss |/proc/net|tcpdump|wireshark|сетевая.{0,5}диагност|сетев.{0,5}диагност|диагностик.{0,5}сет`)},
+				{Label: "WebRTC/WS/HTTP", Re: regexp.MustCompile(`(?i)webrtc|websocket|ws://|http.{0,5}server|nginx|caddy`)},
+			},
+		},
+		{
+			Name:    "микросервисная архитектура",
+			Trigger: regexp.MustCompile(`(?i)микросервис|service.{0,5}orient|soa|сервисн.{0,10}архитект|архитектурн`),
+			Signals: []Signal{
+				{Label: "микросервисы/decomposition", Re: regexp.MustCompile(`(?i)микросервис|微service|декомпоз|service-oriented|soa`)},
+				{Label: "event-driven/брокеры", Re: regexp.MustCompile(`(?i)event-driven|kafka|rabbitmq|nats|очеред|брокер`)},
+				{Label: "ProcessManager/оркестрация", Re: regexp.MustCompile(`(?i)processmanager|оркестрац|saga|compensating`)},
+			},
+		},
+		{
+			Name:    "NoSQL и распределённые хранилища",
+			Trigger: regexp.MustCompile(`(?i)nosql|no.?sql|кэш.{0,5}хранилищ|распр.{0,5}делённ.{0,5}хранилищ`),
+			Signals: []Signal{
+				{Label: "Redis/ключ-значение", Re: regexp.MustCompile(`(?i)\bredis\b|key-value|каш-хранилищ`)},
+				{Label: "ClickHouse/колоночная", Re: regexp.MustCompile(`(?i)\bclickhouse\b|колоночн|columnar`)},
+				{Label: "MongoDB/документная", Re: regexp.MustCompile(`(?i)\bmongodb\b|document.{0,5}store|document-oriented`)},
+			},
+		},
+		{
+			Name:    "документирование технических решений",
+			Trigger: regexp.MustCompile(`(?i)документир|техническ.{0,5}документ|design.{0,5}doc|техническ.{0,10}решен|docs|code.?review|архитектурн.{0,5}решен|решен.{0,5}архитект`),
+			Signals: []Signal{
+				{Label: "техническая документация", Re: regexp.MustCompile(`(?i)документир|документаци|technical.{0,5}doc|design.doc`)},
+				{Label: "ADR/решения", Re: regexp.MustCompile(`(?i)\badr\b|архитектурн.{0,5}решен|decision log`)},
+				{Label: "README/спецификации", Re: regexp.MustCompile(`(?i)readme|специфик|API doc|swagger|openapi`)},
+				{Label: "code review как документирование", Re: regexp.MustCompile(`(?i)code review|code.?review|ревью.{0,5}кода`)},
 			},
 		},
 	}
