@@ -121,7 +121,8 @@ var synonyms = map[string][]string{
 	"kafka":           {"kafka", "logbroker"}, // Logbroker — «Kafka-like» event bus (формулировка вакансий)
 	// «rate limits» в требовании → «rate limiting» в письме: разные словоформы
 	// одного и того же опыта, токен-матчинг без синонима промахивается.
-	"limits": {"limit", "limiting", "rate limit", "rate limiting", "rate-limit", "троттлинг"},
+	"limits":  {"limit", "limiting", "rate limit", "rate limiting", "rate-limit", "троттлинг"},
+	"retries": {"retry", "retries", "retrial"},
 }
 
 // bridge — мост: требование без прямого факта, но с соседним опытом

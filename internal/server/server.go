@@ -303,7 +303,12 @@ func fitVerdict(ctx context.Context, concepts []fit.Concept, reqs fit.Requiremen
 			return f
 		}
 	}
-	return fit.Evaluate(concepts, reqs, profile, letter, vacancy)
+	f := fit.Evaluate(concepts, reqs, profile, letter, vacancy)
+	// Debug: log all must-have texts so we can verify trigger matching.
+	for _, r := range reqs.MustHave {
+		fmt.Fprintf(os.Stderr, "DEBUG req=%q\n", r.Text)
+	}
+	return f
 }
 
 // streamGenerate вызывает LLM и пишет ответ как SSE: дельты по мере
