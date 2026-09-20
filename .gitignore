@@ -10,3 +10,4 @@ dogfood/
 # IDE
 .idea/
 /dist/
+internal/fit/golden_test.go
