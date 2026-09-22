@@ -27,6 +27,9 @@ func ExtractPrompt(vacancy string) (system, user string) {
 - niceToHave — "будет плюсом", "желательно";
 - soft — качества личности (самоорганизованность, темп, стрессоустойчивость);
 - text — короткая формулировка требования, 1 строка, без объяснений;
+- языковые требования («Professional working level English», «Russian —
+  minimum A1», «speak English») — в soft, не в mustHave: это качество
+  общения, а не технология; оно не должно ронять вердикт до skip;
 - ничего не выдумывай: если требования нет в тексте вакансии — его нет в JSON.`
 	user = vacancy
 	return system, user
