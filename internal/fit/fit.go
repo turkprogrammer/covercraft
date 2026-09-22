@@ -123,6 +123,107 @@ var synonyms = map[string][]string{
 	// одного и того же опыта, токен-матчинг без синонима промахивается.
 	"limits":  {"limit", "limiting", "rate limit", "rate limiting", "rate-limit", "троттлинг"},
 	"retries": {"retry", "retries", "retrial"},
+	// Мосты рус↔англ для абстрактных терминов: вакансия на английском,
+	// письмо/профиль на русском — токен-матчинг без кириллических альтов
+	// промахивается на «query optimization», «tests», «documentation» и т.д.
+	"query":        {"query", "запрос"},
+	"queries":      {"query", "queries", "запрос"},
+	"optimization": {"optimization", "оптимизац"},
+	"optimized":    {"optimization", "optimized", "оптимизац"},
+	"migrations":   {"migrations", "миграци"},
+	"migrate":      {"migrations", "migrate", "миграци"},
+	"tests":        {"test", "tests", "тесты", "тест"},
+	"test":         {"test", "tests", "тесты", "тест"},
+	// «PHPUnit testing» — токен «testing» закрывается альт-списком
+	// «test/tests/тест»: кандидат пишет тесты на Go/PHP — это то же самое.
+	"testing":      {"testing", "test", "tests", "тест"},
+	// rest/grpc НЕ в альт-списке api: «Опыт разработки REST API» — два
+	// независимых токена (rest и api), тест TestRestAPITokenMatch на это
+	// полагается; кириллический альт api — подстраховка на «апи» (редко).
+	"api":         {"api", "апи"},
+	// «Git & GitHub - branching strategies, PR workflows, conflict
+	// resolution» — требования к git-практикам: факты «Git», «GitHub»,
+	// «PR» в письме/профиле закрывают даже без слов «branching»,
+	// «strategies», «conflict», «workflows», «resolution» (в вакансии они
+	// — нарратив, а не отдельный навык). Для 8-токенового требования
+	// found=3 (git, github, pr) < 50% → до фикса это было missing.
+	"git":        {"git", "github"},
+	"github":     {"github", "git"},
+	"workflows":  {"workflows", "git flow", "ветк"},
+	"branching":  {"branching", "ветв", "ветк", "git flow"},
+	"strategies": {"strategies", "стратеги", "подход", "ветв", "ветк"},
+	"conflict":   {"conflict", "конфликт"},
+	"resolution": {"resolution", "разрешен", "решен"},
+	// «Experience writing and maintaining technical documentation — API
+	// docs, architecture overviews» — нарративные слова «writing»,
+	// «maintaining», «technical», «overviews» не технологии. Факты
+	// «ADR», «API docs», «architecture» в письме закрывают.
+	"writing":     {"writing", "написан", "создан", "разработк"},
+	"written":     {"writing", "written", "написан", "создан"},
+	"maintaining": {"maintaining", "обновля", "содержан", "оперир"},
+	"documentation": {"documentation", "документаци", "документир", "docs"},
+	"technical":   {"technical", "техн"},
+	"overviews":   {"overviews", "обзор", "схем"},
+	"docs":        {"docs", "documentation", "документаци", "документир"},
+	// «PHPUnit - you've written tests» — «phpunit» без прямых фактов
+	// закрывается по альт-списку «тест/unit» (если кандидат пишет тесты
+	// на Go/PHP — это то же самое).
+	"phpunit":     {"phpunit", "тест", "tests", "unit"},
+	// «Strong understanding of code review culture» — нарративные слова
+	// «understanding», «strong», «culture» не навыки. Факты «code review»,
+	// «ADR» в письме/профиле закрывают.
+	"understanding": {"understanding", "понимани", "понимаю", "понятн"},
+	"strong":       {"strong", "сильн", "професс", "продвинут", "уровень"},
+	"culture":      {"culture", "культур", "практик", "ревью", "review", "code review"},
+	// «Structured approach to writing tests» — «structured», «approach»
+	// — нарратив; факты «тесты», «table-driven» закрывают.
+	"structured": {"structured", "структурир", "системн", "системат"},
+	"approach":   {"approach", "подход", "медиц", "метод", "style"},
+	// «PHPUnit: experience writing and believing in tests» — «believing»
+	// — нарратив; факты «PHPUnit», «тесты», «TDD» закрывают.
+	"believing":  {"believing", "believe", "уверенн", "довер"},
+	// «Strong Go in production high-load systems» — «high-load»,
+	// «systems» — классы систем; факты «RPS», «Kafka», «P99» закрывают.
+	"high-load":  {"high-load", "highload", "высоконагр", "нагрузк"},
+	"systems":    {"systems", "систем", "сервис", "service"},
+	// «Working with relational and NoSQL databases» — «relational»,
+	// «nosql», «databases» — классы БД; факты «PostgreSQL», «ClickHouse»
+	// закрывают.
+	"relational": {"relational", "реляционн", "база"},
+	// «nosql» — сам термин + кириллический эквивалент. НЕ включаем
+	// имена СУБД (clickhouse/redis/mongodb/elasticsearch): они имеют
+	// собственные мосты/синонимы, и широкое включение в «nosql»
+	// коротит мост TestEvaluateBridge («Опыт с Elasticsearch» должен
+	// закрываться мостом через ClickHouse, а не напрямую).
+	"nosql":      {"nosql", "no-sql", "нереляционн"},
+	// «databases» — термин + кириллический. Не «data» (слишком широко,
+	// ловит «data pipeline», «data science»).
+	"databases":  {"databases", "бд", "база данных", "хранилищ"},
+	// «Strong Go in production high-load systems» — «production»,
+	// «high», «load» — эпитеты; факты «RPS», «P99», «Kafka» закрывают.
+	"production": {"production", "прод", "product"},
+	"high":       {"high", "highload", "высоконагр"},
+	"load":       {"load", "highload", "нагрузк"},
+	// «Solid working experience with vanilla PHP» — «vanilla», «pure»,
+	// «frameworkless» — одно и то же; факт «pure PHP» / «no framework»
+	// в письме закрывает.
+	"vanilla":      {"vanilla", "чист", "pure", "frameworkless", "без фреймворк"},
+	// «Professional working level English» / «Russian minimum A1» —
+	// требования к языку общения; альты ловят прямые маркеры.
+	"local":        {"local", "локал"},
+	"staging":      {"staging", "прод", "staging"},
+	"environments": {"environments", "среда", "сред"},
+	"development":  {"development", "разработк", "develop"},
+	"professional": {"professional", "професс", "коммерч", "production"},
+	"working":      {"working", "работ", "work"},
+	"level":        {"level", "уровн"},
+	"english":      {"english", "английск"},
+	"russian":      {"russian", "русск"},
+	"mixed":        {"mixed", "смешанн", "разноо"},
+	"framework":    {"framework", "фреймворк", "laravel", "symfony", "lumen"},
+	"pure":         {"pure", "чист", "vanilla", "frameworkless"},
+	"experience":   {"experience", "опыт", "лет"},
+	"years":        {"years", "лет", "стаж"},
 }
 
 // bridge — мост: требование без прямого факта, но с соседним опытом
@@ -224,12 +325,54 @@ var plusRe = regexp.MustCompile(`(?i)будет плюсом|желательн�
 var tokenRe = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+#.-]{1,30}`)
 
 // stopwords — общеупотребительные слова, не технологии.
+// Делится на две группы: (1) универсальные частицы/предлоги; (2)
+// нарративные слова англоязычных требований («written tests»,
+// «branching strategies», «conflict resolution», «architecture overviews»).
+// Группа 2 критична для majority-счёта: «Git & GitHub - branching
+// strategies, PR workflows, conflict resolution» — 8 токенов, из них
+// «branching», «strategies», «workflows», «conflict», «resolution» —
+// нарратив, а не отдельные навыки. Без stopword'ов found=3 < 50% →
+// ложный missing. Русские вакансии не страдают: кириллические слова
+// не извлекаются tokenRe, и эти стоп-слова для них неактивны.
 var stopwords = map[string]bool{
 	"the": true, "and": true, "or": true, "of": true, "in": true,
 	"at": true, "to": true, "with": true, "for": true, "a": true,
 	"senior": true, "middle": true, "junior": true, "lead": true,
 	"years": true, "year": true, "experience": true, "work": true,
 	"com": true, "http": true, "https": true, "www": true,
+	// Функциональный шум англоязычных требований: «you've written tests
+	// and you believe in them, not just on your CV» — «written tests
+	// believe them just cv» не технологии, а нарратив. В reqTokens
+	// отбрасываются, чтобы не раздувать majority-порог.
+	"you": true, "your": true, "yourself": true, "ve": true,
+	"just": true, "not": true, "only": true, "also": true, "can": true,
+	"must": true, "should": true, "will": true, "able": true, "level": true,
+	"minimum": true, "maximum": true, "basic": true, "strong": true, "good": true,
+	"believe": true, "them": true, "him": true, "it": true, "its": true, "us": true, "we": true,
+	"cv": true, "resume": true, "candidate": true, "candidates": true,
+	// "on" — нарративный предлог («not just on your CV»), не технология.
+	"on": true,
+	// Нарративные слова git-практик: «branching strategies, PR workflows,
+	// conflict resolution» — факты «Git», «GitHub», «PR» закрывают
+	// требование даже без этих слов. В рус. вакансиях аналог
+	// «ветвление, разрешение конфликтов» не извлекается tokenRe.
+	"branching":  true, "strategies": true, "workflows": true,
+	"conflict":   true, "resolution": true, "strategy": true,
+	"works": true,
+	// Нарративные слова про тесты: «you've written tests and you
+	// believe in them» — «written», «writing» — нарратив; факт
+	// «PHPUnit»/«unit tests»/«TDD» закрывает требование.
+	"written": true, "writing": true, "writes": true, "maintain": true,
+	"maintaining": true, "maintains": true, "technical": true,
+	// Нарративные слова про документацию: «API docs, architecture
+	// overviews» — «overviews», «documentation» без прямых фактов
+	// — шум; факт «ADR»/«docs»/«architecture» закрывает.
+	"overviews": true, "documentation": true, "docs": true,
+	"architecture": true, "architectures": true,
+	// Нарративные слова про языки: «Professional working level English»,
+	// «Russian — minimum A1» — «professional», «working», «level» —
+	// эпитеты; факт «английский»/«русский» в письме/профиле закрывает.
+	"professional": true, "working": true,
 	// rest/api/sql — НЕ стоп-слова: «Опыт разработки REST API» и
 	// «Уверенный SQL» матчатся по токенам (профиль: «REST (JSON)»,
 	// «БД и SQL: PostgreSQL»), а не через концепты. sql выведен из
@@ -274,13 +417,19 @@ func reqTokens(text string) []string {
 	return out
 }
 
-// findText ищет токен в тексте. Кириллические альты ищем просто
-// подстрокой (без границ слова — там падежи: «Kubernetes», «Kubernetesа»),
-// латиницу — с границами, чтобы «go» не ловился внутри «golang».
+// findText ищет токен в тексте (токен из reqTokens — латиница из
+// требования). Альтернативы из synonyms ищем подстрокой, если содержат
+// кириллицу (падежи: «оптимизация» / «оптимизации»), или с границами
+// слова, если латиница (чтобы «go» не ловился внутри «golang»).
 func findText(token, text string) bool {
 	lt := strings.ToLower(text)
-	alts := append([]string{token}, synonyms[token]...)
-	for _, a := range alts {
+	// Основной токен — с границами слова (латиница из требования).
+	reMain := regexp.MustCompile(`(?i)(^|[^a-zа-я0-9])` + regexp.QuoteMeta(token) + `([^a-zа-я0-9]|$)`)
+	if reMain.MatchString(lt) {
+		return true
+	}
+	// Альтернативы: кириллица — подстрока, латиница — с границами.
+	for _, a := range synonyms[token] {
 		if hasCyrillic(a) {
 			if strings.Contains(lt, strings.ToLower(a)) {
 				return true
@@ -480,7 +629,25 @@ func matchTokens(tokens []string, reqText, src, text, letter string) (string, st
 			}
 		}
 	}
-	if len(foundSet) >= 2 && len(foundSet) > len(tokens)-len(foundSet) && len(missing) > 0 {
+	// majority-порог: found > missing ИЛИ found == missing (ровно 50%).
+	// Второе введено для англоязычных требований с длинными формулировками:
+	// «MySQL - query optimization, schema design, migrations» — 6 токенов,
+	// found = 3 (mysql, schema, design), missing = 3 (query, optimization,
+	// migrations) — 50/50; до фикса это было missing, хотя требование
+	// фактически закрыто.
+	//
+	// Ограничения:
+	// 1. found >= 2 — один токен («kafka») не считается закрытым по majority.
+	// 2. found == missing (50/50) — только при total >= 6 (развёрнутая
+	//    формулировка). Для total 4–5 порог 50% слишком слабый:
+	//    «Transactional outbox на PostgreSQL» (total=3–4, found=2, missing=1)
+	//    — паттерн назван соседним фактом, но сам не применён; это
+	//    регресс TestEvaluateProfileLimiterBeatsBridgeLabel. Для total >= 6
+	//    50% — разумный компромисс: половина фактов подтверждена.
+	if len(foundSet) >= 2 &&
+		(len(foundSet) > len(tokens)-len(foundSet) ||
+			(len(foundSet) == len(tokens)-len(foundSet) && len(tokens) >= 6)) &&
+		len(missing) > 0 {
 		if src == SrcProfile {
 			return src, "в профиле есть факт по большинству токенов (не упомянуты: " + strings.Join(missing, ", ") + ") — впиши в письмо, закроется полностью", true
 		}
@@ -884,10 +1051,14 @@ func roleMismatch(reqs Requirements, profile string) bool {
 	phpRole := strings.Contains(role, "php")
 	// goCand: Go-специалист без PHP-маркеров — откликаться на PHP-вакансию рискованно.
 	goCand := regexp.MustCompile(`(?i)go-разработчик|golang|основн.{0,15}\bgo\b`).MatchString(profile)
-	// phpCand: кандидат с сильным PHP-маркером. Раньше регулярка требовала
+	// phpCand: кандидат с PHP-маркером. Раньше регулярка требовала
 	// «php-разработчик» или «основн...php» — узко, не ловило билингвальный
 	// профиль с «PHP — PRODUCTION (17 ЛЕТ ОПЫТА)». Расширяем до факта
 	// продакшн-опыта на PHP, не только «названия профессии».
-	phpCand := regexp.MustCompile(`(?i)php-разработчик|основн.{0,15}php|\bphp\b.{0,40}(production|prod|лет|опыт)|(production|prod|лет|опыт).{0,40}\bphp\b`).MatchString(profile)
+	// Регресс: обрезанный профиль «Основные языки: Go (3 года), PHP (2005+), Bash, SQL»
+	// не содержит слова «PHP» в пределах 40 символов от маркера опыта → phpCand=false →
+	// ложный roleMismatch → мгновенный skip со счётом 0. Добавляем маркер года «PHP (20\d\d+)»
+	// и расширяем окно до 60 символов, чтобы ловить «PHP (2005+)» и «PHP, 17 лет опыта».
+	phpCand := regexp.MustCompile(`(?i)php-разработчик|основн.{0,15}php|\bphp\b.{0,60}(production|prod|лет|опыт|20\d\d)|((production|prod|лет|опыт|20\d\d).{0,60}\bphp\b|\bphp\b\s*\(\s*20\d\d)`).MatchString(profile)
 	return phpRole && goCand && !phpCand
 }

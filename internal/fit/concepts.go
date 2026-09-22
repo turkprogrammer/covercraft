@@ -384,11 +384,11 @@ func DefaultConcepts() []Concept {
 		},
 		{
 			Name:    "документирование технических решений",
-			Trigger: regexp.MustCompile(`(?i)документир|техническ.{0,5}документ|design.{0,5}doc|техническ.{0,10}решен|docs|code.?review|архитектурн.{0,5}решен|решен.{0,5}архитект`),
+			Trigger: regexp.MustCompile(`(?i)документир|техническ.{0,5}документ|design.{0,5}doc|техническ.{0,10}решен|docs|code.?review|архитектурн.{0,5}решен|решен.{0,5}архитект|documentat`),
 			Signals: []Signal{
-				{Label: "техническая документация", Re: regexp.MustCompile(`(?i)документир|документаци|technical.{0,5}doc|design.doc`)},
+				{Label: "техническая документация", Re: regexp.MustCompile(`(?i)документир|документаци|technical.{0,5}doc|design.doc|api doc|ADR|архитектурн.{0,5}решен`)},
 				{Label: "ADR/решения", Re: regexp.MustCompile(`(?i)\badr\b|архитектурн.{0,5}решен|decision log`)},
-				{Label: "README/спецификации", Re: regexp.MustCompile(`(?i)readme|специфик|API doc|swagger|openapi`)},
+				{Label: "README/спецификации", Re: regexp.MustCompile(`(?i)readme|специфик|API doc|swagger|openapi|rest.{0,5}api doc`)},
 				{Label: "code review как документирование", Re: regexp.MustCompile(`(?i)code review|code.?review|ревью.{0,5}кода`)},
 			},
 		},

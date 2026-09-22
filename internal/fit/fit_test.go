@@ -1144,3 +1144,54 @@ func TestTokensDeclinedSeesAnnotation(t *testing.T) {
 		t.Error("модельная запись source=profile по outbox обязана быть отклонена")
 	}
 }
+
+// Живой регресс PHP-вакансии: билингвальный профиль (Go + PHP 17 лет)
+// на PHP-вакансии не даёт ложный roleMismatch. Профиль без слова «PHP»
+// в пределах 60 символов от маркера опыта — самый частый паттерн
+// «Основные языки: Go (3 года), PHP (2005+)» — не должен ронять
+// вердикт до skip со счётом 0.
+func TestRoleMismatchBilingualNoFalseSkip(t *testing.T) {
+	// Обрезанный профиль: «PHP (2005+)» — маркер года, не «лет опыта».
+	profile := "17 лет в бэкенд-архитектуре. Основные языки: Go (3 года), PHP (2005+), Bash, SQL. Фреймворки Laravel - production."
+	reqs := Requirements{Role: "php-primary", MustHave: []Requirement{{Text: "PHP в проде"}}}
+	if roleMismatch(reqs, profile) {
+		t.Error("roleMismatch сработал на билингвальном профиле с «PHP (2005+)» — ложный skip")
+	}
+	// Полный профиль с «17 ЛЕТ ОПЫТА» рядом — тоже не должен.
+	profileFull := "Go (3 года), PHP (2005+). PHP — PRODUCTION (17 ЛЕТ ОПЫТА), production-инциденты."
+	if roleMismatch(reqs, profileFull) {
+		t.Error("roleMismatch сработал на билингвальном профиле с «17 ЛЕТ ОПЫТА» рядом")
+	}
+	// Чистый Go-разработчик на PHP-вакансии — должно сработать.
+	profileGoOnly := "Go-разработчик, 3 года, Kafka и gRPC. No PHP."
+	if !roleMismatch(reqs, profileGoOnly) {
+		t.Error("roleMismatch НЕ сработал на чистом Go-разработчике на PHP-вакансии")
+	}
+}
+
+// Англоязычное требование с длинной формулировкой (MySQL - query
+// optimization, schema design, migrations) закрывается русским письмом
+// по кириллическим альт-синонимах: query→запрос, optimization→
+// оптимизац, migrations→миграци. Majority 50/50 при total>=6.
+func TestEnglishReqCyrillicLetter(t *testing.T) {
+	profile := "MySQL, PostgreSQL. Оптимизация запросов, индексы, миграции."
+	letter := "MySQL: оптимизация запросов, индексы B-tree/GIN, миграции (Task Flow), schema design через Doctrine."
+	reqs := mustReqs([]string{"MySQL - query optimization, schema design, migrations"}, nil, "php-primary")
+	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
+	if f.Score < 50 {
+		t.Errorf("score = %d, >= 50: query→запрос, optimization→оптимизац, migrations→миграци должны закрыться по кириллическим альтам", f.Score)
+	}
+}
+
+// Нарративные слова git-практик (branching/strategies/workflows/
+// conflict/resolution) — стоп-слова: не раздувают majority-порог.
+// Факты «Git», «GitHub», «PR» в письме закрывают требование.
+func TestGitReqNarrativeStopwords(t *testing.T) {
+	profile := "GitHub PR workflows, Git (17 лет), ADR (10)."
+	letter := "GitHub Pull Requests - уверенно владею Git (17 лет)."
+	reqs := mustReqs([]string{"Git & GitHub - branching strategies, PR workflows, conflict resolution"}, nil, "go-primary")
+	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
+	if f.Score < 50 {
+		t.Errorf("score = %d, >= 50: git/github/pr закрывают требование, нарративные слова не должны раздувать порог", f.Score)
+	}
+}
