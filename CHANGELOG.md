@@ -6,6 +6,28 @@
 
 Автор и единственный контрибутор всех версий: turkprogrammer.
 
+## [0.2.4] — 2026-09-22
+
+### Fixed
+- **Ложно-отрицательные вердикты на англоязычных требованиях** — LLM-извлечение выдавало длинные англ. формулировки must-have, детерминированный матчер ищет латиницу в рус. письме/профиле и не закрывал 50-100% требований, роняя вердикт до `skip` со счётом 0.
+  - `roleMismatch`: маркер `PHP (20\d\d+)` + окно 60 символов — билингвальный профиль «Go (3 года), PHP (2005+)» не даёт ложный `skip`.
+  - `findText`: кириллические альты из синонимов — подстрокой, латиница — с границами слова.
+  - Синонимы рус↔англ для абстрактных терминов: `query→запрос`, `optimization→оптимизац`, `migrations→миграци`, `tests→тесты`, `documentation→документаци`, `git→github`, `phpunit→тест/unit`, `culture→code review`, `high-load→highload/высоконагр` и др.
+  - Стоп-слова: нарративные слова англ. требований (`branching`, `strategies`, `writing`, `maintaining`, `technical`, `professional`, `working` и др.) не раздувают majority-порог.
+  - Majority: `found > missing` ИЛИ `found == missing` при `total >= 6` (50/50 для 6-токеновых требований; для `total <= 5` порог не открывается).
+- **Языковые требования — в soft, не в mustHave** — промпт `extract.go` классифицирует «English working level», «Russian A1» как `soft`: не роняют вердикт до `skip`.
+- **Концепт «документирование технических решений»** — trigger расширен на `documentat` (латиница из англ. требования), signal «техническая документация» на `ADR|api doc|архитектурн.решен`.
+- **Концепты v0.2.4** — signals `retries/deadlines/идемпотентность` в концепт «эксплуатация»; `System Design` trigger `system.?design`; `NoSQL` без имён СУБД (мост через bridge, не через синонимы).
+
+### Added
+- **Регресс-тесты** — `TestRoleMismatchBilingualNoFalseSkip`, `TestEnglishReqCyrillicLetter`, `TestGitReqNarrativeStopwords` в `fit_test.go`; 3 сценария вакансий в `more_vacancies_check_test.go`.
+- **Документирование ADR** — 10 ADR для Go-проектов, API-спецификации, code review как документирование (через `DefaultConcepts`).
+
+### Verified (детерминированный матчер, 3 типа вакансий)
+- Англ. Go highload: `apply` 70% (было `skip` 37%).
+- Рус. PHP (10 must): `apply` 97% (было `skip` 0%).
+- Edge K8s (честный пробел): `apply_with_caveats` 58% (корректно — не занижает, не завышает).
+
 ## [0.2.3] — 2026-09-19
 
 ### Fixed

@@ -30,6 +30,15 @@
      width="720">
 
 
+## Что нового в 0.2.4
+
+- **Fit-матчер: англоязычные требования больше не роняют вердикт до `skip`** — LLM-извлечение выдаёт длинные англ. формулировки must-have; детерминированный матчер ищет латиницу в рус. письме/профиле и не закрывал 50-100% требований. Добавлены: синонимы рус↔англ для абстрактных терминов (`query→запрос`, `optimization→оптимизац`, `tests→тесты`, `documentation→документаци`, `culture→code review`, `high-load→highload/высоконагр`), стоп-слова для нарративных слов англ. требований, majority-порог `found == missing` при `total >= 6`.
+- **`roleMismatch`** — маркер `PHP (20\d\d+)` + окно 60 символов: билингвальный профиль «Go (3 года), PHP (2005+)» не даёт ложный `skip`.
+- **Языковые требования — в `soft`, не в `mustHave`** — «English working level», «Russian A1» не роняют вердикт; классификация в промпте `extract.go`.
+- **Концепт «документирование технических решений»** — trigger `documentat` (латиница), signal «техническая документация» на `ADR|api doc|архитектурн.решен`; закрывает must-have «Experience writing and maintaining technical documentation».
+- **Концепты v0.2.4** — signals `retries/deadlines/идемпотентность` в концепт «эксплуатация»; `System Design` trigger `system.?design`; `NoSQL` без имён СУБД (мост через bridge).
+- **Проверено на 3 типах вакансий** — англ. Go highload: `apply` 70% (было `skip` 37%); рус. PHP (10 must): `apply` 97% (было `skip` 0%); edge K8s (честный пробел): `apply_with_caveats` 58% (корректно).
+
 ## История изменений
 
 Подробная история всех версий — в [CHANGELOG.md](CHANGELOG.md).
