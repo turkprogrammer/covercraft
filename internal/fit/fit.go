@@ -237,6 +237,15 @@ var synonyms = map[string][]string{
 	"pure":         {"pure", "чист", "vanilla", "frameworkless"},
 	"experience":   {"experience", "опыт", "лет"},
 	"years":        {"years", "лет", "стаж"},
+	// Yii2: фреймворк пишется как «yii2filmcatalog», «yii2shop» — одно
+	// слово, \byii\b не матчится. Нормализуем токен «yii» до полного
+	// названия проекта, чтобы findText нашёл его по границам слова.
+	"yii2filmcatalog": {"yii2filmcatalog", "yii2", "yii", "yiiframework"},
+	"yii2shop":        {"yii2shop", "yii2", "yii", "yiiframework"},
+	"yii2gallery":     {"yii2gallery", "yii2", "yii", "yiiframework"},
+	// Ubuntu — разновидность Linux: токен «ubuntu» нормализуется до
+	// «linux», а «linux» уже есть в письме/профиле.
+	"ubuntu":         {"ubuntu", "linux"},
 }
 
 // bridge — мост: требование без прямого факта, но с соседним опытом
