@@ -1195,3 +1195,40 @@ func TestGitReqNarrativeStopwords(t *testing.T) {
 		t.Errorf("score = %d, >= 50: git/github/pr закрывают требование, нарративные слова не должны раздувать порог", f.Score)
 	}
 }
+
+// «Аутентификация и авторизация: JWT, 2FA/TOTP, RBAC» — факты из письма
+// (JWT RS256, TOTP, PII masking, 152-ФЗ) и профиля (RBAC, fail-closed,
+// idempotency keys) закрывают требование. «fa» — хвост «2FA» — стоп-слово,
+// не токен.
+func TestAuthSecurityRequirement(t *testing.T) {
+	profile := "JWT RS256, TOTP (Vault), PII masking (152-ФЗ), RBAC, " +
+		"fail-closed аутентификация, idempotency keys, TLS (Caddy)"
+	letter := "Аутентификация: JWT RS256 (Task Flow HS256), TOTP (Vault); " +
+		"PII masking (152-ФЗ); idempotency keys через ClickHouse Upsert."
+	reqs := mustReqs([]string{"Аутентификация и авторизация: JWT, 2FA/TOTP, RBAC"}, nil, "go-primary")
+	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
+	// Требование должно быть закрыто (через письмо или профиль), не missing.
+	for _, c := range f.Missing {
+		if strings.Contains(c.Text, "Аутентификация") {
+			t.Errorf("Аутентификация в Missing: %s — %s", c.Text, c.Note)
+		}
+	}
+	if f.Score < 50 {
+		t.Errorf("score = %d, >= 50: JWT/TOTP/PII/RBAC закрывают требование", f.Score)
+	}
+}
+
+// «Безопасность: PII-маскирование в логах (152-ФЗ), fail-closed
+// аутентификация, idempotency keys» — требование по безопасности
+// закрывается фактами из письма.
+func TestSecurityConceptTrigger(t *testing.T) {
+	letter := "PII-маскирование в логах (152-ФЗ), fail-closed " +
+		"аутентификация, idempotency keys через ClickHouse Upsert"
+	reqs := mustReqs([]string{"Безопасность: PII-маскирование, fail-closed, idempotency"}, nil, "go-primary")
+	f := Evaluate(DefaultConcepts(), reqs, "", letter, "вакансия")
+	for _, c := range f.Missing {
+		if strings.Contains(c.Text, "Безопасность") {
+			t.Errorf("Безопасность в Missing: %s — %s", c.Text, c.Note)
+		}
+	}
+}

@@ -392,6 +392,94 @@ func DefaultConcepts() []Concept {
 				{Label: "code review как документирование", Re: regexp.MustCompile(`(?i)code review|code.?review|ревью.{0,5}кода`)},
 			},
 		},
+		{
+			// «Аутентификация и авторизация: JWT, 2FA/TOTP, RBAC» —
+			// требование по безопасности. Триггер по ключевым словам
+			// безопасности/аутентификации; сигналы — факты из профиля
+			// (JWT HS256/RS256, TOTP, PII masking, idempotency keys,
+			// fail-closed, TLS, secrets management).
+			// RBAC не заявляем (ограничитель профиля) — если вакансия
+			// требует только RBAC, вердикт не закроется и даст caveat.
+			Name:    "аутентификация, авторизация и безопасность",
+			Trigger: regexp.MustCompile(`(?i)аутентификац|авторизаци|authenticat|authoriz|\bjwt\b|token|\bbtoa\b|\b2fa\b|\btotp\b|\brbac\b|безопасн|security|pii|fail-closed|idempotency`),
+			Signals: []Signal{
+				{Label: "JWT/токены", Re: regexp.MustCompile(`(?i)\bjwt\b|hs256|rs256|jwks|token|токен`)},
+				{Label: "2FA/TOTP", Re: regexp.MustCompile(`(?i)\btotp\b|\b2fa\b|two-factor|многофакторн`)},
+				{Label: "PII/маскирование", Re: regexp.MustCompile(`(?i)\bpii\b|маскирован|152-фз|152 фз`)},
+				{Label: "idempotency/fail-closed", Re: regexp.MustCompile(`(?i)idempoten|идемпотент|fail-closed`)},
+				{Label: "TLS/секреты", Re: regexp.MustCompile(`(?i)\btls\b|ssl|caddy|secrets|secret.?manag|vault`)},
+			},
+		},
+		{
+			// «Точная денежная арифметика / никакого float для денег /
+			// understanding precision» — концепт, а не технология:
+			// кандидат НЕ использует float, а integer-based/decimal
+			// подход. Токен «float» не закрывает требование (в письме
+			// он под отрицанием «float для денег не применяю»), нужен
+			// концепт-триггер по «денежн/precision/money/integer».
+			Name:    "точная денежная арифметика (money precision)",
+			Trigger: regexp.MustCompile(`(?i)денежн|money.?arithmetic|монет|финансов.{0,15}арифметик|precision|точн.{0,10}арифметик|float|численн.{0,10}точност|numer`),
+			Signals: []Signal{
+				{Label: "integer/decimal-based", Re: regexp.MustCompile(`(?i)integer|decimal|целочислен|fixed.?point|int64`)},
+				{Label: "precision/точность", Re: regexp.MustCompile(`(?i)precision|точн|без ошибки|без потери|exact`)},
+				{Label: "no-float-for-money", Re: regexp.MustCompile(`(?i)float|плавающ|floating|числ с плавающей|без float|никак float|не использ float`)},
+			},
+		},
+		{
+			// «GenAI / LLM / ML-системы в production» — концепт, а не
+			// технология: 5 ML-сервисов с LLM (Llama 3.3-70B, DeepSeek R1),
+			// RAG CLI, Random Forest, event-driven обучение моделей.
+			// Токены "GenAI", "LLM" не закрываются токенами (в профиле
+			// ML-сервисы описаны по-другому), нужен концепт-триггер.
+			Name:    "GenAI/LLM/ML в production",
+			Trigger: regexp.MustCompile(`(?i)genai|генеративн|LLM|нейросет|ML-?мод|machine learning|ML-?реш|ML-?сист|ML-?инжен|ML-?пайп|life.?cycle.*ML|жизн.{0,10}цикл.*ML`),
+			Signals: []Signal{
+				{Label: "LLM-модели", Re: regexp.MustCompile(`(?i)LLa?ma|DeepSeek|RAG|нейросет|модель|model`)},
+				{Label: "ML-сервисы", Re: regexp.MustCompile(`(?i)ML-?сервис|ML-?модуль|Random Forest|ансамбл|ML-?pipeline|ML-?инжен|ML-?компон|ML-?компонент`)},
+				{Label: "ML-метрики", Re: regexp.MustCompile(`(?i)F1|F1-score|accuracy|recall|precision|metric|метри`)},
+			},
+		},
+		{
+			// «Жизненный цикл ML / MLOps / CI-CD / автоматизация пайплайнов»
+			// — концепт по ML-жизненному циклу: обучение, версионирование,
+			// rollback, CI/CD, автоматизация. Триггер по «жизн. цикл ML»,
+			// «MLOps», «CI/CD», «автоматизация пайплайнов».
+			Name:    "жизненный цикл ML и MLOps",
+			Trigger: regexp.MustCompile(`(?i)жизн.{0,15}цикл|lifecycle|MLOps|ml.?ops|CI/CD|ci-cd|автоматизац.{0,15}пайплайн|пайплайн.*ML|ML.*пайплайн|аутоматиз|train.{0,15}deploy|deploy.{0,15}model`),
+			Signals: []Signal{
+				{Label: "CI/CD", Re: regexp.MustCompile(`(?i)CI/CD|ci-cd|GitLab CI|pipeline|пайплайн|deploy|деплой`)},
+				{Label: "MLOps/версионирование", Re: regexp.MustCompile(`(?i)MLOps|mlops|версионир|version|откат|rollback|model version|model.version`)},
+				{Label: "автоматизация обучения", Re: regexp.MustCompile(`(?i)train|обучен|обуча|learning|асинхронн|async|background.*train|scheduled.*train`)},
+			},
+		},
+		{
+			// «Опыт от N лет в архитектуре / системном анализе / инженерии»
+			// — концепт по общему стажу и архитектурному опыту. Триггер
+			// по «архитектур», «системн. анализ», «инженер», «5 лет»,
+			// «N лет в области». Сигналы — из профиля: 17 лет бэкенда,
+			// 10 ADR, Go 3 года, PHP 2005+.
+			Name:    "опыт в архитектуре и системном анализе",
+			Trigger: regexp.MustCompile(`(?i)архитектур.{0,10}опыт|опыт.{0,10}архитектур|системн.{0,10}анализ|инженер.{0,10}опыт|опыт.{0,10}инженер|\d+\s*лет|лет в области|опыт от \d+|experience.*years|years.*experience`),
+			Signals: []Signal{
+				{Label: "стаж в бэкенде/архитектуре", Re: regexp.MustCompile(`(?i)17 лет|\d+ лет|архитектур|backend|бэкенд|Go.*3 год|PHP.*2005`)},
+				{Label: "ADR / архитектурные решения", Re: regexp.MustCompile(`(?i)ADR|архитектурн.{0,15}решен|Hexagonal|DDD|system design|системн.{0,10}дизайн`)},
+				{Label: "системный анализ / спецификации", Re: regexp.MustCompile(`(?i)спецификац|требован|диаграмм|HLD|LLD|аналитич|анализ`)},
+			},
+		},
+		{
+			// «Кросс-функциональные команды / ведущие роли» — концепт
+			// по работе в командах и взаимодействию с ML-специалистами.
+			// Триггер по «кросс-функционал», «межкоманд», «ведущ. роли»,
+			// «крупн. команды». Сигналы — из профиля: Agile/Scrum/Kanban,
+			// code review, менторство, взаимодействие с ML-специалистами.
+			Name:    "кросс-функциональные команды и ведущие роли",
+			Trigger: regexp.MustCompile(`(?i)кросс-?функционал|межкоманд|ведущ.{0,10}рол|крупн.{0,10}команд|cross.?functional|team.?lead|lead.*role|team.*work|work.*team`),
+			Signals: []Signal{
+				{Label: "Agile/командная работа", Re: regexp.MustCompile(`(?i)Agile|Scrum|Kanban|спринт|команд|team|cross-functional|межкоманд`)},
+				{Label: "взаимодействие с ML-специалистами", Re: regexp.MustCompile(`(?i)ML-?специалист|data.?science|машинн.{0,10}обуч|ML-?инженер|ML-?команд|ML-?спринт`)},
+				{Label: "code review / менторство", Re: regexp.MustCompile(`(?i)code review|code-?review|ментор|mentoring|наставниц|ревью|review|decompos|декомпоз`)},
+			},
+		},
 	}
 }
 
