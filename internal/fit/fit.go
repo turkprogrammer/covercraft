@@ -119,6 +119,19 @@ var synonyms = map[string][]string{
 	"argocd":          {"argocd", "argo cd", "argo-cd"},
 	"1c":              {"1с", "1c", "битрикс"},
 	"kafka":           {"kafka", "logbroker"}, // Logbroker — «Kafka-like» event bus (формулировка вакансий)
+	// Безопасность/аутентификация: требования «JWT, 2FA/TOTP, RBAC»,
+	// «PII masking», «idempotency keys» — токены, которых нет в профиле,
+	// но факты (JWT HS256/RS256, TOTP, PII masking 152-ФЗ, idempotency
+	// через ClickHouse Upsert) закрывают. Кириллические альты —
+	// подстраховка на русские словоформы.
+	"jwt":         {"jwt", "токен", "token"},
+	"totp":        {"totp", "2fa", "two-factor", "многофакторн"},
+	"2fa":         {"2fa", "totp", "two-factor", "многофакторн"},
+	"rbac":        {"rbac", "роли", "role", "authorization"},
+	"pii":         {"pii", "маскирован", "152-фз", "персональн"},
+	"idempotency": {"idempotency", "идемпотентн", "идемпотент"},
+	"secure":      {"secure", "безопасн", "security"},
+	"security":    {"security", "безопасн"},
 	// «rate limits» в требовании → «rate limiting» в письме: разные словоформы
 	// одного и того же опыта, токен-матчинг без синонима промахивается.
 	"limits":  {"limit", "limiting", "rate limit", "rate limiting", "rate-limit", "троттлинг"},
@@ -352,6 +365,22 @@ var stopwords = map[string]bool{
 	"cv": true, "resume": true, "candidate": true, "candidates": true,
 	// "on" — нарративный предлог («not just on your CV»), не технология.
 	"on": true,
+	// «2FA» — tokenRe не матчит «2fa» (начинается с цифры), но
+	// вырезает хвост «fa». «fa» — не токен, стоп-слово; «TOTP» и
+	// «2fa» (из synonyms «totp») закрывают требование.
+	"fa": true,
+	// «float» и «precision» — не технологии в контексте «никакого float
+	// для денег, понимание precision»: кандидат НЕ использует float.
+	// Как токены они ложно не закрываются (в письме под отрицанием
+	// «float для денег не применяю»). Отбрасываем — токенный путь не
+	// работает, идёт concept-путь («точная денежная арифметика»).
+	"float": true, "precision": true,
+	// «trade-offs» — термин из требований архитектуры; не технология,
+	// поэтому токен «trade-offs» матчится в письме редко (обычно пишут
+	// «ADR», «trade-offs analysis»). Отбрасываем как стопворд, чтобы
+	// требование шло в концепт-путь («system design и архитектурное
+	// проектирование») и закрывалось по ADR/Hexagonal/DDD.
+	"trade-offs": true,
 	// Нарративные слова git-практик: «branching strategies, PR workflows,
 	// conflict resolution» — факты «Git», «GitHub», «PR» закрывают
 	// требование даже без этих слов. В рус. вакансиях аналог
@@ -918,6 +947,16 @@ func (b *fitBuilder) finish(reqs Requirements, profile, letter string) Fit {
 	}
 	if f.Score > 100 {
 		f.Score = 100
+	}
+
+	if b.count == 0 {
+		// Ни одного must-have не оценено (все отфильтрованы softTerms/plusRe
+		// или MustHave изначально пуст): вердикта быть не должно — нет данных
+		// для оценки. Панель не рендерится (verdict == ""), чтобы не показывать
+		// противоречие «apply + 0% + все закрыты».
+		f.Score = 0
+		f.Verdict = ""
+		return f
 	}
 
 	// Вердикт из той же таблицы покрытия, что и скор: противоречить
