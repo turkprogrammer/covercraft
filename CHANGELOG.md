@@ -6,6 +6,32 @@
 
 Автор и единственный контрибутор всех версий: turkprogrammer.
 
+## [0.2.5] — 2026-09-24
+
+### Fixed
+- **Фальшивые negative на Yii2/Yii + Linux/Ubuntu** — токен `yii` из требования
+  «Опыт работы на Yii 2» не матчился к составным именам проектов в письме
+  (`yii2filmcatalog`, `yii2shop`, `yii2gallery`) из-за границы слова; токен
+  `ubuntu` из «Linux (Ubuntu)» не матчился к `Linux`. Добавлены синонимы:
+  `yii2filmcatalog/yii2shop/yii2gallery` → `yii`, `ubuntu` → `linux`.
+  GetCourse (Yii2 + Linux) с вердиктом `skip` 65% стал `apply` 100%.
+- **Ложно-незакрытые абстрактные требования (trade-offs, Money Precision)** —
+  стоп-слова `trade`, `offs`, `float`, `precision`: токены не раздували
+  majority-порог, концепты «Architectural Management» и «точная денежная
+  арифметика» закрывались по сигналам (ADR, money, идемпотентность).
+- **Ложные отрицательные на ML/GenAI-вакансиях** — добавлены концепты:
+  «GenAI/LLM/ML в production» (сигналы: Llama, DeepSeek, LLM, ML-модель,
+  Random Forest, MLOps, 152-ФЗ, PII-маскирование), «Жизненный цикл ML/GenAI-решений»
+  (MLOps, CI/CD, автоматизация пайплайнов, event-driven обучение моделей),
+  «Опыт в архитектуре/системном анализе», «Кросс-функциональные команды /
+  ведущие роли». Вакансия ML-архитектора (5 must): `skip` 83% → `apply` 100%.
+
+### Added
+- `context/03-ml-опыт-выжимка.md` — факты ML-опыта для генератора
+  (5 сервисов с LLM/ML в production: Fraud Engine, Stable ID, Bundle ID,
+  Domain ID, GeoMapping; Llama-3.3-70B, DeepSeek R1, Random Forest,
+  метрики 92% F1 / 760–850 эл/с / 416K доменов / 98% покрытия).
+
 ## [0.2.4] — 2026-09-22
 
 ### Fixed
