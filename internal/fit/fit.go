@@ -246,6 +246,15 @@ var synonyms = map[string][]string{
 	// Ubuntu — разновидность Linux: токен «ubuntu» нормализуется до
 	// «linux», а «linux» уже есть в письме/профиле.
 	"ubuntu":         {"ubuntu", "linux"},
+	// AI-native / coding agents: требования «Cursor, Claude Code, agentic
+	// tooling, делегирование задач» — письмо пишет «ИИ-инструменты»,
+	// «постановка задач», «архитектурный контроль». Токен tokenRe не
+	// извлекает кириллицу, поэтому без альтов fit не видит покрытия.
+	"cursor":    {"cursor", "ии-инструмент", "ai-native"},
+	"claude":    {"claude code", "claude", "ии-инструмент"},
+	"agentic":   {"agentic", "агентн", "agent harness"},
+	"delegat":   {"делегирова", "постановка задач", "delegat"},
+	"ai-native": {"ai-native", "ии-инструмент", "ai native"},
 }
 
 // bridge — мост: требование без прямого факта, но с соседним опытом
