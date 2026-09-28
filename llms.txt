@@ -77,4 +77,4 @@ go test ./...
 ## Стек
 
 Go 1.26 (только stdlib), GTK3, WebKit2GTK 4.1 (CGO), go:embed.
-151 unit-тест. ~6500 строк Go. MIT.
+188 unit-тест. ~6500 строк Go. MIT.

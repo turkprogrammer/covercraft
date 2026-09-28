@@ -188,6 +188,11 @@ type sseDone struct {
 	// presence of the field to decide whether to show the fit-fix button.
 	// При 0 поле равно 0, не опускается — JS видит 0 и скрывает кнопку.
 	FitFixable int `json:"fitFixable"`
+	// ProfileWarning — профиля нет (папка context/*.md отсутствует или пуста):
+	// письмо написано без фактов о кандидате. Отдельное поле, а не warnings,
+	// потому что warnings возвращаются модели при автоправке — инструкция
+	// «профиль пуст» заставила бы её выдумывать факты.
+	ProfileWarning string `json:"profileWarning,omitempty"`
 }
 
 // sseError — событие ошибки внутри SSE-потока: после старта стрима код
@@ -207,13 +212,16 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Lazy-инициализация концептов через sync.Once: блокирующий LLM-вызов
-	// при первом generate() вместо New() — иначе 18 тестов server_test.go
-	// с fake-LLM висели бы 30 секунд на старте.
+	// conceptsOnce — единственная точка записи в h.concepts. Fallback на
+	// дефолты живёт внутри initConcepts (см. его конец), поэтому после
+	// Once.Do поле неизменяемо и читается без синхронизации.
+	//
+	// Lazy-инициализация блокирующим LLM-вызовом при первом generate()
+	// вместо New() — иначе тесты server_test.go с fake-LLM висели бы
+	// 30 секунд на старте.
 	h.conceptsOnce.Do(h.initConcepts)
 	if h.conceptsInitErr != nil {
 		log.Printf("init concepts failed: %v — using defaults", h.conceptsInitErr)
-		h.concepts = fit.DefaultConcepts()
 	}
 
 	// Таймаут из настроек (UI ограничивает 5–900, дефолт 60): free-tier
@@ -287,28 +295,24 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
 	streamGenerate(w, ctx, h.cfg.LLMStream, system, user, req.Vacancy, fit.LoadProfile(h.cfg.ContextDir), reqs, extractOK, mapFn, h.concepts, timeoutSec)
 }
 
-// fitMapTimeout — бюджет гибридной разметки покрытия. Контекст генерации к
-// этому моменту может быть на исходе: письмо уже сгенерировано, и медленная
-// разметка не должна оставить панель без вердикта — по таймауту откат на
-// детерминированный матчер.
+// fitMapTimeout — бюджет гибридной разметки покрытия. Разметка идёт после
+// генерации письма, и медленный маппинг не должен оставить панель без вердикта
+// — по таймауту откат на детерминированный матчер. Отмена запроса пользователем
+// (Esc) отменяет и разметку: продолжать платить токены за невидимый результат
+// незачем.
 const fitMapTimeout = 90 * time.Second
 
 // fitVerdict — вердикт фита: гибридный матчинг (если задан mapFn) с откатом
 // на детерминированный Evaluate при ошибке модели, таймауте или битом JSON.
 func fitVerdict(ctx context.Context, concepts []fit.Concept, reqs fit.Requirements, profile, letter, vacancy string, mapFn fit.MapFunc) fit.Fit {
 	if mapFn != nil {
-		mctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), fitMapTimeout)
+		mctx, cancel := context.WithTimeout(ctx, fitMapTimeout)
 		defer cancel()
 		if f, err := mapFn(mctx, concepts, reqs, profile, letter, vacancy); err == nil && f.Verdict != "" {
 			return f
 		}
 	}
-	f := fit.Evaluate(concepts, reqs, profile, letter, vacancy)
-	// Debug: log all must-have texts so we can verify trigger matching.
-	for _, r := range reqs.MustHave {
-		fmt.Fprintf(os.Stderr, "DEBUG req=%q\n", r.Text)
-	}
-	return f
+	return fit.Evaluate(concepts, reqs, profile, letter, vacancy)
 }
 
 // streamGenerate вызывает LLM и пишет ответ как SSE: дельты по мере
@@ -359,6 +363,13 @@ func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc
 	// Постпроверка: теряемые факты и запрещённые паттерны видны в UI.
 	warnings := audit.Check(letter, vacancy).Warnings
 
+	// Пустой профиль — не ошибка запроса, но письмо без единого факта о
+	// кандидате; пользователь должен узнать об этом до отправки письма.
+	profileWarning := ""
+	if strings.TrimSpace(profile) == "" {
+		profileWarning = "профиль пуст: не найдено ни одного context/*.md — письмо написано без фактов о вас. Создайте папку context рядом с бинарником (или в текущем каталоге) и повторите."
+	}
+
 	// Шаг 2 фита — вердикт; разбор вакансии уже готов (выполнен до генерации
 	// письма и переиспользуется). Детерминированный матчер — ноль токенов;
 	// гибрид (FitEngine="llm") добавляет один вызов модели на разметку
@@ -379,6 +390,7 @@ func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc
 		_ = writeSSE(w, sseDone{
 			Done: true, Letter: letter, ElapsedMs: elapsed.Milliseconds(),
 			Warnings: warnings, Fit: verdict, FitFixable: fixableN,
+			ProfileWarning: profileWarning,
 		}) // best-effort
 	}
 	flush()

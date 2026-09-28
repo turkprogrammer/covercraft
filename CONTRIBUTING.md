@@ -48,7 +48,7 @@ settings (roundtrip, битый JSON, права 0600), llm-клиент (httpte
 
 ## Чего не хватает (хорошие первые задачи)
 
-- CI на GitHub Actions (build + test).
+- Полное покрытие `golangci-lint` в CI (сейчас `go vet` + `gofmt` + `-race`).
 - Flatpak/Snap-упаковка.
 - Экспорт письма в .txt по кнопке.
 - Локализация UI (сейчас ru/en вперемешку).

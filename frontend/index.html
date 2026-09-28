@@ -240,6 +240,16 @@ input:focus-visible, textarea:focus-visible {
 #audit-warns ul { margin: 0; padding-left: 18px; }
 #audit-warns li { margin: 2px 0; }
 
+#profile-warning {
+  margin: 8px 12px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--warn);
+  border-radius: var(--radius);
+  color: var(--warn);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 /* ---------- Рекомендация отклика (internal/fit) ---------- */
 #fit-verdict {
   border-top: 1px solid var(--border);
@@ -293,6 +303,10 @@ button.btn.term {
 button.btn.term::before { content: "["; color: var(--accent); }
 button.btn.term::after { content: "]"; color: var(--accent); }
 button.btn.term:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+/* gen — терминальная кнопка с прозрачным фоном (.term перебивает фон
+   .primary), поэтому текст берёт --ink как у stop, а не тёмный --accent-ink,
+   рассчитанный на зелёной заливке. */
+button.btn.term.primary { color: var(--ink); }
 
 /* ---------- Статусная строка ---------- */
 footer {
@@ -369,6 +383,7 @@ body.busy #scan {
     <span>gen</span>
     <span class="kbrd">Ctrl+↵</span>
   </button>
+  <button class="btn term" id="stop" hidden><span>stop</span></button>
 </header>
 
 <main>
@@ -407,6 +422,13 @@ body.busy #scan {
           <div class="field">
             <label for="timeoutSec">timeout (сек, 5–900)</label>
             <input type="number" id="timeoutSec" min="5" max="900" step="5" value="60" title="Сколько ждать ответа модели до ошибки «таймаут». 60 с хватает быстрым моделям; медленным reasoning поднимите.">
+          </div>
+          <div class="field">
+            <label for="fitEngine">fit engine</label>
+            <select id="fitEngine" title="deterministic — матчер на правилах, ноль дополнительных LLM-вызовов. llm — гибрид: модель размечает покрытие письма, код проверяет цитаты и отрицания. При ошибке модели — автооткат на deterministic.">
+              <option value="" selected>deterministic — правила</option>
+              <option value="llm">llm — гибрид</option>
+            </select>
           </div>
         </div>
       </div>
@@ -447,15 +469,16 @@ body.busy #scan {
           <span id="count"></span>
         </div>
         <div id="result" contenteditable="true" spellcheck="true" role="textbox"
-             aria-multiline="true" aria-label="Сгенерированное письмо — можно отредактировать"></div>
+             aria-live="polite" aria-multiline="true" aria-label="Сгенерированное письмо — можно отредактировать"></div>
         <div id="audit-warns" hidden></div>
+        <div id="profile-warning" hidden></div>
         <div id="fit-verdict" hidden></div>
       </div>
     </div>
   </section>
 </main>
 
-<footer id="status">
+<footer id="status" role="status">
   <span class="status-prefix">❯</span>
   <span id="status-text">готово.</span>
   <span class="spacer"></span>
@@ -473,13 +496,14 @@ body.busy #scan {
 const $ = id => document.getElementById(id);
 const els = {
   chip: $("model-chip"), spin: $("spin"),
-  generate: $("generate"), copy: $("copy"), result: $("result"), count: $("count"),
+  generate: $("generate"), stop: $("stop"), copy: $("copy"), result: $("result"), count: $("count"),
   status: $("status"), statusText: $("status-text"),
   baseUrl: $("baseUrl"), apiKey: $("apiKey"), model: $("model"),
   systemPrompt: $("systemPrompt"), reasoningEffort: $("reasoningEffort"),
-  timeoutSec: $("timeoutSec"),
+  timeoutSec: $("timeoutSec"), fitEngine: $("fitEngine"),
   vacancy: $("vacancy"), apiSub: $("api-sub"), promptSub: $("prompt-sub"),
   auditWarns: $("audit-warns"),
+  profileWarning: $("profile-warning"),
   fitVerdict: $("fit-verdict"),
 };
 
@@ -487,9 +511,25 @@ function setStatus(text, cls) {
   els.statusText.textContent = text;
   els.status.className = cls || "";
 }
+// busy — идёт ли сейчас генерация. body.busy ставит setBusy, а он на весь
+// цикл fit-fix остаётся включённым: пока цикл идёт, заново созданная
+// showFitFixButton кнопка обязана быть неактивной, иначе второй клик
+// запускает второй стрим в тот же els.result.
+function busy() {
+  return document.body.classList.contains("busy");
+}
 function setBusy(on) {
   document.body.classList.toggle("busy", on);
   els.generate.disabled = on || !els.vacancy.value.trim();
+  els.stop.hidden = !on;
+}
+// setProfileWarning — баннер «профиля нет». Приходит отдельным полем
+// profileWarning из SSE-done, а не в warnings: warnings уходят обратно в
+// модель при автоправке, и такая инструкция заставила бы её выдумывать факты.
+function setProfileWarning(msg) {
+  if (!els.profileWarning) return;
+  els.profileWarning.textContent = msg || "";
+  els.profileWarning.hidden = !msg;
 }
 function chip(model) {
   els.chip.textContent = model ? "@" + model : "";
@@ -508,6 +548,7 @@ function readForm() {
     apiKey: els.apiKey.value,
     model: els.model.value.trim(),
     reasoningEffort: els.reasoningEffort.value,
+    fitEngine: els.fitEngine.value,
     timeoutSec: Number.isFinite(t) ? Math.min(900, Math.max(5, t)) : 60,
   };
 }
@@ -516,6 +557,7 @@ function fillForm(s) {
   els.apiKey.value = s.apiKey || "";
   els.model.value = s.model || "";
   els.reasoningEffort.value = s.reasoningEffort || "";
+  els.fitEngine.value = s.fitEngine || "";
   els.timeoutSec.value = s.timeoutSec || 60;
   defaultPrompt = s.defaultSystemPrompt || "";
   els.systemPrompt.value = defaultPrompt;
@@ -551,41 +593,48 @@ let genAbort = null;
 // streamGenerate — POST /api/generate + парсинг SSE-потока. Дельты летят
 // в onDelta по мере генерации, возвращает финальное событие done.
 async function streamGenerate(body, onDelta) {
-  genAbort = new AbortController();
-  const r = await fetch("/api/generate", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal: genAbort.signal,
-  });
-  genAbort = null;
-  // Ошибки до старта стрима — обычные HTTP-коды с JSON-телом.
-  if (!r.ok) {
-    const data = await r.json().catch(() => ({}));
-    throw new Error(data.error || "HTTP " + r.status);
-  }
-  if (!r.body) throw new Error("браузер не поддерживает стриминг");
-  const reader = r.body.getReader();
-  const dec = new TextDecoder();
-  let buf = "", done = null;
-  for (;;) {
-    const { value, done: eof } = await reader.read();
-    if (eof) break;
-    buf += dec.decode(value, { stream: true });
-    let idx;
-    while ((idx = buf.indexOf("\n\n")) >= 0) {
-      const chunk = buf.slice(0, idx);
-      buf = buf.slice(idx + 2);
-      const line = chunk.split("\n").find(l => l.startsWith("data: "));
-      if (!line) continue;
-      const ev = JSON.parse(line.slice(6));
-      if (ev.error) throw new Error(ev.error);
-      if (ev.delta) onDelta(ev.delta);
-      if (ev.done) done = ev;
+  // Контроллер живёт до конца чтения SSE-тела, а не до резолва fetch:
+  // раньше genAbort обнулялся сразу после await fetch, и отмена (Esc/кнопка
+  // stop) в середине генерации была бездейной.
+  const ctrl = new AbortController();
+  genAbort = ctrl;
+  try {
+    const r = await fetch("/api/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+    // Ошибки до старта стрима — обычные HTTP-коды с JSON-телом.
+    if (!r.ok) {
+      const data = await r.json().catch(() => ({}));
+      throw new Error(data.error || "HTTP " + r.status);
     }
+    if (!r.body) throw new Error("браузер не поддерживает стриминг");
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "", done = null;
+    for (;;) {
+      const { value, done: eof } = await reader.read();
+      if (eof) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const chunk = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        const line = chunk.split("\n").find(l => l.startsWith("data: "));
+        if (!line) continue;
+        const ev = JSON.parse(line.slice(6));
+        if (ev.error) throw new Error(ev.error);
+        if (ev.delta) onDelta(ev.delta);
+        if (ev.done) done = ev;
+      }
+    }
+    if (!done) throw new Error("соединение оборвалось без результата");
+    return done;
+  } finally {
+    if (genAbort === ctrl) genAbort = null;
   }
-  if (!done) throw new Error("соединение оборвалось без результата");
-  return done;
 }
 
 function startTimer(label, t0) {
@@ -624,6 +673,7 @@ async function generate() {
     );
     showAuditWarnings(data.warnings);
     showFitVerdict(data.fit);
+    setProfileWarning(data.profileWarning);
     els.copy.disabled = !data.letter;
     countChars(data.elapsedMs);
     setStatus(data.letter
@@ -754,10 +804,24 @@ function showFitVerdict(fit) {
   title.textContent = "→ " + labels[fit.verdict] + " · соответствие ~" + fit.score + "%" +
     (roleLabels[fit.role] ? " · роль: " + fit.role : "");
   box.appendChild(title);
+  // Source из fit.Req объясняет вес: письмо (1.0), профиль-но-не-в-письме
+  // (0.7 — стоит дописать), мост (0.5), нет данных (0.2).
+  const srcLabels = {
+    letter: "письмо",
+    profile: "письмо, но не в письме",
+    bridge: "мост",
+    unknown: "нет данных",
+    missing: "нет",
+  };
+  const fmtReq = r => {
+    const src = srcLabels[r.source] || "";
+    const note = r.note ? " — " + r.note : "";
+    return (src ? "[" + src + "] " : "") + r.text + note;
+  };
   const sections = [
-    ["✔ закрыто:", fit.covered, r => r.text + (r.note ? " — " + r.note : "")],
-    ["△ с оговоркой:", fit.caveats, r => r.text + (r.note ? " — " + r.note : "")],
-    ["✖ не закрыто:", fit.missing, r => r.text + (r.note ? " — " + r.note : "")],
+    ["✔ закрыто:", fit.covered, fmtReq],
+    ["△ с оговоркой:", fit.caveats, fmtReq],
+    ["✖ не закрыто:", fit.missing, fmtReq],
   ];
   for (const [label, reqs, fmt] of sections) {
     if (!reqs || !reqs.length) continue;
@@ -794,7 +858,7 @@ function showFitVerdict(fit) {
 // или пользователь не остановит генерацию.
 async function auditFix() {
   const btn = document.getElementById("auditFix");
-  if (!btn || btn.disabled) return;
+  if (!btn || btn.disabled || busy()) return;
   btn.disabled = true;
   setBusy(true);
   const t0 = performance.now();
@@ -821,6 +885,7 @@ async function auditFix() {
     );
     showAuditWarnings(data.warnings);
     showFitVerdict(data.fit);
+    setProfileWarning(data.profileWarning);
     countChars(data.elapsedMs);
     els.copy.disabled = !data.letter;
     setStatus(data.warnings && data.warnings.length
@@ -840,7 +905,7 @@ async function auditFix() {
 // Аналог auditFix, но использует fitCaveats вместо warnings.
 async function fitFix(maxIter) {
   const btn = document.getElementById("fitFix");
-  if (!btn || btn.disabled) return;
+  if (!btn || btn.disabled || busy()) return;
   btn.disabled = true;
   setBusy(true);
   const t0 = performance.now();
@@ -870,6 +935,14 @@ async function fitFix(maxIter) {
       );
         showAuditWarnings(data.warnings);
         showFitVerdict(data.fit);
+        setProfileWarning(data.profileWarning);
+        if (!data.fit) {
+          // Разбор вакансии упал — вердикта нет, а fitFixable при этом 0.
+          // Без этой проверки пользователь видит «fit-fix завершён» и считает,
+          // что письмо доведено, хотя цикл проверки просто не отработал.
+          setStatus("err: fit-разбор вакансии не удался — цикл прерван, проверь письмо вручную", "err");
+          break;
+        }
         countChars(data.elapsedMs);
         els.copy.disabled = !data.letter;
         const newFixable = (data.fitFixable != null) ? data.fitFixable
@@ -933,7 +1006,7 @@ async function boot() {
   } catch (e) {
     setStatus("err: настройки не загрузились: " + e.message, "err");
   }
-  for (const el of [els.baseUrl, els.apiKey, els.model, els.reasoningEffort, els.timeoutSec]) {
+  for (const el of [els.baseUrl, els.apiKey, els.model, els.reasoningEffort, els.timeoutSec, els.fitEngine]) {
     el.addEventListener("input", scheduleSave);
     el.addEventListener("change", scheduleSave);
   }
@@ -946,6 +1019,13 @@ async function boot() {
     els.generate.disabled = !els.vacancy.value.trim() || document.body.classList.contains("busy");
   });
   els.generate.addEventListener("click", generate);
+  els.stop.addEventListener("click", () => {
+    // Между setBusy(true) и созданием контроллера (в streamGenerate)
+    // genAbort ещё null — клик тогда просто ничего не делает.
+    if (!genAbort) return;
+    genAbort.abort();
+    setStatus("остановлено по кнопке stop.");
+  });
   els.copy.addEventListener("click", copyResult);
   els.result.addEventListener("input", countChars);
   document.addEventListener("keydown", e => {
@@ -956,6 +1036,7 @@ async function boot() {
       if (genAbort) genAbort.abort();
       els.result.textContent = ""; els.copy.disabled = true; countChars();
       showAuditWarnings([]);
+      setProfileWarning("");
       lastFit = null; lastFitCaveats = [];
     }
   });

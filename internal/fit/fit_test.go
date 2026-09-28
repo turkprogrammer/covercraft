@@ -3,6 +3,8 @@ package fit
 import (
 	"bytes"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -23,6 +25,19 @@ func mustReqs(must, nice []string, role string) Requirements {
 		r.NiceToHave = append(r.NiceToHave, Requirement{Text: n, Kind: "nice", Category: "stack"})
 	}
 	return r
+}
+
+// TestLoadProfileSeesUppercaseExt — файл ПРОФИЛЬ.MD обязан быть виден так же,
+// как profile.md: cover.BuildUserPrompt читает его через EqualFold, и если
+// fit-матчер его не видит, письмо и профиль считаются разными наборами фактов.
+func TestLoadProfileSeesUppercaseExt(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "ПРОФИЛЬ.MD"), []byte("Go, PHP"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := LoadProfile(dir); !strings.Contains(got, "Go, PHP") {
+		t.Errorf("LoadProfile не увидел файл с заглавным расширением: %q", got)
+	}
 }
 
 // Чистое письмо закрывает все must-have в письме — apply, 100%.

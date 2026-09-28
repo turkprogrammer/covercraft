@@ -24,5 +24,14 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      - name: Test
-        run: go test -v ./...
+      - name: Test (race detector)
+        run: go test -race ./...
+
+      - name: gofmt
+        run: |
+          unformatted="$(git ls-files '*.go' | xargs gofmt -l)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt: не отформатированы:"
+            echo "$unformatted"
+            exit 1
+          fi

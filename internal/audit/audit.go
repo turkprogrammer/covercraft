@@ -48,9 +48,6 @@ var placeholderRe = regexp.MustCompile(`(?i)\[[А-ЯЁA-Z][^\]\n]{3,40}\]|<[А-�
 // «опыт … есть, но» внутри секции пробелов — прячет достижения.
 var butRe = regexp.MustCompile(`(?i)опыт[^.\n]{0,60}есть[^.\n]{0,10},\s*но`)
 
-// frameWords — слова фреймворков; рядом должен быть маркер строки стека.
-var frameWords = []string{"laravel", "symfony", "yii2", "lumen"}
-
 // stackLineRe — строка стека в любом виде: «Стек: …», «**Стек:** …», «Stack:».
 var stackLineRe = regexp.MustCompile(`(?i)^\W*(стек|stack)\s*:?\W*`)
 
@@ -397,11 +394,4 @@ func gapSectionIndex(letter string) int {
 		}
 	}
 	return -1
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

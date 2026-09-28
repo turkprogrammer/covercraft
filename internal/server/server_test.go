@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -745,5 +746,97 @@ func TestGenerateEndpointFitFixRequiresFields(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("код = %d, хочу 400 (letter есть, fitCaveats нет)", rec.Code)
+	}
+}
+
+// TestGenerateConcurrentBrokenConceptsCache — восемь параллельных generate при
+// недоступном пути кэша концептов. MkdirAll(~/.config/covercraft) падает, когда
+// на месте каталога лежит файл, — initConcepts возвращает ошибку, и generate
+// раньше писал h.concepts = DefaultConcepts() уже ПОСЛЕ выхода из
+// conceptsOnce.Do, вне синхронизации. Ловится только с -race.
+func TestGenerateConcurrentBrokenConceptsCache(t *testing.T) {
+	cfg := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cfg, "covercraft"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", cfg)
+
+	h := New(Config{
+		ContextDir: t.TempDir(),
+		LLM:        func(ctx context.Context, system, user string) (string, error) { return "ок", nil },
+	})
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			body, _ := json.Marshal(map[string]string{"vacancy": "V"})
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			h.ServeHTTP(rec, req)
+		}()
+	}
+	wg.Wait()
+}
+
+// TestGenerateWarnsOnEmptyProfile — без context/*.md письмо пишется без
+// фактов, и пользователь об этом не знает. Предупреждение едет отдельным
+// полем profileWarning, а не в warnings: те уходят обратно в модель при
+// автоправке, и модель начала бы выдумывать факты.
+func TestGenerateWarnsOnEmptyProfile(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	h := New(Config{
+		ContextDir: t.TempDir(), // пусто — профиля нет
+		LLM:        func(ctx context.Context, system, user string) (string, error) { return "ок", nil },
+	})
+	body, _ := json.Marshal(map[string]string{"vacancy": "V"})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+
+	ev := parseSSE(t, rec.Body.String())
+	if ev.Done == nil {
+		t.Fatalf("нет done-события: %s", rec.Body.String())
+	}
+	if ev.Done.ProfileWarning == "" {
+		t.Error("пустой профиль должен давать profileWarning")
+	}
+	if !strings.Contains(ev.Done.ProfileWarning, "context") {
+		t.Errorf("предупреждение должно называть папку context: %q", ev.Done.ProfileWarning)
+	}
+	// В warnings его быть не должно — оттуда он уедет в модель при автоправке.
+	for _, w := range ev.Done.Warnings {
+		if strings.Contains(w, "профиль пуст") {
+			t.Errorf("предупреждение о профиле попало в warnings и уйдёт в модель: %q", w)
+		}
+	}
+}
+
+// TestGenerateNoProfileWarningWhenProfileExists — с профилем поля нет.
+func TestGenerateNoProfileWarningWhenProfileExists(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "01-профиль.md"), []byte("# Профиль\nGo, PHP, 17 лет."), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := New(Config{
+		ContextDir: dir,
+		LLM:        func(ctx context.Context, system, user string) (string, error) { return "ок", nil },
+	})
+	body, _ := json.Marshal(map[string]string{"vacancy": "V"})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+
+	ev := parseSSE(t, rec.Body.String())
+	if ev.Done == nil {
+		t.Fatalf("нет done-события: %s", rec.Body.String())
+	}
+	if ev.Done.ProfileWarning != "" {
+		t.Errorf("с непустым профилем profileWarning должен быть пуст, получено %q", ev.Done.ProfileWarning)
 	}
 }

@@ -84,3 +84,74 @@ func TestFitVerdictPanel(t *testing.T) {
 		}
 	}
 }
+
+func TestProfileWarningSurfaced(t *testing.T) {
+	for _, want := range []string{
+		`id="profile-warning"`,
+		"function setProfileWarning",
+		"setProfileWarning(data.profileWarning)",
+	} {
+		if !strings.Contains(IndexHTML, want) {
+			t.Errorf("в UI нет %q — профиль пуст должен быть виден пользователю", want)
+		}
+	}
+}
+
+func TestFitFixGuardsAndReportsFailures(t *testing.T) {
+	for _, want := range []string{
+		"function busy()",
+		"if (!btn || btn.disabled || busy()) return;",
+		"fit-разбор вакансии не удался",
+	} {
+		if !strings.Contains(IndexHTML, want) {
+			t.Errorf("в UI нет %q — защита цикла fit-fix обязана быть", want)
+		}
+	}
+}
+
+func TestStopButtonAndAbortLifetime(t *testing.T) {
+	for _, want := range []string{
+		`id="stop"`,
+		"genAbort.abort()",
+		"if (genAbort === ctrl) genAbort = null;",
+	} {
+		if !strings.Contains(IndexHTML, want) {
+			t.Errorf("в UI нет %q — кнопка stop должна быть, а отмена — работать до конца стрима", want)
+		}
+	}
+}
+
+func TestFitEngineSelect(t *testing.T) {
+	for _, want := range []string{
+		`id="fitEngine"`,
+		"fitEngine: els.fitEngine.value,",
+		`els.fitEngine.value = s.fitEngine || "";`,
+	} {
+		if !strings.Contains(IndexHTML, want) {
+			t.Errorf("в UI нет %q — движок фита должен переключаться из приложения", want)
+		}
+	}
+}
+
+func TestFitPanelShowsEvidenceSource(t *testing.T) {
+	for _, want := range []string{
+		"письмо, но не в письме",
+		"мост",
+		"нет данных",
+	} {
+		if !strings.Contains(IndexHTML, want) {
+			t.Errorf("в UI нет подписи источника %q — пользователь должен видеть, откуда доказательство", want)
+		}
+	}
+}
+
+func TestLiveRegions(t *testing.T) {
+	for _, want := range []string{
+		`aria-live="polite"`,
+		`<footer id="status" role="status">`,
+	} {
+		if !strings.Contains(IndexHTML, want) {
+			t.Errorf("в UI нет %q — стриминг и статус должны объявляться скринридеру", want)
+		}
+	}
+}

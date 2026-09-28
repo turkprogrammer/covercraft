@@ -176,7 +176,7 @@ func ProfileHash(contextDir string) string {
 	}
 	var names []string
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
+		if !e.IsDir() && strings.EqualFold(filepath.Ext(e.Name()), ".md") {
 			names = append(names, e.Name())
 		}
 	}
@@ -579,6 +579,3 @@ func GenerateConcepts(ctx context.Context, fn LLMFunc, profile string) ([]Concep
 	}
 	return concepts, &validRaw, nil
 }
-
-// saveConceptsFromRaw удалён: теперь SaveConceptsFile сам принимает *rawConceptsFile,
-// а вся roundtrip-логика живёт в GenerateConcepts + SaveConceptsFile.

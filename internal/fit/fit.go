@@ -149,11 +149,11 @@ var synonyms = map[string][]string{
 	"test":         {"test", "tests", "тесты", "тест"},
 	// «PHPUnit testing» — токен «testing» закрывается альт-списком
 	// «test/tests/тест»: кандидат пишет тесты на Go/PHP — это то же самое.
-	"testing":      {"testing", "test", "tests", "тест"},
+	"testing": {"testing", "test", "tests", "тест"},
 	// rest/grpc НЕ в альт-списке api: «Опыт разработки REST API» — два
 	// независимых токена (rest и api), тест TestRestAPITokenMatch на это
 	// полагается; кириллический альт api — подстраховка на «апи» (редко).
-	"api":         {"api", "апи"},
+	"api": {"api", "апи"},
 	// «Git & GitHub - branching strategies, PR workflows, conflict
 	// resolution» — требования к git-практикам: факты «Git», «GitHub»,
 	// «PR» в письме/профиле закрывают даже без слов «branching»,
@@ -171,34 +171,34 @@ var synonyms = map[string][]string{
 	// docs, architecture overviews» — нарративные слова «writing»,
 	// «maintaining», «technical», «overviews» не технологии. Факты
 	// «ADR», «API docs», «architecture» в письме закрывают.
-	"writing":     {"writing", "написан", "создан", "разработк"},
-	"written":     {"writing", "written", "написан", "создан"},
-	"maintaining": {"maintaining", "обновля", "содержан", "оперир"},
+	"writing":       {"writing", "написан", "создан", "разработк"},
+	"written":       {"writing", "written", "написан", "создан"},
+	"maintaining":   {"maintaining", "обновля", "содержан", "оперир"},
 	"documentation": {"documentation", "документаци", "документир", "docs"},
-	"technical":   {"technical", "техн"},
-	"overviews":   {"overviews", "обзор", "схем"},
-	"docs":        {"docs", "documentation", "документаци", "документир"},
+	"technical":     {"technical", "техн"},
+	"overviews":     {"overviews", "обзор", "схем"},
+	"docs":          {"docs", "documentation", "документаци", "документир"},
 	// «PHPUnit - you've written tests» — «phpunit» без прямых фактов
 	// закрывается по альт-списку «тест/unit» (если кандидат пишет тесты
 	// на Go/PHP — это то же самое).
-	"phpunit":     {"phpunit", "тест", "tests", "unit"},
+	"phpunit": {"phpunit", "тест", "tests", "unit"},
 	// «Strong understanding of code review culture» — нарративные слова
 	// «understanding», «strong», «culture» не навыки. Факты «code review»,
 	// «ADR» в письме/профиле закрывают.
 	"understanding": {"understanding", "понимани", "понимаю", "понятн"},
-	"strong":       {"strong", "сильн", "професс", "продвинут", "уровень"},
-	"culture":      {"culture", "культур", "практик", "ревью", "review", "code review"},
+	"strong":        {"strong", "сильн", "професс", "продвинут", "уровень"},
+	"culture":       {"culture", "культур", "практик", "ревью", "review", "code review"},
 	// «Structured approach to writing tests» — «structured», «approach»
 	// — нарратив; факты «тесты», «table-driven» закрывают.
 	"structured": {"structured", "структурир", "системн", "системат"},
 	"approach":   {"approach", "подход", "медиц", "метод", "style"},
 	// «PHPUnit: experience writing and believing in tests» — «believing»
 	// — нарратив; факты «PHPUnit», «тесты», «TDD» закрывают.
-	"believing":  {"believing", "believe", "уверенн", "довер"},
+	"believing": {"believing", "believe", "уверенн", "довер"},
 	// «Strong Go in production high-load systems» — «high-load»,
 	// «systems» — классы систем; факты «RPS», «Kafka», «P99» закрывают.
-	"high-load":  {"high-load", "highload", "высоконагр", "нагрузк"},
-	"systems":    {"systems", "систем", "сервис", "service"},
+	"high-load": {"high-load", "highload", "высоконагр", "нагрузк"},
+	"systems":   {"systems", "систем", "сервис", "service"},
 	// «Working with relational and NoSQL databases» — «relational»,
 	// «nosql», «databases» — классы БД; факты «PostgreSQL», «ClickHouse»
 	// закрывают.
@@ -208,10 +208,10 @@ var synonyms = map[string][]string{
 	// собственные мосты/синонимы, и широкое включение в «nosql»
 	// коротит мост TestEvaluateBridge («Опыт с Elasticsearch» должен
 	// закрываться мостом через ClickHouse, а не напрямую).
-	"nosql":      {"nosql", "no-sql", "нереляционн"},
+	"nosql": {"nosql", "no-sql", "нереляционн"},
 	// «databases» — термин + кириллический. Не «data» (слишком широко,
 	// ловит «data pipeline», «data science»).
-	"databases":  {"databases", "бд", "база данных", "хранилищ"},
+	"databases": {"databases", "бд", "база данных", "хранилищ"},
 	// «Strong Go in production high-load systems» — «production»,
 	// «high», «load» — эпитеты; факты «RPS», «P99», «Kafka» закрывают.
 	"production": {"production", "прод", "product"},
@@ -220,7 +220,7 @@ var synonyms = map[string][]string{
 	// «Solid working experience with vanilla PHP» — «vanilla», «pure»,
 	// «frameworkless» — одно и то же; факт «pure PHP» / «no framework»
 	// в письме закрывает.
-	"vanilla":      {"vanilla", "чист", "pure", "frameworkless", "без фреймворк"},
+	"vanilla": {"vanilla", "чист", "pure", "frameworkless", "без фреймворк"},
 	// «Professional working level English» / «Russian minimum A1» —
 	// требования к языку общения; альты ловят прямые маркеры.
 	"local":        {"local", "локал"},
@@ -245,7 +245,7 @@ var synonyms = map[string][]string{
 	"yii2gallery":     {"yii2gallery", "yii2", "yii", "yiiframework"},
 	// Ubuntu — разновидность Linux: токен «ubuntu» нормализуется до
 	// «linux», а «linux» уже есть в письме/профиле.
-	"ubuntu":         {"ubuntu", "linux"},
+	"ubuntu": {"ubuntu", "linux"},
 	// AI-native / coding agents: требования «Cursor, Claude Code, agentic
 	// tooling, делегирование задач» — письмо пишет «ИИ-инструменты»,
 	// «постановка задач», «архитектурный контроль». Токен tokenRe не
@@ -403,8 +403,8 @@ var stopwords = map[string]bool{
 	// conflict resolution» — факты «Git», «GitHub», «PR» закрывают
 	// требование даже без этих слов. В рус. вакансиях аналог
 	// «ветвление, разрешение конфликтов» не извлекается tokenRe.
-	"branching":  true, "strategies": true, "workflows": true,
-	"conflict":   true, "resolution": true, "strategy": true,
+	"branching": true, "strategies": true, "workflows": true,
+	"conflict": true, "resolution": true, "strategy": true,
 	"works": true,
 	// Нарративные слова про тесты: «you've written tests and you
 	// believe in them» — «written», «writing» — нарратив; факт
@@ -884,7 +884,7 @@ func LoadProfile(contextDir string) string {
 	}
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
+		if !e.IsDir() && strings.EqualFold(filepath.Ext(e.Name()), ".md") {
 			names = append(names, e.Name())
 		}
 	}

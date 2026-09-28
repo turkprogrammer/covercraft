@@ -161,6 +161,8 @@ go install github.com/turkprogrammer/covercraft@latest
 4. Вставьте вакансию в `vacancy.in`, нажмите `[ gen ]` или Ctrl+Enter.
 5. Письмо появится в `letter.out` — счётчик покажет размер и время
    генерации (`N chars · X.Xs`); можно отредактировать и нажать `[ copy ]`.
+6. Письмо можно прервать кнопкой `stop` в шапке или клавишей `Esc`; Esc также
+   очищает результат.
 
 Настройки сохраняются автоматически (после 400 мс тишины) и переживают
 перезапуск. Esc очищает результат.
@@ -230,7 +232,7 @@ context/                 user's context: *.md (gitignored, private)
 | GET   | `/`            | UI (HTML из embed) |
 | GET   | `/api/settings`| текущие настройки |
 | POST  | `/api/settings`| сохранить настройки |
-| POST  | `/api/generate`| `{vacancy}` → SSE: `delta`…, `done {letter, elapsedMs, warnings}` |
+| POST  | `/api/generate`| `{vacancy}` → SSE: `delta`…, `done {letter, elapsedMs, warnings, fit, profileWarning}` |
 
 ## Тесты
 

@@ -10,6 +10,23 @@ import (
 	"testing"
 )
 
+// TestProfileHashCoversUppercaseExt — хэш профиля обязан меняться от файла с
+// заглавным расширением, иначе правка такого файла не перегенерирует кэш
+// концептов и движок продолжит считать устаревшие концепты актуальными.
+func TestProfileHashCoversUppercaseExt(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "01.md"), []byte("база"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := ProfileHash(dir)
+	if err := os.WriteFile(filepath.Join(dir, "02.MD"), []byte("факт"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if after := ProfileHash(dir); after == before {
+		t.Errorf("хэш не изменился после добавления 02.MD: %q", after)
+	}
+}
+
 func TestBuildConceptValid(t *testing.T) {
 	raw := RawConcept{
 		Name:         "тест",
