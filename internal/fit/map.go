@@ -157,7 +157,7 @@ func MapCoverage(ctx context.Context, fn LLMFunc, concepts []Concept, reqs Requi
 	}
 	positional := len(cov.Items) == len(prompted)
 
-	b := &fitBuilder{f: Fit{Role: reqs.Role}, concepts: concepts}
+	b := &fitBuilder{f: Fit{Role: reqs.Role}, concepts: concepts, profile: profile, letter: letter}
 	for i, r := range prompted {
 		it, ok := byText[itemKey(r.Text)]
 		if !ok && positional {

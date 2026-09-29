@@ -250,6 +250,21 @@ input:focus-visible, textarea:focus-visible {
   line-height: 1.5;
 }
 
+.btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.prompt-dropinfo {
+  margin: 4px 0 8px;
+  font-size: 11px;
+  color: var(--ink-faint);
+  line-height: 1.5;
+}
+
+.prompt-dropinfo.warn { color: var(--warn); }
+
 /* ---------- Рекомендация отклика (internal/fit) ---------- */
 #fit-verdict {
   border-top: 1px solid var(--border);
@@ -445,9 +460,15 @@ body.busy #scan {
           <label for="systemPrompt">инструкция модели — кастом до перезапуска</label>
           <textarea id="systemPrompt" rows="6" spellcheck="false" placeholder="Ты помощник по сопроводительным письмам…"></textarea>
         </div>
-        <button class="btn term" id="resetPrompt" type="button" style="align-self:flex-start">
-          <span>reset default</span>
-        </button>
+        <div class="prompt-dropinfo" id="prompt-dropinfo" hidden></div>
+        <div class="btn-row">
+          <button class="btn term" id="composePrompt" type="button"
+                  title="собрать системный промпт под текущую вакансию и убрать нерелевантные разделы профиля — можно править вручную">
+            <span>compose</span>
+          </button>
+          <button class="btn term" id="undoPrompt" type="button" hidden><span>вернуть прежний</span></button>
+          <button class="btn term" id="resetPrompt" type="button"><span>reset default</span></button>
+        </div>
       </div>
     </details>
 
@@ -502,6 +523,8 @@ const els = {
   systemPrompt: $("systemPrompt"), reasoningEffort: $("reasoningEffort"),
   timeoutSec: $("timeoutSec"), fitEngine: $("fitEngine"),
   vacancy: $("vacancy"), apiSub: $("api-sub"), promptSub: $("prompt-sub"),
+  composePrompt: $("composePrompt"), undoPrompt: $("undoPrompt"),
+  promptDropInfo: $("prompt-dropinfo"),
   auditWarns: $("audit-warns"),
   profileWarning: $("profile-warning"),
   fitVerdict: $("fit-verdict"),
@@ -522,6 +545,7 @@ function setBusy(on) {
   document.body.classList.toggle("busy", on);
   els.generate.disabled = on || !els.vacancy.value.trim();
   els.stop.hidden = !on;
+  syncPromptButtons();
 }
 // setProfileWarning — баннер «профиля нет». Приходит отдельным полем
 // profileWarning из SSE-done, а не в warnings: warnings уходят обратно в
@@ -541,6 +565,15 @@ function chip(model) {
    кастом живёт в поле до перезапуска (передаётся в /api/generate). */
 let saveTimer = null;
 let defaultPrompt = "";
+// Состояние compose: снимок до композа, признак «промпт от композера и не
+// правился», текущий список вырезаемых разделов профиля.
+let promptUndo = null;   // {text, drops} — снимок до композа
+let promptAuto = false;  // текущий промпт — результат compose (не правился)
+let promptDrops = [];    // dropSections, применяемые в /api/generate
+let promptDropStats = null; // {sections, droppedBytes, reason} из ответа compose
+let promptVacancy = "";  // вакансия, под которую собран promptDrops
+let promptMissing = [];  // инварианты безопасности, не найденные в playbook'е
+let promptMissingCut = [];  // из них — срезанные лимитом (не потерянные моделью)
 function readForm() {
   const t = parseInt(els.timeoutSec.value, 10);
   return {
@@ -562,12 +595,166 @@ function fillForm(s) {
   defaultPrompt = s.defaultSystemPrompt || "";
   els.systemPrompt.value = defaultPrompt;
   chip(els.model.value.trim());
-  els.promptSub.textContent = defaultPrompt.split("\n")[0].slice(0, 48) || "—";
+  promptState();
 }
 function resetPrompt() {
   els.systemPrompt.value = defaultPrompt;
-  els.promptSub.textContent = defaultPrompt.split("\n")[0].slice(0, 48) || "—";
+  promptDrops = [];
+  promptDropStats = null;
+  promptVacancy = "";
+  promptMissing = [];
+  promptMissingCut = [];
+  promptAuto = false;
+  promptUndo = null;
+  els.undoPrompt.hidden = true;
+  renderDropInfo();
+  promptState();
   els.systemPrompt.focus();
+}
+
+// promptState — единый источник статуса #prompt-sub: auto (результат
+// compose, не правился) / custom (непустое поле) / default (пустое — на бэке
+// дефолт). Раньше подпись врала: очистка поля давала дефолт, а UI писал
+// «кастом».
+function promptState() {
+  const v = els.systemPrompt.value.trim();
+  const src = promptAuto && v !== "" ? "auto" : (v === "" ? "default" : "custom");
+  els.promptSub.textContent = src === "auto"
+    ? "авто — под вакансию, правь если надо"
+    : src === "custom" ? "кастом (сброс при перезапуске)" : "default";
+  return src;
+}
+
+// syncPromptButtons — compose доступен только когда не идёт генерация и
+// вакансия заполнена (пустая вакансия не должна стоить LLM-вызова).
+function syncPromptButtons() {
+  els.composePrompt.disabled = busy() || !els.vacancy.value.trim();
+}
+
+// dropStaleDrops — вакансия изменилась после compose: дропы собраны под прежний
+// текст, и молча вырезать разделы по чужой вакансии нельзя (можно выбросить
+// релевантный раздел — письмо станет слабее без предупреждения). Деградация — в
+// безопасную сторону: полный профиль, как до compose.
+function dropStaleDrops() {
+  if (!promptDrops.length || els.vacancy.value === promptVacancy) return;
+  promptDrops = [];
+  promptDropStats = null;
+  promptVacancy = "";
+  renderDropInfo();
+  setStatus("вакансия изменилась — отбор разделов сброшен, нажми compose заново.");
+}
+
+// renderDropInfo — что и на сколько вырезано из профиля и какие инварианты
+// безопасности потерял собранный playbook (проверяемая автоматика вместо магии).
+function renderDropInfo() {
+  const el = els.promptDropInfo;
+  if (!el) return;
+  const parts = [];
+  if (promptDrops.length) {
+    let text = "профиль: часть разделов убрана (" + promptDrops.length + "): " +
+      promptDrops.map(d => d.file + " / " + d.heading).join(", ") + ".";
+    if (promptDropStats) {
+      if (promptDropStats.droppedBytes > 0) {
+        text += " " + Math.round(promptDropStats.sections) + " секций → вырезано " +
+          promptDrops.length + ", −" +
+          Math.round(promptDropStats.droppedBytes / 1024 * 10) / 10 + " КБ.";
+      }
+      if (promptDropStats.reason) text += " " + promptDropStats.reason;
+    }
+    parts.push(text);
+  }
+  if (promptMissing.length) {
+    // Причина потери различается: срезал лимит (модель инвариант написала,
+    // clamp урезал хвост) или модель не написала вовсе. Предупреждение одно и
+    // то же — в обоих случаях в письмо уходит промпт без инварианта, — но
+    // лечится по-разному, поэтому подсказка разная.
+    const cut = promptMissing.filter(x => promptMissingCut.includes(x));
+    const byModel = promptMissing.filter(x => !promptMissingCut.includes(x));
+    let why = "";
+    if (cut.length) why += " срезано лимитом: " + cut.join(", ") + ".";
+    if (byModel.length) why += " модель не сохранила: " + byModel.join(", ") + ".";
+    parts.push("⚠ в промпте, который уйдёт в письмо, не хватает инвариантов: " +
+      promptMissing.join(", ") + " — " + why +
+      " playbook заменяет дефолт целиком: проверь поле выше, нажми reset default или повтори compose.");
+  }
+  el.classList.toggle("warn", promptMissing.length > 0);
+  el.hidden = parts.length === 0;
+  el.textContent = parts.join(" ");
+}
+
+// composePrompt — один не-стриминговый вызов: playbook под вакансию в поле
+// промпта + список вырезаемых разделов профиля. Ошибка не трогает поле.
+async function composePrompt() {
+  if (busy() || !els.vacancy.value.trim()) return;
+  if (els.systemPrompt.value.trim() && els.systemPrompt.value.trim() !== defaultPrompt.trim()
+      && !promptUndo && !confirm("Поле промпта изменено и отката нет — заменить его результатом compose?")) {
+    return;
+  }
+  promptUndo = { text: els.systemPrompt.value, drops: promptDrops, stats: promptDropStats,
+                 missing: promptMissing, missingCut: promptMissingCut, vacancy: promptVacancy };
+  els.composePrompt.disabled = true;
+  setStatus("формирую промпт под вакансию…");
+  try {
+    const r = await fetch("/api/prompt/compose", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ vacancy: els.vacancy.value }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || ("код " + r.status));
+    els.systemPrompt.value = data.systemPrompt || "";
+    promptDrops = data.dropSections || [];
+    promptDropStats = {
+      sections: data.sections || 0,
+      droppedBytes: data.droppedBytes || 0,
+      reason: data.reason || "",
+    };
+    promptMissing = data.missingInvariants || [];
+    promptMissingCut = data.missingInvariantsCut || [];
+    promptVacancy = els.vacancy.value;
+    promptAuto = true;
+    renderDropInfo();
+    promptState();
+    els.undoPrompt.hidden = false;
+    let msg = "промпт собран за " + ((data.elapsedMs || 0) / 1000).toFixed(1) + "s";
+    if (promptDrops.length) msg += " · убрано разделов: " + promptDrops.length;
+    // Связываем обрезку с уходом инвариантов: раньше это были два
+    // независимых факта в одной строке, и следствие не читалось.
+    if (data.truncated) {
+      msg += promptMissingCut.length
+        ? " · обрезан по лимиту, срезаны инварианты: " + promptMissingCut.length
+        : " · обрезан по лимиту";
+    }
+    if (promptMissing.length) {
+      const byModel = promptMissing.length - promptMissingCut.length;
+      msg += " · без инвариантов: " + promptMissing.length +
+        (byModel > 0 ? " (из них " + byModel + " потеряла модель)" : "");
+    }
+    setStatus(msg + ".");
+  } catch (e) {
+    setStatus("err: compose не удался: " + e.message, "err");
+  } finally {
+    syncPromptButtons();
+  }
+}
+
+// undoPrompt — восстановить промпт и drops до compose.
+function undoPrompt() {
+  if (!promptUndo) return;
+  els.systemPrompt.value = promptUndo.text;
+  promptDrops = promptUndo.drops || [];
+  promptDropStats = promptUndo.stats || null;
+  promptMissing = promptUndo.missing || [];
+  promptMissingCut = promptUndo.missingCut || [];
+  promptVacancy = promptUndo.vacancy || "";
+  promptUndo = null;
+  promptAuto = false;
+  els.undoPrompt.hidden = true;
+  // Вакансия могла измениться после compose: тогда возвращать прежние дропы
+  // нельзя — они собраны под другой текст (dropStaleDrops это и сбросит).
+  dropStaleDrops();
+  renderDropInfo();
+  promptState();
 }
 function scheduleSave() {
   clearTimeout(saveTimer);
@@ -662,7 +849,7 @@ async function generate() {
   let live = 0;
   try {
     const data = await streamGenerate(
-      { vacancy: els.vacancy.value, systemPrompt: els.systemPrompt.value },
+      { vacancy: els.vacancy.value, systemPrompt: els.systemPrompt.value, dropSections: promptDrops },
       delta => {
         els.result.textContent += delta;
         // Автоскролл: письмо растёт, конец текста остаётся на виду.
@@ -875,6 +1062,7 @@ async function auditFix() {
         auditFix: true,
         letter: letter,
         warnings: lastWarnings,
+        dropSections: promptDrops,
       },
       delta => {
         els.result.textContent += delta;
@@ -925,6 +1113,7 @@ async function fitFix(maxIter) {
           fitFix: true,
           letter: letter,
           fitCaveats: caveats,
+          dropSections: promptDrops,
         },
         delta => {
           els.result.textContent += delta;
@@ -1011,12 +1200,21 @@ async function boot() {
     el.addEventListener("change", scheduleSave);
   }
   // Промпт не автосейвится: кастом живёт до перезапуска, сброс — кнопкой.
+  // Ручная правка результата compose снимает статус auto — подпись честнеет.
   els.systemPrompt.addEventListener("input", () => {
-    els.promptSub.textContent = "кастом (сброс при перезапуске)";
+    if (promptAuto) {
+      promptAuto = false;
+      els.undoPrompt.hidden = !promptUndo;
+    }
+    promptState();
   });
   $("resetPrompt").addEventListener("click", resetPrompt);
+  els.composePrompt.addEventListener("click", composePrompt);
+  els.undoPrompt.addEventListener("click", undoPrompt);
   els.vacancy.addEventListener("input", () => {
     els.generate.disabled = !els.vacancy.value.trim() || document.body.classList.contains("busy");
+    dropStaleDrops();
+    syncPromptButtons();
   });
   els.generate.addEventListener("click", generate);
   els.stop.addEventListener("click", () => {
@@ -1041,6 +1239,7 @@ async function boot() {
     }
   });
   els.vacancy.focus();
+  syncPromptButtons(); // compose гаснет, пока вакансия пуста
 }
 boot();
 </script>

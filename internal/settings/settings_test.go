@@ -102,3 +102,25 @@ func TestLoadBrokenJSONReturnsError(t *testing.T) {
 		t.Error("битый JSON должен давать ошибку, а не тихие дефолты")
 	}
 }
+
+// Регресс Kairon.Finance (2026-09-29): дефолт велел «2–3 довода» и «до 200
+// слов» — модель буквальнно соблюла объём и выкинула из письма половину
+// must-have (фронтенд, Claude/Codex), размазав остаток по абзацам. Теперь
+// must-have — приоритет, структура — маркированный список, имя в подписи —
+// только из профиля (фабрикация «Алексей Туркин» при пустом профиле).
+func TestDefaultPromptPrioritizesMustHaveOverLength(t *testing.T) {
+	p := DefaultSystemPrompt
+	for _, want := range []string{
+		"маркированный список",
+		"must-have) — приоритет письма",
+		"сокращай второстепенные факты, а не требования",
+		"Выдуманное имя = фабрикация",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("в дефолтном промпте нет %q:\n%s", want, p)
+		}
+	}
+	if strings.Contains(p, "2–3 довода") {
+		t.Error("жёсткое «2–3 довода» возвращено — оно резало must-have")
+	}
+}

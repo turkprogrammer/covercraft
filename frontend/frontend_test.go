@@ -155,3 +155,36 @@ func TestLiveRegions(t *testing.T) {
 		}
 	}
 }
+
+// TestComposePromptButton — кнопка compose, откат и прокидывание dropSections
+// в генерацию: фича обязана быть в разметке и в теле запроса. Отдельно
+// проверяются две страховки: сброс устаревших дропов при смене вакансии и
+// предупреждение о потерянных инвариантах безопасности.
+func TestComposePromptButton(t *testing.T) {
+	for _, want := range []string{
+		`id="composePrompt"`,
+		`id="undoPrompt"`,
+		`id="prompt-dropinfo"`,
+		`class="btn-row"`,
+		`"/api/prompt/compose"`,
+		"vacancy: els.vacancy.value",
+		"dropSections: promptDrops",
+		"function promptState()",
+		"function undoPrompt()",
+		"function dropStaleDrops()",
+		"dropStaleDrops();",
+		"promptVacancy",
+		"missingInvariants",
+		"missingInvariantsCut",
+		"срезано лимитом",
+		"отбор разделов сброшен",
+	} {
+		if !strings.Contains(IndexHTML, want) {
+			t.Errorf("в UI нет %q — кнопка compose обязана быть", want)
+		}
+	}
+	// Три режима генерации передают drops.
+	if got := strings.Count(IndexHTML, "dropSections: promptDrops"); got < 3 {
+		t.Errorf("dropSections: promptDrops встречается %d раз(а), хочу минимум 3 (generate/auditFix/fitFix)", got)
+	}
+}

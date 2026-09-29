@@ -89,12 +89,12 @@ type metricRule struct {
 var metricRules = []metricRule{
 	{
 		metric: mustRE(`(?i)155\+`),
-		owners: []*regexp.Regexp{mustRE(`(?i)fraud engine|go-проект|go projects`)},
+		owners: []*regexp.Regexp{mustRE(`(?i)fraud( detection)? engine|go-проект|go projects`)},
 		fact:   "155+ тестов — Go-проект Fraud Engine; не атрибутируй их PHPUnit/PHP-тестам",
 	},
 	{
 		metric: mustRE(`(?i)92\s?% ?f1`),
-		owners: []*regexp.Regexp{mustRE(`(?i)fraud engine`)},
+		owners: []*regexp.Regexp{mustRE(`(?i)fraud( detection)? engine`)},
 		fact:   "92% F1 — только Fraud Engine",
 	},
 	{
@@ -114,7 +114,7 @@ var metricRules = []metricRule{
 	},
 	{
 		metric: mustRE(`(?i)(p95[^.\n]{0,12}4\.2|4\.2 ?ms)`),
-		owners: []*regexp.Regexp{mustRE(`(?i)fraud engine`)},
+		owners: []*regexp.Regexp{mustRE(`(?i)fraud( detection)? engine`)},
 		fact:   "P95 < 4.2ms — только Fraud Engine",
 	},
 	{
@@ -180,7 +180,7 @@ var obligations = []obligation{
 	},
 	{
 		need: mustRE(`(?i)highload|высоконагруж|нагрузк|latency|производительност|p95|p99|rps`),
-		has:  mustRE(`(?i)fraud engine`),
+		has:  mustRE(`(?i)fraud( detection)? engine`),
 		fact: "Highload-требование: Fraud Engine (92% F1, P95 < 4.2ms) — доказательная база",
 	},
 	{

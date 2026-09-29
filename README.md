@@ -30,7 +30,7 @@
      width="720">
 
 
-## Что нового в 0.2.6
+## Что нового в 0.3.0
 
 Подробности — в [CHANGELOG.md](CHANGELOG.md).
 
@@ -63,6 +63,14 @@
   запуске, настройки бы терялись.
 - **Промпт**: `context/*.md` (профиль, проекты — всё, что `.md`, по алфавиту)
   + текст вакансии → единый user-промпт; системный промпт — из настроек.
+  Кнопка `[ compose ]` в панели `system.prompt` одним LLM-вызовом собирает
+  системный промпт под текущую вакансию и сокращает user-промпт: модель
+  отбирает нерелевантные разделы профиля, они вырезаются через
+  `dropSections` (антигаллюцинационный раздел «ФАКТЫ-ОГРАНИЧИТЕЛИ» вырезать
+  нельзя). Две страховки: при смене вакансии старый отбор разделов
+  сбрасывается — вырезать по чужой вакансии нельзя; потеря инвариантов
+  безопасности в собранном промпте показывается предупреждением (playbook
+  заменяет дефолт целиком, «не выдумывай» не должно исчезнуть молча).
 - **Постпроверка письма (`internal/audit`)**: после генерации письмо
   автоматически проверяется на типовые сбои LLM — потерянные факты профиля
   (Yii2/Lumen/PHPUnit/Fraud Engine и метрики), запрещённое в строке стека
@@ -157,7 +165,10 @@ go install github.com/turkprogrammer/covercraft@latest
    `https://api.apinex.bond/v1` или `http://127.0.0.1:11434/v1` для
    Ollama), модель (например `free/gemini-3.8-flash`, `llama3.2`),
    ключ при необходимости, и reasoning_effort для reasoning-моделей.
-3. В `system.prompt` — как писать письмо (уже есть разумный дефолт).
+3. В `system.prompt` — как писать письмо (уже есть разумный дефолт); кнопка
+   `[ compose ]` соберёт промпт под вакансию и уберёт нерелевантные разделы
+   профиля — поле остаётся редактируемым, `[ вернуть прежний ]` откатывает,
+   `reset default` возвращает дефолт и чистит вырезанные разделы.
 4. Вставьте вакансию в `vacancy.in`, нажмите `[ gen ]` или Ctrl+Enter.
 5. Письмо появится в `letter.out` — счётчик покажет размер и время
    генерации (`N chars · X.Xs`); можно отредактировать и нажать `[ copy ]`.
@@ -209,7 +220,10 @@ frontend/index.html     весь UI (embed)
 internal/settings/      JSON-настройки, 0600, атомарная запись
 internal/llm/           OpenAI-совместимый клиент /chat/completions,
                          reasoning_effort (omitempty), timeout 300s
-internal/cover/          сборка user-промпта из context/*.md
+internal/cover/          сборка user-промпта из context/*.md,
+                         ProfileSections/DropSections — отбор разделов
+internal/prompt/         композер системного промпта под вакансию
+                         (POST /api/prompt/compose) и отбор разделов профиля
 internal/fit/            фит-матчер: извлечение требований, покрытия,
                          вердикт; concepts.go — динамические концепты
                          (LLM-генерация, кэш ~/.config/covercraft/concepts.json)
@@ -232,7 +246,8 @@ context/                 user's context: *.md (gitignored, private)
 | GET   | `/`            | UI (HTML из embed) |
 | GET   | `/api/settings`| текущие настройки |
 | POST  | `/api/settings`| сохранить настройки |
-| POST  | `/api/generate`| `{vacancy}` → SSE: `delta`…, `done {letter, elapsedMs, warnings, fit, profileWarning}` |
+| POST  | `/api/generate`| `{vacancy, systemPrompt, dropSections}` → SSE: `delta`…, `done {letter, elapsedMs, warnings, fit, profileWarning, usedSystemPrompt}` |
+| POST  | `/api/prompt/compose` | `{vacancy}` → `{systemPrompt, dropSections, reason, truncated, sections, droppedBytes, elapsedMs, missingInvariants}` |
 
 ## Тесты
 

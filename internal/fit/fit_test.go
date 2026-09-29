@@ -1247,3 +1247,42 @@ func TestSecurityConceptTrigger(t *testing.T) {
 		}
 	}
 }
+
+// Регресс Kairon.Finance (2026-09-29): требование «Frontend stack
+// knowledge: JavaScript (ES6+), TypeScript, Vue, and React» улетало в «в
+// профиле и письме нет, моста нет», хотя React/TypeScript в профиле были —
+// не хватало только Vue. missing остаётся missing (вес и вердикт не
+// меняются), но нота обязана показывать названные вскользь токены.
+func TestMissingNoteShowsPartialTokens(t *testing.T) {
+	profile := "CMS Blog: Go Hexagonal API + React 18/TypeScript."
+	reqs := mustReqs([]string{"Frontend stack knowledge: JavaScript (ES6+), TypeScript, Vue, and React"}, nil, "fullstack")
+	f := Evaluate(DefaultConcepts(), reqs, profile, "Стек: Go, PHP", "вакансия")
+	if len(f.Missing) != 1 {
+		t.Fatalf("преmise: требование без Vue в профиле — missing: %+v", f)
+	}
+	note := f.Missing[0].Note
+	if !strings.Contains(note, "названо вскользь") {
+		t.Fatalf("нота missing не различает «нет нигде» и «часть названа»: %q", note)
+	}
+	if !strings.Contains(note, "react") || !strings.Contains(note, "js") {
+		t.Errorf("нота не назвала профильные токены (js покрывает javascript/typescript через синонимы): %q", note)
+	}
+	if strings.Contains(note, "vue") {
+		t.Errorf("vue в профиле нет — не должен попасть в «названо вскользь»: %q", note)
+	}
+}
+
+// Регресс Kairon.Finance (2026-09-29): требование "Умение проверять
+// AI-generated код" падало в missing, хотя письмо писало "ИИ-код" —
+// токенизатор вытянул из требования "ai-generated", а fit его не
+// связывал с кириллическим "ии-код". Синоним-мост закрывает.
+func TestMissingNoteAIgeneratedCode(t *testing.T) {
+	reqs := mustReqs([]string{"Умение проверять AI-generated код"}, nil, "fullstack")
+	letter := "Проверка логики и безопасности ИИ-кода через пост-валидацию и тесты."
+	f := Evaluate(DefaultConcepts(), reqs, profileGo, letter, "вакансия")
+	for _, r := range f.Missing {
+		if strings.Contains(r.Text, "AI-generated") {
+			t.Errorf("требование с AI-generated должно закрываться «ИИ-код» через синоним: %+v", r)
+		}
+	}
+}

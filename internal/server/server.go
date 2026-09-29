@@ -31,6 +31,7 @@ import (
 	"github.com/turkprogrammer/covercraft/internal/cover"
 	"github.com/turkprogrammer/covercraft/internal/fit"
 	"github.com/turkprogrammer/covercraft/internal/llm"
+	"github.com/turkprogrammer/covercraft/internal/prompt"
 	"github.com/turkprogrammer/covercraft/internal/settings"
 )
 
@@ -50,6 +51,10 @@ type Config struct {
 	// FitLLM — LLM для извлечения требований вакансии (internal/fit);
 	// если nil — тот же LLM, что и для письма.
 	FitLLM LLMFunc
+	// ComposeLLM — LLM-вызов композера системного промпта (POST
+	// /api/prompt/compose); не-стриминговый. Если nil — тот же LLM, что и
+	// для письма (тесты: заданный в Config.LLM).
+	ComposeLLM LLMFunc
 	// FitEngine — движок матчинга фита: "" / "deterministic" — матчер на
 	// правилах; "llm" — гибрид «модель размечает покрытие, код проверяет
 	// цитаты» (internal/fit/map.go). При ошибке модели — всегда откат на
@@ -80,6 +85,13 @@ func New(cfg Config) *Handler {
 			cfg.FitLLM = testLLM // тесты: извлечение через тот же fake
 		} else {
 			cfg.FitLLM = realLLM // прод: тот же клиент, отдельный вызов
+		}
+	}
+	if cfg.ComposeLLM == nil {
+		if testLLM != nil {
+			cfg.ComposeLLM = testLLM
+		} else {
+			cfg.ComposeLLM = realLLM
 		}
 	}
 	if cfg.LLMStream == nil {
@@ -117,6 +129,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.postSettings(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/generate":
 		h.generate(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/api/prompt/compose":
+		h.composePrompt(w, r)
 	default:
 		http.Error(w, "не найдено", http.StatusNotFound)
 	}
@@ -165,6 +179,9 @@ type generateRequest struct {
 	// факты в существующие буллеты, сохраняя остальной текст без изменений.
 	FitFix     bool     `json:"fitFix,omitempty"`
 	FitCaveats []string `json:"fitCaveats,omitempty"`
+	// DropSections — разделы профиля, вырезаемые из user-промпта (решил
+	// композер). Пусто — промпт как раньше.
+	DropSections []prompt.Drop `json:"dropSections,omitempty"`
 }
 
 // sseDelta — событие дельты в SSE-потоке /api/generate: кусок письма
@@ -193,12 +210,38 @@ type sseDone struct {
 	// потому что warnings возвращаются модели при автоправке — инструкция
 	// «профиль пуст» заставила бы её выдумывать факты.
 	ProfileWarning string `json:"profileWarning,omitempty"`
+	// UsedSystemPrompt — фактически отправленный системный промпт
+	// (кастом или дефолт): для отладки, что реально применялось.
+	UsedSystemPrompt string `json:"usedSystemPrompt"`
 }
 
 // sseError — событие ошибки внутри SSE-потока: после старта стрима код
 // HTTP уже 200, поэтому ошибки доходят событием, а не статус-кодом.
 type sseError struct {
 	Error string `json:"error"`
+}
+
+// resolveSystemPrompt — единственная точка выбора системного промпта:
+// непустой кастом полностью заменяет дефолт (D2). Пустое поле — дефолт.
+func resolveSystemPrompt(system string) string {
+	if strings.TrimSpace(system) != "" {
+		return system
+	}
+	return settings.DefaultSystemPrompt
+}
+
+// timeoutFromSettings — единое правило таймаута для generate и compose:
+// дефолт 60, clamp 900 (защита от битого файла), 0/отсутствие — дефолт.
+// context.WithTimeout строит вызывающий — хелпер не трогает контекст.
+func timeoutFromSettings() int {
+	timeoutSec := 60
+	if s, err := settings.Load(); err == nil && s.TimeoutSec > 0 {
+		timeoutSec = s.TimeoutSec
+		if timeoutSec > 900 {
+			timeoutSec = 900
+		}
+	}
+	return timeoutSec
 }
 
 func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
@@ -226,21 +269,12 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
 
 	// Таймаут из настроек (UI ограничивает 5–900, дефолт 60): free-tier
 	// не должен висеть минутами — по истечении понятная ошибка.
-	timeoutSec := 60
-	if s, err := settings.Load(); err == nil && s.TimeoutSec > 0 {
-		timeoutSec = s.TimeoutSec
-		if timeoutSec > 900 {
-			timeoutSec = 900 // защита от битого файла
-		}
-	}
+	timeoutSec := timeoutFromSettings()
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 
 	// System-промпт: кастомный из сессии или дефолт (всегда восстанавливается).
-	system := req.SystemPrompt
-	if strings.TrimSpace(system) == "" {
-		system = settings.DefaultSystemPrompt
-	}
+	system := resolveSystemPrompt(req.SystemPrompt)
 
 	// Режим автоправки: письмо + замечания аудита → модель переписывает.
 	// Контекст профиля не пересобираем — правки только по списку замечаний.
@@ -273,13 +307,13 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case req.AuditFix:
 		user = fixPrompt(req.Letter, req.Warnings) + "\n\n" +
-			cover.BuildUserPrompt(h.cfg.ContextDir, req.Vacancy, musts)
+			cover.BuildUserPrompt(h.cfg.ContextDir, req.Vacancy, musts, req.DropSections)
 	case req.FitFix:
 		user = fitFixPrompt(req.Letter, req.FitCaveats) + "\n\n" +
-			cover.BuildUserPrompt(h.cfg.ContextDir, req.Vacancy, musts)
+			cover.BuildUserPrompt(h.cfg.ContextDir, req.Vacancy, musts, req.DropSections)
 	default:
 		// User-промпт собирает сервер: context/*.md + вакансия + чек-лист.
-		user = cover.BuildUserPrompt(h.cfg.ContextDir, req.Vacancy, musts)
+		user = cover.BuildUserPrompt(h.cfg.ContextDir, req.Vacancy, musts, req.DropSections)
 	}
 
 	// Движок фита: "llm" — гибридная разметка покрытия моделью (отдельный
@@ -390,7 +424,7 @@ func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc
 		_ = writeSSE(w, sseDone{
 			Done: true, Letter: letter, ElapsedMs: elapsed.Milliseconds(),
 			Warnings: warnings, Fit: verdict, FitFixable: fixableN,
-			ProfileWarning: profileWarning,
+			ProfileWarning: profileWarning, UsedSystemPrompt: system,
 		}) // best-effort
 	}
 	flush()
@@ -406,6 +440,98 @@ func writeSSE(w http.ResponseWriter, v any) error {
 	}
 	_, werr := fmt.Fprintf(w, "data: %s\n\n", b)
 	return werr
+}
+
+// composeResponse — ответ POST /api/prompt/compose: готовый системный промпт
+// под вакансию + решение о вырезании разделов профиля. sections/droppedBytes —
+// чтобы UI показал «было 67 КБ → стало N КБ», а не магию.
+type composeResponse struct {
+	SystemPrompt string        `json:"systemPrompt"`
+	DropSections []prompt.Drop `json:"dropSections"`
+	Reason       string        `json:"reason"`
+	Truncated    bool          `json:"truncated"`
+	Sections     int           `json:"sections"`
+	DroppedBytes int           `json:"droppedBytes"`
+	ElapsedMs    int64         `json:"elapsedMs"`
+	// MissingInvariants — инварианты безопасности базового промпта, которых не
+	// нашлось в собранном playbook'е: playbook заменяет дефолт целиком (D2),
+	// поэтому UI обязан предупредить. Мягкая проверка — промпт не блокируется.
+	// Считается по финальному тексту, который уходит в письмо.
+	MissingInvariants []string `json:"missingInvariants,omitempty"`
+	// MissingInvariantsCut — подмножество Missing, срезанное лимитом, а не
+	// потерянное моделью: позволяет UI назвать настоящую причину («обрезано
+	// лимитом» vs «модель не сохранила»).
+	MissingInvariantsCut []string `json:"missingInvariantsCut,omitempty"`
+}
+
+// composePrompt — один не-стриминговый LLM-вызов: по текущей вакансии
+// генерирует самостоятельный системный промпт (playbook) и выбирает
+// нерелевантные разделы профиля. Пустая вакансия → 400 до LLM (прецедент
+// generate): пустое не должно стоить вызова.
+func (h *Handler) composePrompt(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Vacancy string `json:"vacancy"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&req); err != nil {
+		http.Error(w, "битый JSON", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Vacancy) == "" {
+		http.Error(w, "vacancy пусто", http.StatusBadRequest)
+		return
+	}
+
+	timeoutSec := timeoutFromSettings()
+	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(timeoutSec)*time.Second)
+	defer cancel()
+	start := time.Now()
+
+	// Заголовки профиля вместо 67 КБ контента.
+	var sections []prompt.Section
+	for _, s := range cover.ProfileSections(h.cfg.ContextDir) {
+		if file, heading, ok := strings.Cut(s, " :: "); ok {
+			sections = append(sections, prompt.Section{File: file, Heading: heading})
+		}
+	}
+
+	// must-have для промпта композера; отказ разбора не фатален — роль "",
+	// musts nil (прецедент generate).
+	var role string
+	var musts []string
+	if reqs, err := fit.ExtractRequirements(ctx, fit.LLMFunc(h.cfg.FitLLM), req.Vacancy); err == nil {
+		role = reqs.Role
+		for _, m := range reqs.MustHave {
+			musts = append(musts, m.Text)
+		}
+	}
+
+	system, user := prompt.Compose(settings.DefaultSystemPrompt, req.Vacancy, role, musts, sections)
+	raw, err := h.cfg.ComposeLLM(ctx, system, user)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "композер не ответил: " + err.Error()})
+		return
+	}
+	res, err := prompt.Parse(raw, sections)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+
+	// Сколько профиля сэкономлено: замер на собранном user-промпте до/после.
+	full := cover.BuildUserPrompt(h.cfg.ContextDir, req.Vacancy, musts, nil)
+	cut := cover.BuildUserPrompt(h.cfg.ContextDir, req.Vacancy, musts, res.Drop)
+
+	writeJSON(w, http.StatusOK, composeResponse{
+		SystemPrompt:         res.SystemPrompt,
+		DropSections:         res.Drop,
+		Reason:               res.Reason,
+		Truncated:            res.Truncated,
+		Sections:             len(sections),
+		DroppedBytes:         len(full) - len(cut),
+		ElapsedMs:            time.Since(start).Milliseconds(),
+		MissingInvariants:    res.Missing,
+		MissingInvariantsCut: res.MissingCut,
+	})
 }
 
 // fixPrompt — user-промпт режима автоправки: письмо + замечания аудита.

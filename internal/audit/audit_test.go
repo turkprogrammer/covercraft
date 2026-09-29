@@ -286,3 +286,21 @@ func TestAffirmativeTechInGapsStillWarns(t *testing.T) {
 		t.Errorf("утвердительный дубль Kafka не помечен:\n%s", got)
 	}
 }
+
+// Регресс Kairon.Finance (2026-09-29): письмо писало «Fraud Detection
+// Engine», а владельцем метрик регистронезависимо значился только «Fraud
+// Engine» — детектор атрибуции и highload-обязательство давали ложные
+// warning'и на корректное письмо («метрика стоит не рядом со своим
+// проектом», «Fraud Engine отсутствует»). Полное название проекта —
+// легитимный владелец.
+func TestFraudDetectionEngineCountsAsOwner(t *testing.T) {
+	letter := `• Мой Fraud Detection Engine на чистом Go обеспечивает 92% F1 и 1000+ RPS при P95 < 4.2ms.`
+	r := Check(letter, "требуются навыки highload разработки")
+	got := strings.Join(r.Warnings, "\n")
+	if strings.Contains(got, "Проверь атрибуцию") {
+		t.Errorf("ложная атрибуция на «Fraud Detection Engine»:\n%s", got)
+	}
+	if strings.Contains(got, "Fraud Engine (92% F1") {
+		t.Errorf("обязательство ложно считает Fraud Engine потерянным:\n%s", got)
+	}
+}

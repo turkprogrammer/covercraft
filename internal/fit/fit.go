@@ -250,11 +250,13 @@ var synonyms = map[string][]string{
 	// tooling, делегирование задач» — письмо пишет «ИИ-инструменты»,
 	// «постановка задач», «архитектурный контроль». Токен tokenRe не
 	// извлекает кириллицу, поэтому без альтов fit не видит покрытия.
-	"cursor":    {"cursor", "ии-инструмент", "ai-native"},
-	"claude":    {"claude code", "claude", "ии-инструмент"},
-	"agentic":   {"agentic", "агентн", "agent harness"},
-	"delegat":   {"делегирова", "постановка задач", "delegat"},
-	"ai-native": {"ai-native", "ии-инструмент", "ai native"},
+	"cursor":       {"cursor", "ии-инструмент", "ai-native"},
+	"claude":       {"claude code", "claude", "ии-инструмент"},
+	"codex":        {"codex", "ии-инструмент", "ai-native"},
+	"ai-generated": {"ai-generated", "ai-code", "ии-код"},
+	"agentic":      {"agentic", "агентн", "agent harness"},
+	"delegat":      {"делегирова", "постановка задач", "delegat"},
+	"ai-native":    {"ai-native", "ии-инструмент", "ai native"},
 }
 
 // bridge — мост: требование без прямого факта, но с соседним опытом
@@ -916,6 +918,10 @@ type fitBuilder struct {
 	sum           float64
 	count         int
 	missingAdvice []string
+	// profile/letter — тексты для диагностики missing: какая часть токенов
+	// требования в них всё-таки названа (заполняются Evaluate/MapCoverage).
+	profile string
+	letter  string
 }
 
 // addMust — вклад одного must-have: веса 1.0 (письмо), 0.7 (профиль),
@@ -940,9 +946,30 @@ func (b *fitBuilder) addMust(r Requirement, src, note string) {
 		// после обхода (шесть одинаковых «проверь вручную» — шум).
 		b.f.Caveats = append(b.f.Caveats, Req{r.Text, src, note})
 	default:
-		b.f.Missing = append(b.f.Missing, Req{r.Text, SrcMissing, "в профиле и письме нет, моста нет"})
+		b.f.Missing = append(b.f.Missing, Req{r.Text, SrcMissing, b.missingNote(r.Text)})
 		b.missingAdvice = append(b.missingAdvice, "обязательное требование «"+r.Text+"» не закрыто ничем — письмом это не лечится")
 	}
+}
+
+// missingNote — человеческая диагностика незакрытого must-have: «в профиле и
+// письме нет, моста нет» молчали о том, что часть требования всё-таки названа
+// (живой кейс Kairon.Finance: «Frontend stack knowledge: JavaScript,
+// TypeScript, Vue, React» улетал в «нет нигде», хотя React/TypeScript были
+// в профиле — не хватало только Vue). Статус и вес missing от этого не
+// меняются: названное вскользь — не закрытое требование, но пользователю
+// важно видеть, насколько требование реально чужое.
+func (b *fitBuilder) missingNote(reqText string) string {
+	note := "в профиле и письме нет, моста нет"
+	var partial []string
+	for _, t := range reqTokens(reqText) {
+		if findFact(t, b.profile) || findFact(t, b.letter) {
+			partial = append(partial, t)
+		}
+	}
+	if len(partial) > 0 {
+		note += " (названо вскользь: " + strings.Join(partial, ", ") + ")"
+	}
+	return note
 }
 
 // finish — nice-to-have бонус, скор, вердикт и советы: точка сходимости
@@ -1066,7 +1093,7 @@ func (b *fitBuilder) finish(reqs Requirements, profile, letter string) Fit {
 // не закрыто 0. Nice-to-have: закрыт — небольшой бонус, незакрыт — без
 // штрафа. «Будет плюсом» и мягкие требования покрытием не считаются.
 func Evaluate(concepts []Concept, reqs Requirements, profile, letter, vacancy string) Fit {
-	b := &fitBuilder{f: Fit{Role: reqs.Role}, concepts: concepts}
+	b := &fitBuilder{f: Fit{Role: reqs.Role}, concepts: concepts, profile: profile, letter: letter}
 	if reqs.MustHave == nil && reqs.NiceToHave == nil {
 		// Разбор не удался — вердикта быть не должно, панель не рендерится.
 		b.f.Verdict = ""

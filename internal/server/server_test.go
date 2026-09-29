@@ -840,3 +840,325 @@ func TestGenerateNoProfileWarningWhenProfileExists(t *testing.T) {
 		t.Errorf("с непустым профилем profileWarning должен быть пуст, получено %q", ev.Done.ProfileWarning)
 	}
 }
+
+// contextDirWithSections — временный каталог контекста с ##-заголовками
+// под фикстуру композера: 01.md с "## PHP", 03-ml… с "## ML".
+func contextDirWithSections(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	files := map[string]string{
+		"01.md":                 "# Профиль\n\n## PHP\n\nphp-факт\n",
+		"03-ml-опыт-выжимка.md": "# ML\n\n## ML\n\nml-факт\n",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+func TestComposePromptEndpoint(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	var gotSystem, gotUser string
+	h := New(Config{
+		ContextDir: contextDirWithSections(t),
+		ComposeLLM: func(ctx context.Context, system, user string) (string, error) {
+			gotSystem, gotUser = system, user
+			return `{"systemPrompt":"промпт под вакансию","dropSections":[{"file":"03-ml-опыт-выжимка.md","heading":"## ML"}],"reason":"вакансия PHP — ML не релевантен"}`, nil
+		},
+		FitLLM: func(ctx context.Context, system, user string) (string, error) {
+			return `{"role":"php-primary","mustHave":[{"text":"опыт PHP 5+ лет","kind":"must","category":"stack"}]}`, nil
+		},
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/prompt/compose",
+		bytes.NewReader([]byte(`{"vacancy":"PHP-вакансия"}`)))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("код = %d, хочу 200; тело: %s", rec.Code, rec.Body.String())
+	}
+	var out composeResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("битый ответ: %v", err)
+	}
+	if out.SystemPrompt != "промпт под вакансию" {
+		t.Errorf("systemPrompt = %q", out.SystemPrompt)
+	}
+	if len(out.DropSections) != 1 || out.DropSections[0].Heading != "## ML" {
+		t.Errorf("дропы: %+v", out.DropSections)
+	}
+	if out.Reason == "" || out.Sections != 2 {
+		t.Errorf("reason=%q sections=%d, хочу reason и 2 секции", out.Reason, out.Sections)
+	}
+	if out.DroppedBytes <= 0 {
+		t.Errorf("droppedBytes = %d, хочу > 0", out.DroppedBytes)
+	}
+	if len(gotSystem) == 0 {
+		t.Error("композер не получил system")
+	}
+	for _, want := range []string{"PHP-вакансия", "опыт PHP 5+ лет", "01.md :: ## PHP"} {
+		if !strings.Contains(gotUser, want) {
+			t.Errorf("композер не получил %q в user:\n%s", want, gotUser)
+		}
+	}
+	if !strings.Contains(gotSystem, "ФАКТЫ-ОГРАНИЧИТЕЛИ") {
+		t.Error("мета-инструкция обязана запрещать вырезать ФАКТЫ-ОГРАНИЧИТЕЛИ")
+	}
+}
+
+// TestComposePromptReportsMissingInvariants — мягкая страховка D2: playbook
+// заменяет дефолтный системный промпт целиком, поэтому потерянные инварианты
+// безопасности должны быть видны в ответе. 200, а не 502: перефразирование
+// моделью не должно ронять фичу, решение — за пользователем в UI.
+func TestComposePromptReportsMissingInvariants(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	newHandler := func(systemPrompt string) *Handler {
+		return New(Config{
+			ContextDir: contextDirWithSections(t),
+			ComposeLLM: func(ctx context.Context, system, user string) (string, error) {
+				b, _ := json.Marshal(map[string]string{"systemPrompt": systemPrompt})
+				return string(b), nil
+			},
+			FitLLM: func(ctx context.Context, system, user string) (string, error) {
+				return "{}", nil
+			},
+		})
+	}
+	call := func(h *Handler) composeResponse {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/prompt/compose",
+			bytes.NewReader([]byte(`{"vacancy":"PHP-вакансия"}`)))
+		req.Header.Set("Content-Type", "application/json")
+		h.ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("код = %d, тело: %s", rec.Code, rec.Body.String())
+		}
+		var out composeResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("битый ответ: %v", err)
+		}
+		return out
+	}
+
+	weak := call(newHandler("пиши хорошо"))
+	if len(weak.MissingInvariants) == 0 {
+		t.Error("playbook без инвариантов обязан вернуть непустой missingInvariants")
+	}
+	if !strings.Contains(strings.Join(weak.MissingInvariants, ", "), "только факты профиля") {
+		t.Errorf("в missingInvariants нет ключевого инварианта: %v", weak.MissingInvariants)
+	}
+
+	full := call(newHandler("Только факты из профиля, ничего не выдумывай. Язык письма — по вакансии. " +
+		"Объём — до 200 слов. Завершай подписью именем. Пробел — не слабость."))
+	if len(full.MissingInvariants) != 0 {
+		t.Errorf("инварианты на месте, а missingInvariants = %v", full.MissingInvariants)
+	}
+}
+
+func TestComposePromptRequiresVacancy(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	called := false
+	h := New(Config{
+		ContextDir: t.TempDir(),
+		ComposeLLM: func(ctx context.Context, system, user string) (string, error) {
+			called = true
+			return "{}", nil
+		},
+	})
+	for _, body := range []string{`{"vacancy":""}`, `{"vacancy":"   "}`} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/prompt/compose", bytes.NewReader([]byte(body)))
+		req.Header.Set("Content-Type", "application/json")
+		h.ServeHTTP(rec, req)
+		if rec.Code != 400 {
+			t.Errorf("тело %s → код %d, хочу 400", body, rec.Code)
+		}
+	}
+	if called {
+		t.Error("пустая вакансия обязана отбиться 400 до вызова LLM")
+	}
+}
+
+func TestComposePromptSurfacesLLMErrors(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	// Отказ самого композера → 502 c {"error": ...}.
+	h := New(Config{
+		ContextDir: t.TempDir(),
+		ComposeLLM: func(ctx context.Context, system, user string) (string, error) {
+			return "", errLLM{}
+		},
+		FitLLM: func(ctx context.Context, system, user string) (string, error) {
+			return "{}", nil
+		},
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/prompt/compose",
+		bytes.NewReader([]byte(`{"vacancy":"V"}`)))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+	if rec.Code != 502 || !strings.Contains(rec.Body.String(), "error") {
+		t.Errorf("отказ LLM: код=%d тело=%s, хочу 502 с error", rec.Code, rec.Body.String())
+	}
+
+	// Отказ FitLLM → всё равно 200: роль пустая, musts нет.
+	h2 := New(Config{
+		ContextDir: contextDirWithSections(t),
+		ComposeLLM: func(ctx context.Context, system, user string) (string, error) {
+			return `{"systemPrompt":"п","dropSections":[],"reason":"r"}`, nil
+		},
+		FitLLM: func(ctx context.Context, system, user string) (string, error) {
+			return "", errLLM{}
+		},
+	})
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodPost, "/api/prompt/compose",
+		bytes.NewReader([]byte(`{"vacancy":"V"}`)))
+	req2.Header.Set("Content-Type", "application/json")
+	h2.ServeHTTP(rec2, req2)
+	if rec2.Code != 200 {
+		t.Errorf("отказ FitLLM не фатален: код=%d тело=%s", rec2.Code, rec2.Body.String())
+	}
+
+	// Битый ответ композера (нет systemPrompt) → 502, поле в UI не затирается.
+	h3 := New(Config{
+		ContextDir: t.TempDir(),
+		ComposeLLM: func(ctx context.Context, system, user string) (string, error) {
+			return "просто текст без JSON", nil
+		},
+		FitLLM: func(ctx context.Context, system, user string) (string, error) {
+			return "{}", nil
+		},
+	})
+	rec3 := httptest.NewRecorder()
+	req3 := httptest.NewRequest(http.MethodPost, "/api/prompt/compose",
+		bytes.NewReader([]byte(`{"vacancy":"V"}`)))
+	req3.Header.Set("Content-Type", "application/json")
+	h3.ServeHTTP(rec3, req3)
+	if rec3.Code != 502 {
+		t.Errorf("битый ответ композера: код=%d, хочу 502", rec3.Code)
+	}
+}
+
+// TestGenerateDropsSections — dropSections из запроса вырезают раздел из
+// user-промпта во всех режимах; пустой список → промпт побайтово прежний.
+func TestGenerateDropsSections(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dir := t.TempDir()
+	files := map[string]string{
+		"01-jf.md": "# JF\n\n## JF\n\njoke-fact\n",
+		"02-ml.md": "# ML\n\n## ML\n\nml-fact\n",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var gotUser string
+	h := New(Config{
+		ContextDir: dir,
+		LLM: func(ctx context.Context, system, user string) (string, error) {
+			gotUser = user
+			return "ok", nil
+		},
+		FitLLM: func(ctx context.Context, system, user string) (string, error) {
+			return "{}", nil
+		},
+	})
+
+	send := func(extra map[string]any) string {
+		t.Helper()
+		bodyMap := map[string]any{"vacancy": "V"}
+		for k, v := range extra {
+			bodyMap[k] = v
+		}
+		body, _ := json.Marshal(bodyMap)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		h.ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("код = %d, тело: %s", rec.Code, rec.Body.String())
+		}
+		return gotUser
+	}
+
+	// С дропами: ML вырезан, JF и вакансия остались.
+	user := send(map[string]any{
+		"dropSections": []map[string]string{{"file": "02-ml.md", "heading": "## ML"}},
+	})
+	if strings.Contains(user, "## ML") || strings.Contains(user, "ml-fact") {
+		t.Errorf("## ML должен вырезаться:\n%s", user)
+	}
+	for _, want := range []string{"## JF", "joke-fact", "### Вакансия"} {
+		if !strings.Contains(user, want) {
+			t.Errorf("после дропа нет %q:\n%s", want, user)
+		}
+	}
+
+	// Без дропов — побайтово прежний промпт (регресс «не сломаем текущее»).
+	plain := send(nil)
+	dropped := send(map[string]any{
+		"dropSections": []map[string]string{{"file": "нет-такого.md", "heading": "## Нет"}},
+	})
+	if plain != dropped {
+		t.Error("дроп на несуществующий заголовок → промпт обязан остаться побайтово прежним")
+	}
+	if !strings.Contains(plain, "## ML") {
+		t.Errorf("без дропов ML на месте:\n%s", plain)
+	}
+}
+
+// TestDoneCarriesUsedSystemPrompt — SSE-done несёт фактически отправленный
+// системный промпт: кастом и дефолт.
+func TestDoneCarriesUsedSystemPrompt(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	var gotSystem string
+	h := New(Config{
+		ContextDir: t.TempDir(),
+		LLM: func(ctx context.Context, system, user string) (string, error) {
+			gotSystem = system
+			return "письмо", nil
+		},
+		FitLLM: func(ctx context.Context, system, user string) (string, error) {
+			return "{}", nil
+		},
+	})
+
+	send := func(systemPrompt string) *sseDone {
+		t.Helper()
+		bodyMap := map[string]string{"vacancy": "V"}
+		if systemPrompt != "" {
+			bodyMap["systemPrompt"] = systemPrompt
+		}
+		body, _ := json.Marshal(bodyMap)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		h.ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("код = %d", rec.Code)
+		}
+		ev := parseSSE(t, rec.Body.String())
+		if ev.Done == nil {
+			t.Fatal("нет done-события")
+		}
+		if ev.Done.UsedSystemPrompt != gotSystem {
+			t.Errorf("usedSystemPrompt не равен отправленному: %q vs %q", ev.Done.UsedSystemPrompt, gotSystem)
+		}
+		return ev.Done
+	}
+
+	if done := send(""); done.UsedSystemPrompt != settings.DefaultSystemPrompt {
+		t.Errorf("пустое поле → дефолт в done, получено %.40q", done.UsedSystemPrompt)
+	}
+	if done := send("кастом-промпт"); done.UsedSystemPrompt != "кастом-промпт" {
+		t.Errorf("кастом → он же в done, получено %q", done.UsedSystemPrompt)
+	}
+}
