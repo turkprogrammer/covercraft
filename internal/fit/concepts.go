@@ -205,8 +205,18 @@ func DefaultConcepts() []Concept {
 	// сохраняется — "Evaluate с DefaultConcepts() == старый Evaluate".
 	return []Concept{
 		{
-			Name:    "распределённые системы",
-			Trigger: regexp.MustCompile(`(?i)распредел[её]нн|event-driven|микросервисн|микросервис`),
+			Name: "распределённые системы",
+			// Русские словоформы event-driven обязаны быть в триггере: вакансия
+			// писала «Применение потоковой и событийной архитектуры в разработке»,
+			// а триггер знал только «event-driven» — требование уходило в «нет
+			// данных», хотя письмо прямо содержало «проектирование event-driven
+			// архитектур» и «at-least-once (Kafka consumer groups)». Английская
+			// формулировка находилась, русская — нет. Воспроизводилось на двух
+			// разных моделях, то есть это словарь, а не шум модели.
+			//
+			// «потоков» берётся только в паре с «событийн»: «потоковая передача
+			// видео» к распределённым системам отношения не имеет.
+			Trigger: regexp.MustCompile(`(?i)распредел[её]нн|event[- ]?driven|микросервис|событийн|потоков\w*\s+и\s+событийн|поток\w*\s+событийн`),
 			Signals: []Signal{
 				{Label: "Kafka/брокеры сообщений", Re: regexp.MustCompile(`(?i)\bkafka\b|очеред|брокер`)},
 				{Label: "event-driven паттерны", Re: regexp.MustCompile(`(?i)event-driven|consumer group|at-least-once|партици|offset|dead letter`)},
@@ -223,6 +233,38 @@ func DefaultConcepts() []Concept {
 			},
 		},
 		{
+			// «Медиа/видео и пайплайны рендеринга». Живой кейс Fullstack/mistral
+			// (октябрь 2026): требование «Обеспечение быстрого и отказоустойчивого
+			// рендеринга видео» закрывалось концептом «эксплуатация и observability»
+			// — его триггер содержит «отказоустойчив», а сигналами стали
+			// Prometheus/Grafana из письма (дашборды, не видеорендеринг). Понятие
+			// стоит ДО observability: видео-требование обязано судиться по
+			// видео-фактам, а не по общим признакам надёжности.
+			Name:    "медиа/видео и пайплайны рендеринга",
+			Trigger: regexp.MustCompile(`(?i)видео|видеоред|рендер|кодек|стрим|плеер|media|video|монтаж|аудио`),
+			Signals: []Signal{
+				// Границы слова обязательны: `stream` без \b ловился в «downstream-
+				// синхронизация», `player` — в «multiplayer». Медиа-концепт получал
+				// ложные сигналы в профиле, conceptPrimaryGap считал, что
+				// видеоопыт есть, и требование «рендеринг видео» закрывалось
+				// соседним концептом observability по дашбордам Prometheus.
+				//
+				// Латинское `stream` берётся только рядом со словом о видео:
+				// «Kafka consumer groups (Train, Export, Stream)» и «Streaming
+				// replication» — поток данных и репликация PostgreSQL, а не
+				// видеопоток. Без такой оговорки медиа-концепт набирал лишний
+				// сигнал, и требование по видео уходило дальше по списку.
+				{Label: "видео/медиа-пайплайн", Re: regexp.MustCompile(
+					`(?i)видео|\bvideo\b|медиа|\bmedia\b|рендер|\brender\b|кодек|\bcodec\b|ffmpeg|` +
+						`(?:\bstream\w*\b|плеер|\bplayer\w*\b).{0,30}(видео|\bvideo\b|медиа|\bmedia\b|контент|\bcontent\b)|` +
+						`(видео|\bvideo\b|медиа|\bmedia\b|контент|\bcontent\b).{0,30}(?:\bstream\w*\b|плеер|\bplayer\w*\b)`)},
+				// `экспорт` без контекста ловил «автоматический экспорт моделей
+				// каждые 30 минут» — экспорт ML-моделей, а не видео. Термин
+				// остаётся, но только рядом со словом о видео.
+				{Label: "монтаж/транскодинг/экспорт", Re: regexp.MustCompile(`(?i)монтаж|транскод|\btranscod\w*|\bhls\b|\bdash\b|\bmpeg\b|аудио|\baudio\b|экспорт.{0,25}(видео|видеоролик|ролик|клип|контент|стрим|поток|asset)`)},
+			},
+		},
+		{
 			Name:    "эксплуатация и observability",
 			Trigger: regexp.MustCompile(`(?i)эксплуатац|мониторинг|отказоустойч|деградац|observability|наблюдае|алерт|инцидент`),
 			Signals: []Signal{
@@ -231,6 +273,12 @@ func DefaultConcepts() []Concept {
 				{Label: "SQL-Top/профайлинг", Re: regexp.MustCompile(`(?i)sql.?top|профайлер|pg_stat|explain`)},
 				{Label: "retries/deadlines/идемпотентность", Re: regexp.MustCompile(`(?i)retries|deadlines|идемпотентн|консистентн|at-least-once`)},
 				{Label: "uptime/sla/релизы", Re: regexp.MustCompile(`(?i)uptime|sla|релизн|degrad|fallback`)},
+				// Живой кейс SRE (сентябрь 2026): требование «observability
+				// (мониторинг, логи, трейсинг)» закрывалось фактом Prometheus,
+				// хотя письмо честно писало «Опыт интеграции OpenTelemetry/Tempo
+				// отсутствует». Без отдельного сигнала трейсинга отрицание
+				// неотличимо от молчания, и пробел не виден.
+				{Label: "трейсинг/телеметрия", Re: regexp.MustCompile(`(?i)opentelemetry|jaeger|zipkin|\btempo\b|трейсинг|трассиров|\bspan\b`)},
 			},
 		},
 		{
@@ -265,7 +313,7 @@ func DefaultConcepts() []Concept {
 			Trigger: regexp.MustCompile(`(?i)ооп|solid|паттерн|проектирова.{0,15}шаблон|принципы`),
 			Signals: []Signal{
 				{Label: "SOLID/GRASP", Re: regexp.MustCompile(`(?i)solid|grasp|ооп|объектно-ориент`)},
-				{Label: "паттерны/архитектурные стили", Re: regexp.MustCompile(`(?i)паттерн|шаблон|hexagonal|ddd|strategy|слой|layer`)},
+				{Label: "паттерны/архитектурные стили", Re: regexp.MustCompile(`(?i)паттерн|шаблон|hexagonal|ddd|strategy|слой|\blayer\b`)},
 			},
 		},
 		{
@@ -274,6 +322,25 @@ func DefaultConcepts() []Concept {
 			Signals: []Signal{
 				{Label: "алгоритмы/данные в проектах", Re: regexp.MustCompile(`(?i)очеред|приоритет|индекс|классификац|алгоритм|дерев|кэш|хеш`)},
 				{Label: "нагрузочная практика", Re: regexp.MustCompile(`(?i)rps|p99|p95|throughput|эл/с`)},
+			},
+		},
+		{
+			// Живой кейс Fullstack Backend (сентябрь 2026): требование «Практический
+			// опыт fullstack-разработки в реальных B2C/B2B-продуктах с полным
+			// циклом доведения фичей до продакшна» уходило в «не закрыто ничем»,
+			// хотя письмо перечислило Fraud Engine, Bundle ID, Domain ID и
+			// Geo-mapping с метриками. Причина — концепта на такую формулировку
+			// не было: слово «fullstack» в требовании есть, а сигналы искали
+			// буквальное «fullstack» в письме, где оно стояло только в
+			// заголовке буллета.
+			//
+			// Сигналы — по продукту и полному циклу, а не по слову «fullstack».
+			Name:    "продуктовая разработка полного цикла",
+			Trigger: regexp.MustCompile(`(?i)fullstack|full.?stack|b2c|b2b|продукт.{0,15}разработ|разработ.{0,15}продукт|полн.{0,10}цикл|доведен.{0,15}до продакшна|от анализа до`),
+			Signals: []Signal{
+				{Label: "продукт с метриками", Re: regexp.MustCompile(`(?i)fraud engine|stable id|bundle id|domain id|geo.?mapping|processmanager|task flow|sql-top`)},
+				{Label: "production-нагрузка", Re: regexp.MustCompile(`(?i)production|продакшен|RPS|10 000|1M\+|3\.1M|416K|F1 92|P99|P95`)},
+				{Label: "полный цикл до пользователя", Re: regexp.MustCompile(`(?i)от анализа до|полн.{0,10}цикл|интеграц|деплой|релиз|мониторинг|продакшен|эксплуатац`)},
 			},
 		},
 		{
@@ -308,7 +375,7 @@ func DefaultConcepts() []Concept {
 			Signals: []Signal{
 				{Label: "тесты в проектах", Re: regexp.MustCompile(`(?i)test|тест|unit|e2e|phpunit|покрытие`)},
 				{Label: "TDD/методологии", Re: regexp.MustCompile(`(?i)\btdd\b|red.?green|модульн|интеграц|тестован`)},
-				{Label: "тестовая инфраструктура", Re: regexp.MustCompile(`(?i)dockertest|table.?driven|fuzz|race|покрытие`)},
+				{Label: "тестовая инфраструктура", Re: regexp.MustCompile(`(?i)dockertest|table.?driven|\bfuzz\b|\brace\b|покрытие`)},
 			},
 		},
 		{
@@ -421,8 +488,23 @@ func DefaultConcepts() []Concept {
 			Trigger: regexp.MustCompile(`(?i)денежн|money.?arithmetic|монет|финансов.{0,15}арифметик|precision|точн.{0,10}арифметик|float|численн.{0,10}точност|numer`),
 			Signals: []Signal{
 				{Label: "integer/decimal-based", Re: regexp.MustCompile(`(?i)integer|decimal|целочислен|fixed.?point|int64`)},
-				{Label: "precision/точность", Re: regexp.MustCompile(`(?i)precision|точн|без ошибки|без потери|exact`)},
+				{Label: "precision/точность", Re: regexp.MustCompile(`(?i)precision|точн|без ошибки|без потери|\bexact\b`)},
 				{Label: "no-float-for-money", Re: regexp.MustCompile(`(?i)float|плавающ|floating|числ с плавающей|без float|никак float|не использ float`)},
+			},
+		},
+		{
+			// «Агентские системы и Tool Use». Живой кейс Fullstack/mistral
+			// (октябрь 2026): обязанность «Улучшение логики AI-агентов
+			// (распознавание намерений, подбор футажей, сборка монтажа,
+			// контекстное управление диалогом)» закрывалась письмом, где про
+			// агентов нет ничего — только «AI-системы»: normToken срезает дефис,
+			// и «AI-агентов» даёт единственный generic-токен «ai», который
+			// находится в «AI-системы». Понятие стоит ДО GenAI/LLM.
+			Name:    "агентские системы и Tool Use",
+			Trigger: regexp.MustCompile(`(?i)агент|agent|tool[. _-]?use|function[. _-]?call|многошагов|цепочк.{0,25}рассужд|reasoning chain|планировщик`),
+			Signals: []Signal{
+				{Label: "агентская логика / Tool Use", Re: regexp.MustCompile(`(?i)агент|agent|tool[. _-]?use|function[. _-]?call|вызов инструмент`)},
+				{Label: "цепочки рассуждений / контекст диалога", Re: regexp.MustCompile(`(?i)многошагов|цепочк.{0,25}рассужд|распознаван.{0,20}намерен|диалог|планировщик|planner`)},
 			},
 		},
 		{
@@ -467,6 +549,29 @@ func DefaultConcepts() []Concept {
 			},
 		},
 		{
+			// Живой кейс PHP-вакансии (сентябрь 2026): требование «Умение
+			// самостоятельно вести сложные технические задачи от анализа до
+			// результата» уходило в «[нет данных]», хотя письмо писало «Ведение
+			// сложных задач от анализа до продакшена в одиночку или как ключевой
+			// инженер». Причина — требование без латиницы и без стажа не
+			// задевало триггеры существующих концептов («опыт инженер», «N лет»),
+			// и про самостоятельное ведение не было сигналов ни в одном.
+			//
+			// Сигналы намеренно про ВЛАДЕНИЕ задачей целиком, а не про «работу
+			// в команде»: «самостоятельно/в одиночку» отличает умение довести
+			// задачу от участия в чужом процессе.
+			Name: "самостоятельное ведение задач",
+			Trigger: regexp.MustCompile(`(?i)самостоятельн.{0,30}(задач|техническ|вести|разработ)|` +
+				`вести.{0,20}задач.{0,30}(анализ|результат|продакшен)|` +
+				`(от|со) анализа до (результата|продакшена)|` +
+				`самостоятельн.{0,20}(инженер|разработчик)|independently|end.?to.?end.{0,20}(feature|task)`),
+			Signals: []Signal{
+				{Label: "задача от анализа до результата", Re: regexp.MustCompile(`(?i)от анализа до (результата|продакшена|продакшен)|сквозн|end.?to.?end|в одиночку|самостоятельн`)},
+				{Label: "ключевой инженер / соло-владение", Re: regexp.MustCompile(`(?i)ключев.{0,5}инженер|основн.{0,10}(решени|задач)|в одиночку|самостоятельн|sole|owner`)},
+				{Label: "продукт/фича доведена до продакшена", Re: regexp.MustCompile(`(?i)продакшен|продакшн|production|релиз|запустил|вывел в|дове[лд]`)},
+			},
+		},
+		{
 			// «Кросс-функциональные команды / ведущие роли» — концепт
 			// по работе в командах и взаимодействию с ML-специалистами.
 			// Триггер по «кросс-функционал», «межкоманд», «ведущ. роли»,
@@ -478,6 +583,17 @@ func DefaultConcepts() []Concept {
 				{Label: "Agile/командная работа", Re: regexp.MustCompile(`(?i)Agile|Scrum|Kanban|спринт|команд|team|cross-functional|межкоманд`)},
 				{Label: "взаимодействие с ML-специалистами", Re: regexp.MustCompile(`(?i)ML-?специалист|data.?science|машинн.{0,10}обуч|ML-?инженер|ML-?команд|ML-?спринт`)},
 				{Label: "code review / менторство", Re: regexp.MustCompile(`(?i)code review|code-?review|ментор|mentoring|наставниц|ревью|review|decompos|декомпоз`)},
+			},
+		},
+		{
+			// «Игровая индустрия и геймдев». Триггер намеренно без «игр»:
+			// в RE2 нет границ слов для кириллицы, и «игр» матчится внутри
+			// «миграци|» — а такое требование не про игры.
+			Name:    "игровая индустрия и геймдев",
+			Trigger: regexp.MustCompile(`(?i)игров|видеоигр|геймдев|gamedev|издател|игроков`),
+			Signals: []Signal{
+				{Label: "игры/геймдев", Re: regexp.MustCompile(`(?i)pathfinder chronicles|desert racer|yandex игр|игров|геймдев|gamedev`)},
+				{Label: "контент и механики игры", Re: regexp.MustCompile(`(?i)pathfinder chronicles|концовок|концовки|ветвящ|survival|выживач|игровой цикл`)},
 			},
 		},
 	}

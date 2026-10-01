@@ -10,6 +10,17 @@ const phpVacancy = `Ищем PHP-разработчика (Middle + / Senior).
 Проектировать и разрабатывать новый функционал, высоконагруженные модули,
 оценка эффекта через A/B тесты.`
 
+// fullLetter оборачивает тело письма в структурную обвязку v4 (секция
+// адаптации, строка стека, контакты, финальная строка): тесты отдельных правил
+// не должны спотыкаться об инварианты структуры — их проверяет
+// TestV4VerbatimObligations.
+func fullLetter(body string) string {
+	return body + "\nАдаптация под ваш стек: пробелов нет — всё закрыто фактами.\n" +
+		"Стек: Go, PHP, ML, Kafka, PostgreSQL, Docker\n" +
+		"+7 (000) 000-00-00 | Telegram: @handle | https://example.org/ | github.com/example\n" +
+		"Буду рад обсудить ваши задачи. Спасибо за внимание!\n"
+}
+
 func TestCleanLetterPasses(t *testing.T) {
 	letter := `Здравствуйте! Меня заинтересовала ваша вакансия PHP-разработчик (Middle + / Senior).
 
@@ -18,9 +29,13 @@ func TestCleanLetterPasses(t *testing.T) {
 • Highload: Fraud Engine (Random Forest на Go, 92% F1, P95 < 4.2ms), Stable ID (Kafka, 10 000 RPS).
 • A/B: event-driven сравнение версий моделей через Kafka (traffic split 50/50).
 
+Адаптация под ваш стек: пробелов нет — всё закрыто фактами.
+
 Стек: Go, PHP, ML, PostgreSQL, Redis, Kafka, Docker, Linux.
 
-+7 (000) 000-00-00 | Telegram: @example`
++7 (000) 000-00-00 | Telegram: @example
+
+Буду рад обсудить ваши задачи. Спасибо за внимание!`
 	r := Check(letter, phpVacancy)
 	if !r.OK() {
 		t.Errorf("чистое письмо не должно давать предупреждений:\n%s", strings.Join(r.Warnings, "\n"))
@@ -103,7 +118,7 @@ func TestMissingObligations(t *testing.T) {
 
 func TestNoVacancySkipsObligationWarnings(t *testing.T) {
 	letter := `Здравствуйте! Стек: Go, PHP.` // голый текст без обязательств
-	r := Check(letter, "")
+	r := Check(fullLetter(letter), "")
 	if !r.OK() {
 		t.Errorf("без вакансии обязательства проверять нельзя: %v", r.Warnings)
 	}
@@ -118,7 +133,7 @@ func TestStackLineVariants(t *testing.T) {
 	}
 	// Слово «стек» в тексте (не строка стека) — не ложное срабатывание.
 	ok := "Мы стекали микросервисы годами.\nСтек: Go, PHP, PostgreSQL."
-	if r2 := Check(ok, ""); !r2.OK() {
+	if r2 := Check(fullLetter(ok), ""); !r2.OK() {
 		t.Errorf("ложное срабатывание на слове «стек»: %v", r2.Warnings)
 	}
 }
@@ -247,7 +262,7 @@ Go, PHP, ML, Laravel, Symfony, Yii2, Docker`
 
 func TestRedisLocksAllowedWhenVacancyNeeds(t *testing.T) {
 	// Вакансия прямо требует блокировки/rate limiting — упоминание законно.
-	r := Check("• Инфраструктура: Redis (кэш, блокировки).", "Требуется rate limiting и блокировки на Redis")
+	r := Check(fullLetter("• Инфраструктура: Redis (кэш, блокировки)."), "Требуется rate limiting и блокировки на Redis")
 	if !r.OK() {
 		t.Errorf("блокировки при требовании вакансии помечены ошибочно: %v", r.Warnings)
 	}
@@ -302,5 +317,97 @@ func TestFraudDetectionEngineCountsAsOwner(t *testing.T) {
 	}
 	if strings.Contains(got, "Fraud Engine (92% F1") {
 		t.Errorf("обязательство ложно считает Fraud Engine потерянным:\n%s", got)
+	}
+}
+
+// TestV4VerbatimObligations — требования v4, проверяемые детерминированно:
+// секция адаптации, финальная строка, строка контактов, префикс стека и
+// запрет самоуничижительного начала строки пробела.
+func TestV4VerbatimObligations(t *testing.T) {
+	vac := "Ищем Go-разработчика. Требуется Kafka, PostgreSQL, Kubernetes."
+	clean := "Go: Fraud Engine (multi-tenancy), Stable ID (Kafka, 10 000 RPS).\n" +
+		"Адаптация под ваш стек: Kubernetes не эксплуатировал — опыт Docker Compose переносится.\n" +
+		"Стек: Go, PHP, ML, Kafka, PostgreSQL, Docker, Linux\n" +
+		"+7 (000) 000-00-00 | Telegram: @handle | https://example.org/ | github.com/example\n" +
+		"Буду рад обсудить ваши задачи. Спасибо за внимание!"
+	if w := Check(clean, vac).Warnings; len(w) != 0 {
+		t.Errorf("полное письмо не должно давать замечаний: %v", w)
+	}
+
+	missing := Check("Go: Fraud Engine. Kubernetes не эксплуатировал.", vac).Warnings
+	for _, want := range []string{"финальная строка", "контакты", "Стек:", "Адаптация"} {
+		if !strings.Contains(strings.Join(missing, " "), want) {
+			t.Errorf("ожидал замечание про %q, получено: %v", want, missing)
+		}
+	}
+
+	// Самоуничижительное начало строки пробела — красный флаг Senior (v4 §4).
+	weak := Check("Адаптация под ваш стек:\nне работал с Kubernetes, но есть Docker Compose.", vac).Warnings
+	if !strings.Contains(strings.Join(weak, " "), "не работал") {
+		t.Errorf("строка пробела, начатая с «не работал», обязана быть замечена: %v", weak)
+	}
+}
+
+// TestFabricatedNameFlagged — класс фабрикаций, который постпроверка молча
+// пропускала: имя, выдуманное моделью из Telegram-хендла. Живой случай —
+// «Меня зовут Турал…» и подпись «С уважением, / Турал», при том что имени
+// кандидата в профиле нет.
+func TestFabricatedNameFlagged(t *testing.T) {
+	intro := "Меня зовут Турал. Уверен, что мой опыт будет полезен."
+	if got := strings.Join(Check(intro+"\n\nС уважением,\nТурал", "").Warnings, " "); !strings.Contains(got, "Меня зовут") {
+		t.Errorf("«Меня зовут X» без имени в профиле не помечено: %v", Check(intro, "").Warnings)
+	}
+	sig := "Go, PHP, Kafka.\n\nС уважением,\nТурал"
+	if got := strings.Join(Check(sig, "").Warnings, " "); !strings.Contains(got, "подпись") {
+		t.Errorf("подпись с именем, которого нет в профиле, не помечена: %v", Check(sig, "").Warnings)
+	}
+}
+
+// TestSignatureContactsNotMistakenForName — строка контактов после
+// «С уважением» не имя: в ней цифры, «|», «@» и точки. Ложное срабатывание
+// здесь было бы хуже пропуска.
+func TestSignatureContactsNotMistakenForName(t *testing.T) {
+	letter := "Go, PHP, Kafka.\n\nБуду рад обсудить ваши задачи.\n\nС уважением,\n" +
+		"+7 (000) 000-00-00 | Telegram: @example | https://yusupov-tech.ru/ | github.com/turkprogrammer"
+	for _, w := range Check(letter, "").Warnings {
+		if strings.Contains(w, "подпись") {
+			t.Errorf("строка контактов ошибочно принята за имя: %s", w)
+		}
+	}
+}
+
+// TestCheckProfileFlagsTermsAbsentFromProfile — живой баг (вакансия IAM,
+// сентябрь 2026): письмо заявило «XSSI sanitization» и «basic auth», которых
+// НЕТ ни в одном context/*.md (в профиле только XSS sanitization). Audit работал
+// без профиля, поэтому выдумка проходила как есть, а требование «основы
+// веб-безопасности» оставалось незакрытым — то есть письмо врало и не помогало.
+func TestCheckProfileFlagsTermsAbsentFromProfile(t *testing.T) {
+	profile := "CMS Blog: Go (Hexagonal, httprouter) + React; SQLite, JWT, XSS sanitization, роли admin/editor. " +
+		"TLS/SSL: Caddy (Fraud Engine production). 152-ФЗ: PII-маскирование в логах."
+	letter := "Здравствуйте! Веб-безопасность: XSSI sanitization, JWT и basic auth-механизмами, " +
+		"TLS/SSL (Caddy), PII-маскирование (152-ФЗ). Спасибо!"
+
+	r := CheckProfile(letter, profile)
+	joined := strings.Join(r.Warnings, "\n")
+	for _, want := range []string{"XSSI", "basic auth"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("письмо заявило %q, которого нет в профиле — audit должен ругаться; получили: %v", want, r.Warnings)
+		}
+	}
+	// Реальные факты профиля ругаться не должны.
+	for _, ok := range []string{"XSS sanitization", "Caddy", "152-ФЗ", "JWT"} {
+		if strings.Contains(joined, ok) {
+			t.Errorf("ложное срабатывание на подтверждённом факте %q: %v", ok, r.Warnings)
+		}
+	}
+}
+
+// TestCheckProfileEmptyProfileIsSilent — без профиля (нет context/*.md) audit
+// не может судить о выдумках: молчит, иначе каждое письмо получало бы тонну
+// ложных замечаний у пользователей без профиля.
+func TestCheckProfileEmptyProfileIsSilent(t *testing.T) {
+	r := CheckProfile("Веб-безопасность: XSSI sanitization, basic auth, Hydra.", "")
+	if len(r.Warnings) != 0 {
+		t.Errorf("без профиля проверять нечего, получили: %v", r.Warnings)
 	}
 }

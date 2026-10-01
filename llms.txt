@@ -68,7 +68,7 @@ assets/icons/hicolor/       иконки: SVG-исходник + PNG 48–512
 | GET   | `/api/settings` | текущие настройки |
 | POST  | `/api/settings` | сохранить настройки |
 | POST  | `/api/generate` | `{vacancy}` → SSE: `delta`…, `done {letter, elapsedMs, warnings, fit, usedSystemPrompt}` |
-| POST  | `/api/prompt/compose` | `{vacancy}` → `{systemPrompt, dropSections, reason, truncated, sections, droppedBytes, elapsedMs, missingInvariants}` |
+| POST  | `/api/prompt/compose` | `{vacancy}` → `{dropSections, reason, sections, droppedBytes, elapsedMs}` — отбор разделов, системный промпт не возвращается |
 
 ## Сборка и тесты
 

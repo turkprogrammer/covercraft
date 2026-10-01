@@ -24,6 +24,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+
+	"github.com/turkprogrammer/covercraft/internal/cover"
+	"github.com/turkprogrammer/covercraft/internal/prompt"
 )
 
 // Вердикты Fit.Verdict.
@@ -62,6 +66,10 @@ type Req struct {
 	Text   string `json:"text"`
 	Source string `json:"source"` // Src* константа
 	Note   string `json:"note"`   // чем закрыто (проект/мост) или что делать
+	// Kind — "must" | "duty" | "nice" | "soft". «duty» — обязанность из
+	// блока обязанностей: пробел по ней виден, но вердикт до skip не
+	// роняет (обязанность ≠ обязательное требование).
+	Kind string `json:"kind,omitempty"`
 }
 
 // Fit — вердикт рекомендации. Score и Verdict считаются из одной
@@ -276,6 +284,7 @@ var bridges = map[string]bridge{
 	"rabbitmq":        {regexp.MustCompile(`(?i)kafka|очеред|брокер`), "мост: опыт брокеров сообщений → RabbitMQ"},
 	"rag":             {regexp.MustCompile(`(?i)классификац|машинн|ml|модел`), "мост: ML-опыт → RAG"},
 	"outbox":          {regexp.MustCompile(`(?i)at-least-once|идемпотентн|буферизац|polling|событийн.{0,20}журнал|журнал.{0,20}событ`), "мост: событийный журнал в БД с polling-потребителями (geolocation.alerts), буферизованный продюсер и идемпотентный Upsert → transactional outbox (без атомарности с транзакцией PG и брокерной доставки)"},
+	"rfc":             {regexp.MustCompile(`(?i)\badr\b|архитектурн.{0,20}решени|design[ _-]?doc|дизайн-документ|документаци|decision record`), "мост: архитектурные решения (ADR, документация в репозиториях) → RFC и дизайн-документы"},
 	"observability":   {regexp.MustCompile(`(?i)prometheus|grafana|мониторинг|трейсин|трейс`), "мост: опыт мониторинга метрик и дашбордов → observability"},
 }
 
@@ -395,6 +404,13 @@ var stopwords = map[string]bool{
 	// «float для денег не применяю»). Отбрасываем — токенный путь не
 	// работает, идёт concept-путь («точная денежная арифметика»).
 	"float": true, "precision": true,
+	// «b2c»/«b2b» — маркеры типа продукта, а не технологии. В требовании
+	// «fullstack-разработки в реальных B2C/B2B-продуктах» они давали
+	// reqTokens=[fullstack b2c b2b], из-за чего концепт-путь (он включается
+	// только при малом числе токенов) не срабатывал и требование уходило в
+	// «не закрыто ничем», хотя письмо перечисляло продукты с метриками.
+	// Живой кейс Fullstack Backend, сентябрь 2026.
+	"b2c": true, "b2b": true, "saas": true, "paas": true, "iaas": true,
 	// «trade-offs» — термин из требований архитектуры; не технология,
 	// поэтому токен «trade-offs» матчится в письме редко (обычно пишут
 	// «ADR», «trade-offs analysis»). Отбрасываем как стопворд, чтобы
@@ -455,7 +471,7 @@ func reqTokens(text string) []string {
 	var out []string
 	for _, m := range tokenRe.FindAllString(text, -1) {
 		t := normToken(m)
-		if t == "" || stopwords[t] || len(t) < 2 {
+		if t == "" || stopwords[t] || genericTokens[t] || len(t) < 2 {
 			continue
 		}
 		if !seen[t] {
@@ -473,8 +489,7 @@ func reqTokens(text string) []string {
 func findText(token, text string) bool {
 	lt := strings.ToLower(text)
 	// Основной токен — с границами слова (латиница из требования).
-	reMain := regexp.MustCompile(`(?i)(^|[^a-zа-я0-9])` + regexp.QuoteMeta(token) + `([^a-zа-я0-9]|$)`)
-	if reMain.MatchString(lt) {
+	if matchToken(token, lt) {
 		return true
 	}
 	// Альтернативы: кириллица — подстрока, латиница — с границами.
@@ -485,19 +500,95 @@ func findText(token, text string) bool {
 			}
 			continue
 		}
-		re := regexp.MustCompile(`(?i)(^|[^a-zа-я0-9])` + regexp.QuoteMeta(a) + `([^a-zа-я0-9]|$)`)
-		if re.MatchString(lt) {
+		if matchToken(a, lt) {
 			return true
 		}
 	}
 	return false
 }
 
+// matchToken — токен найден в тексте с границами слова, во всех написаниях.
+func matchToken(tok, lt string) bool {
+	for _, v := range tokenVariants(tok) {
+		if wordRe(v).MatchString(lt) {
+			return true
+		}
+	}
+	return false
+}
+
+// tokenVariants — написания одного и того же имени. Дефис, подчёркивание и
+// пробел — орфографические варианты одного термина, а не разные термины.
+//
+// Живой кейс АФЛТ-Системс (октябрь 2026): одно и то же требование
+// «Опыт работы с REST-API» закрывалось письмом, где тот же опыт записан как
+// «REST API» (через пробел), и уходило в «не закрыто», хотя в профиле десять
+// упоминаний «REST API». normToken даёт токен «rest-api», а в тексте письма
+// слова «rest» и «api» стоят порознь — подстрочного совпадения не было ни
+// одного. Разные прогоны на одних и тех же данных давали противоположные
+// вердикты только из-за написания.
+func tokenVariants(tok string) []string {
+	t := strings.ToLower(strings.TrimSpace(tok))
+	if !strings.ContainsAny(t, "-_ ") {
+		return []string{t}
+	}
+	parts := strings.FieldsFunc(t, func(r rune) bool { return r == '-' || r == '_' || r == ' ' })
+	if len(parts) < 2 {
+		return []string{t}
+	}
+	out := make([]string, 0, 4)
+	add := func(s string) {
+		if s == "" {
+			return
+		}
+		for _, v := range out {
+			if v == s {
+				return
+			}
+		}
+		out = append(out, s)
+	}
+	for _, sep := range []string{"-", " ", "_", "/"} {
+		add(strings.Join(parts, sep))
+	}
+	add(strings.Join(parts, ""))
+	return out
+}
+
+// wordReCache — кэш скомпилированных регулярок поиска токена: findText зовётся
+// на каждый токен × каждую клаузу, и компиляция на каждый вызов съедала всё
+// время на живых письмах.
+var wordReCache sync.Map
+
+func wordRe(v string) *regexp.Regexp {
+	if r, ok := wordReCache.Load(v); ok {
+		return r.(*regexp.Regexp)
+	}
+	r := regexp.MustCompile(`(?i)(^|[^a-zа-я0-9])` + regexp.QuoteMeta(v) + `([^a-zа-я0-9]|$)`)
+	wordReCache.Store(v, r)
+	return r
+}
+
 // negRe — маркеры отрицания опыта в предложении: письмо, честно
 // называющее пробел («С OpenTelemetry опыта нет, готов освоить»), не
 // должно считаться закрытием требования — это живой кейс, когда честное
 // письмо получало «закрыто в письме» по голой подстроке.
-var negRe = regexp.MustCompile(`(?i)опыта нет|нет опыта|опыта\s+(?:\S+\s+)?нет|не работал|не использ|отсутствует|не зафиксирован|не применял|готов освоить|освою|не приходилось`)
+var negRe = regexp.MustCompile(`(?i)опыта нет|нет опыта|опыта\s+(?:\S+\s+){0,3}нет|опыты?[^.!?;]{0,60}нет|нет\s+(?:\S+\s+){0,3}опыта|не работал|не использ|отсутствует|не зафиксирован|не применял|готов освоить|освою|не приходилось|не эксплуатировал|не развёртывал|не развертывал|не внедрял|не интегрировал|не настраивал|не деплоил|не управлял|не администрировал`)
+
+// profileGapRe — маркеры ограничителя-«честного пробела» в профиле.
+// Это НЕ отрицание опыта в письме, а разные пометки одного смысла: владелец
+// профиля прямо называет технологию пробелом, и строка не должна выдавать
+// сигнал опыта ни в источнике фактов, ни в ограничителях.
+//
+// Живой замер (октябрь 2026): из профиля извлекались ложные факты `render`
+// («НЕ писать про Canvas/WebGL-рендер»), `tracing`, `PostgreSQL` («НЕ писать
+// про PostgreSQL/ORM»), `SRE` («Стаж по SRE/сетям = честный пробел») —
+// ограничители, в которых эти слова названы, чтобы их НЕ заявлять.
+//
+// «не пробел» сюда НЕ входит намеренно: строка «A/B тестирование — НЕ
+// пробел: факт Stable ID — event-driven A/B через Kafka» называет ФАКТ, и
+// маркер «пробел» здесь отрицающий.
+var profileGapRe = regexp.MustCompile(`(?i)честн\w*\s+пробел|в профиле\s+нет|не писать про|не упоминать`)
 
 // backwardNegRe — маркеры, отрицающие клаузу целиком, включая стоящее до
 // них: «Transactional outbox на PostgreSQL: НЕ использовал» — отклоняет
@@ -506,7 +597,7 @@ var negRe = regexp.MustCompile(`(?i)опыта нет|нет опыта|опыт
 // «НЕ говорить «17+ лет PostgreSQL»» context/01:251). В negRe (маркеры
 // отрицания в ПИСЬМЕ) они НЕ добавлены: кандидат так свой опыт не
 // описывает, а клаузная логика письма уже отлажена.
-var backwardNegRe = regexp.MustCompile(`(?i)опыта нет|нет опыта|опыта\s+(?:\S+\s+)?нет|не работал|не использ|отсутствует|не зафиксирован|не применял|не приходилось|не заявля|не говор`)
+var backwardNegRe = regexp.MustCompile(`(?i)опыта нет|нет опыта|опыта\s+(?:\S+\s+){0,3}нет|опыты?[^.!?;]{0,60}нет|нет\s+(?:\S+\s+){0,3}опыта|не работал|не использ|отсутствует|не зафиксирован|не применял|не приходилось|не заявля|не говор|не эксплуатировал|не развёртывал|не развертывал|не внедрял|не интегрировал|не настраивал|не деплоил|не управлял|не администрировал`)
 
 // forwardNegRe — маркеры «готов освоить X»: отрицают только то, что стоит
 // ПОСЛЕ них. В профиле мост «bash-автоматизация → готов освоить
@@ -532,23 +623,317 @@ func sentences(text string) []string {
 // форма «OpenTelemetry, опыта нет» — маркер относится к предыдущей клаузе.
 // «готов освоить» сюда не входит: «Kafka, готов освоить» встречается и
 // после позитивного факта, и отрицанием его считать нельзя.
-var bareNegRe = regexp.MustCompile(`(?i)^\s*(опыта нет|нет опыта|опыта\s+(?:\S+\s+)?нет|не работал[а-яё]*|не использ\w*|отсутствует|не зафиксирован|не применял|не приходилось)\s*[.!]?\s*$`)
+var bareNegRe = regexp.MustCompile(`(?i)^\s*(опыта нет|нет опыта|опыта\s+(?:\S+\s+){0,3}нет|опыты?[^.!?;]{0,60}нет|нет\s+(?:\S+\s+){0,3}опыта|не работал[а-яё]*|не использ\w*|отсутствует|не зафиксирован|не применял|не приходилось)\s*[.!]?\s*$`)
+
+// bulletHeaderRe — жирный фрагмент в начале буллета: «**Media / Video / Render
+// pipelines:** опыт оптимизации…». Это ЗАГОЛОВОК раздела, а не факт: он
+// повторяет тему требования и ничего не утверждает.
+//
+// Живой кейс Fullstack Backend (сентябрь 2026): требование «Экспертиза в
+// Media/Video» закрывалось как «закрыто в письме», потому что слова media и
+// video находились в заголовке буллета «Media / Video / Render pipelines»,
+// а фактическая часть говорила «готовность осваивать медиа-конвейеры».
+// Слова из заголовка не доказывают опыт: их пишет и пустой буллет-мост.
+var bulletHeaderRe = regexp.MustCompile("^\\W*\\*\\*[^*]{1,80}\\*\\*")
+
+// isHeaderFragment — клауза состоит ТОЛЬКО из жирного заголовка, без
+// содержательной части. Именно такой фрагмент ничего не утверждает:
+//
+//	«**Media / Video / Render pipelines:**»            → заголовок, тема
+//	«**Kafka:** Stable ID, 10 000 RPS, at-least-once»  → факт, закрывает
+//
+// Заголовок с текстом после него фактом считается: там и правда написано про
+// Kafka. Регресс-тесты TestLongParenListIsNotAlternatives («**Kafka:** Stable
+// ID, 10 000 RPS») и TestProfileLimiterDoesNotLeakToOtherTokens ловят ровно
+// это, поэтому отбрасывать можно ТОЛЬКО заголовок целиком.
+// nextIsDeclaration — сразу за текущей клаузой, в том же буллете, идёт
+// декларация готовности/понимания. Клаузы разбираются sentences(), поэтому
+// граница буллета в них потеряна; восстанавливаем её по исходному тексту:
+// текущая клауза заканчивается на «;»/«,» (продолжение), а не на «.»/«?»/
+// «!» (новая мысль — следующий буллет или абзац).
+func nextIsDeclaration(clause, text string) bool {
+	idx := clauseIndex(text, clause)
+	if idx < 0 || idx+1 >= len(sentences(text)) {
+		return false
+	}
+	if !endsWithContinuation(clause, text, idx) {
+		return false
+	}
+	return understandingRe.MatchString(sentences(text)[idx+1])
+}
+
+// clauseIndex — номер клаузы в разбиении sentences по её содержимому.
+func clauseIndex(text, clause string) int {
+	for i, c := range sentences(text) {
+		if c == clause {
+			return i
+		}
+	}
+	return -1
+}
+
+// endsWithContinuation — перед разделителем в исходном тексте стоял «;» или
+// «,», а не «.»/«?»/«!».
+func endsWithContinuation(clause, text string, idx int) bool {
+	pos := strings.Index(text, clause)
+	if pos < 0 {
+		return false
+	}
+	tail := strings.TrimLeft(text[pos+len(clause):], " \t")
+	if tail == "" {
+		return false
+	}
+	switch tail[0] {
+	case ';', ',':
+		return true
+	}
+	return false
+}
+
+// closingBoldIndex — индекс конца ЖИРНОГО ЗАГОЛОВКА (открывающая рамка в
+// позиции 0, закрывающая — конец фрагмента). Возвращает индекс символа после
+// закрывающей рамки, либо -1.
+//
+// Раньше здесь был strings.Index(c[2:], "**"), который находил не закрывающую
+// рамку, а ПАРУ — при «**Media / Video / Render pipelines:** опыт …» в
+// «**Media / Video / Render pipelines:**» первая пара «**» стоит в начале, а
+// Index искал уже со второго символа и попадал на пару «:** » внутри текста.
+// Из-за этого заголовок не распознавался, а токены media/video из него
+// засчитывались как факт.
+func closingBoldIndex(c string) int {
+	if !strings.HasPrefix(c, "**") {
+		return -1
+	}
+	// Работаем в РУНАХ, а не в байтах: заголовок кириллический, и срез по
+	// байтам попадал внутрь символа — «**Media / Video / Render pipelines:**»
+	// давал 37 (байт) вместо 33 (рун), и head в конце содержал обрезок UTF-8.
+	rest := []rune(c[2:])
+	rBold := []rune("**")
+	rColonBold := []rune(":**")
+	if i := runeIndex(rest, rColonBold); i >= 0 {
+		return 2 + i + len(rColonBold)
+	}
+	if i := runeIndex(rest, rBold); i >= 0 {
+		return 2 + i + len(rBold)
+	}
+	return -1
+}
+
+// runeIndex — индекс подстроки-рун в срезе рун.
+func runeIndex(hay []rune, needle []rune) int {
+	if len(needle) == 0 || len(needle) > len(hay) {
+		return -1
+	}
+	for i := 0; i+len(needle) <= len(hay); i++ {
+		match := true
+		for j := range needle {
+			if hay[i+j] != needle[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return i
+		}
+	}
+	return -1
+}
+
+// stripListMarker — убирает маркер списка в начале клаузы: «- **Media:**» →
+// «**Media:**», «* пункт» → «пункт». Без этого заголовок буллета не распознаётся:
+// живое письмо начинало буллет с «- **Media / Video / Render pipelines:**», и
+// жирная рамка оказывалась не в начале клаузы.
+func stripListMarker(clause string) string {
+	c := strings.TrimSpace(clause)
+	for _, m := range []string{"- ", "* ", "+ ", "• "} {
+		if strings.HasPrefix(c, m) {
+			return strings.TrimSpace(c[len(m):])
+		}
+	}
+	return c
+}
+
+// inBulletHeader — токен встречается ТОЛЬКО в жирном заголовке буллета, а не в
+// его содержательной части. Разрезаем клаузу по рамке и проверяем остаток:
+//
+//	«**Media / Video:** опыт оптимизации…» → media/video в заголовке,
+//	                                  «опыт оптимизации…» — без них;
+//	«**Kafka:** Stable ID, 10 000 RPS»  → kafka в заголовке, но «Stable ID,
+//	                                  10 000 RPS» — факт про Kafka.
+//
+// Возвращает true, только если в остатке токена НЕТ. Заголовок повторяет тему
+// требования и не доказывает опыт: его пишет и мост «**Media:** готовность
+// осваивать». Живой кейс Fullstack Backend (сентябрь 2026) — требование
+// «Экспертиза в Media/Video» закрывалось такими заголовками.
+func inBulletHeader(token, clause, text string) bool {
+	c := stripListMarker(clause)
+	if !strings.HasPrefix(c, "**") {
+		return false
+	}
+	end := closingBoldIndex(c)
+	if end < 0 {
+		return false
+	}
+	head := strings.TrimSuffix(strings.TrimSpace(string([]rune(c)[2:end])), "**")
+	rest := strings.TrimSpace(string([]rune(c)[end:]))
+	if !findText(token, head) {
+		return false
+	}
+	// Различаем ТЕМУ буллета и СОДЕРЖАНИЕ.
+	//
+	//	«**Kafka:** Stable ID, 10 000 RPS»  → тема=Kafka, содержание=факт.
+	//	    Kafka засчитывается: буллет О нём и содержит подтверждение.
+	//	«**Media / Video / Render pipelines:** опыт оптимизации 10 000 RPS
+	//	  (Stable ID); готовность осваивать медиа-конвейеры» → тема=Media/Video,
+	//	  содержание=чужие факты + декларация готовности. Тема без
+	//	  подтверждения в содержании НЕ доказывает опыт.
+	//
+	// Решает объём содержательной части: если в ней есть хоть один ФАКТОПОДОБНЫЙ
+	// фрагмент (метрика, имя проекта, технология), заголовок считается
+	// подтверждённым. Для Media/Video содержание — «готовность осваивать»,
+	// декларация, а не факт.
+	restStripped := strings.TrimLeft(rest, ",;:-  ")
+	if restStripped == "" {
+		return true // заголовок без содержания: тема заявлена, факта нет
+	}
+	// Декларация готовности/понимания в содержании — заголовок не
+	// подтверждён: «**Media:** готовность осваивать медиа-конвейеры».
+	if understandingRe.MatchString(rest) {
+		return true
+	}
+	// Декларация может стоять в СЛЕДУЮЩЕЙ клаузе того же буллета:
+	// «**Media / Video:** опыт оптимизации 10 000 RPS (Stable ID); готовность
+	// осваивать медиа-конвейеры». Обе части — про один буллет, и вторая
+	// прямо говорит, что опыта в медиа нет. Считать заголовок
+	// подтверждённым содержимым первой части нельзя.
+	if nextIsDeclaration(clause, text) {
+		return true
+	}
+	// Иначе содержание подтверждает заголовок: «**Kafka:** Stable ID,
+	// 10 000 RPS», «**PostgreSQL (глубокое знание)**, MySQL, ClickHouse».
+	return false
+}
+
+func isHeaderFragment(clause string) bool {
+	c := stripListMarker(clause)
+	if !strings.HasPrefix(c, "**") {
+		return false
+	}
+	end := closingBoldIndex(c)
+	if end < 0 {
+		return false
+	}
+	// Хвост после закрывающей рамки — содержательная часть буллета.
+	rest := strings.TrimLeft(strings.TrimSpace(c[end:]), ":*-—  ")
+	rest = strings.TrimLeft(rest, ":*-—  ")
+	return rest == ""
+}
+
+// understandingRe — декларация понимания/готовности вместо факта опыта:
+// «понимаю архитектуру оркестрации», «прочная база в Docker Compose», «готов
+// перенести на K8s, Helm». Живой случай: такое упоминание закрывало требование
+// «Kubernetes — эксплуатация» как «закрыто в письме», хотя опыта нет. Работает
+// в паре с findText: самого слова «понимаю» мало — в клаузе должен быть ещё
+// токен технологии.
+// Формы «(быстро|легко) освоить/перенести» добавлены в сентябре 2026 после
+// живого кейса SRE-вакансии: письмо писало «что позволяет быстро освоить
+// отладку приложений в K8s», а требование «Kubernetes — опыт отладки» считалось
+// закрытым, потому что «готов» в этой формулировке нет.
+var understandingRe = regexp.MustCompile(`(?i)понима[юе]\w*|разбира[юесь]\w*|понятн\w*|понял\w*|готов.{0,30}перенести|перенесу|освою|готов.{0,20}освоить|` +
+	// готовность/готовость/способность + любой инфинитив переноса опыта.
+	// Живой кейс Fullstack Backend (сентябрь 2026): «готовность осваивать
+	// медиа-конвейеры» закрывала требование «Экспертиза в Media/Video» как
+	// «закрыто в письме» — прежнее правило знало только «готов … освоить», а
+	// в письме было «готовн-ость осва-ивать»: и суффикс -ость, и инфинитив
+	// осваивать вместо освоить.
+	`готовност[ьи]|готовост[ьи]|способност[ьи]|готов.{0,15}(?:переносить|перенести|осваивать|освоить|изучать)|` +
+	`(?:готов|буду|смогу|хочу)\s+(?:быстро\s+|легко\s+)?(?:осваивать|переносить|изучать)|` +
+	`(?:осваивать|переносить)\s+(?:на новый|под|в этой|эту|на друг)|` +
+	`(?:быстро|легко|позволяет|позволит|смогу|легко\s+и)\s+(?:быстро\s+|легко\s+)?(?:освоить|перенести)`)
 
 // clauseNegated — клауза под отрицанием: маркер в ней самой или в
 // следующей клаузе, если та состоит из одного маркера.
 func clauseNegated(clauses []string, i int) bool {
-	if negRe.MatchString(clauses[i]) {
+	if negRe.MatchString(clauses[i]) || profileGapRe.MatchString(clauses[i]) {
 		return true
 	}
 	return i+1 < len(clauses) && bareNegRe.MatchString(clauses[i+1])
 }
 
-// findFact — токен назван в тексте как факт: существует клауза, где токен
-// есть, а отрицания нет.
-func findFact(token, text string) bool {
+// clauseNegatedFor — как clauseNegated, но с учётом «хвостового» отрицания
+// САМОГО токена в соседней клаузе того же буллета.
+//
+// Живой кейс АФЛТ-Системс (октябрь 2026): буллет адаптации
+// «- JSON-RPC: REST API — laravel-api, URL-Shortener; JSON-RPC — не применял,
+// готов оперативно освоить». sentences() режет по «;», поэтому требование
+// «Опыт работы с JSON-RPC» видело «JSON-RPC» в первой клаузе без всякого
+// отрицания и закрывалось «закрыто в письме» — письмо честно говорило
+// обратное. bareNegRe здесь не спасает: он требует, чтобы вся следующая
+// клауза СОСТОЯЛА из маркера, а она начинается с «JSON-RPC —».
+//
+// Правило намеренно узкое: отрицание должно относиться к тому же токену.
+// Соседняя клауза про другой предмет («опыта нет» про OpenTelemetry рядом с
+// фактом про observability) требование не роняет — за этот случай отвечает
+// scope-проверка ниже.
+func clauseNegatedFor(clauses []string, i int, token string) bool {
+	if clauseNegated(clauses, i) {
+		return true
+	}
+	if token == "" {
+		return false
+	}
+	for j := i + 1; j < len(clauses) && j <= i+2; j++ {
+		if !negRe.MatchString(clauses[j]) && !profileGapRe.MatchString(clauses[j]) {
+			continue
+		}
+		if findText(token, clauses[j]) {
+			return true
+		}
+	}
+	return false
+}
+
+// allowedUnderstandingRe — профиль ЯВНО разрешает декларацию понимания:
+// «WAL-G/Patroni: НЕ работал; допустимо «понимаю принципы WAL»» (context/01).
+// Такая строка — разрешение владельца профиля на конкретную формулировку, и она
+// должна побеждать understandingRe: живой кейс SRE-вакансии — сильнейшее
+// требование PostgreSQL падало в «нет данных» из-за «Понимаю принципы WAL»,
+// хотя профиль разрешил ровно эту форму.
+var allowedUnderstandingRe = regexp.MustCompile(`(?i)допустимо\s+[«"]?[^.\n]{0,40}(понима|разбира|знаком)|` +
+	`разреш(ено|ается)\s+[«"]?[^.\n]{0,40}(понима|разбира|знаком)|` +
+	`(можно|допустимо)\s+(писать|говорить|заявлять)\s+[«"]?[^.\n]{0,40}(понима|разбира)`)
+
+// understandingAllowed — профиль разрешает декларацию понимания для токена.
+func understandingAllowed(token, profile string) bool {
+	if strings.TrimSpace(profile) == "" {
+		return false
+	}
+	for _, c := range sentences(profile) {
+		if findText(token, c) && allowedUnderstandingRe.MatchString(c) {
+			return true
+		}
+	}
+	return false
+}
+
+// findFact — токен назван в тексте как факт: существует клауза, где токен есть,
+// а отрицания нет и это не декларация понимания («понимаю X», «готов перенести
+// на X») — такая клауза описывает знакомство с темой, а не работу с ней.
+// profile передаётся, чтобы разрешение профиля («допустимо понимать принципы
+// WAL») могло перевесить декларацию понимания в письме. Пустая строка —
+// профиля нет, правило разрешения молча выключено.
+func findFact(token, text, profile string) bool {
 	clauses := sentences(text)
+	allowed := understandingAllowed(token, profile)
 	for i, c := range clauses {
-		if findText(token, c) && !clauseNegated(clauses, i) {
+		if findText(token, c) && !clauseNegatedFor(clauses, i, token) &&
+			(!understandingRe.MatchString(c) || allowed) &&
+			// Список стека вакансии в буллете адаптации называет технологии
+			// работодателя, а не опыт кандидата (живой кейс Fullstack/mistral).
+			!adaptationClause(text, token, c) &&
+			// Токен из заголовка буллета («**Media / Video:** …») тему
+			// повторяет, но ничего не утверждает: как факт он не засчитывается.
+			!isHeaderFragment(c) && !inBulletHeader(token, c, text) {
 			return true
 		}
 	}
@@ -557,8 +942,8 @@ func findFact(token, text string) bool {
 
 // tokenNegatedOnly — токен встречается в тексте, но только с отрицанием
 // (ни одного «фактового» вхождения).
-func tokenNegatedOnly(token, text string) bool {
-	return findText(token, text) && !findFact(token, text)
+func tokenNegatedOnly(token, text, profile string) bool {
+	return findText(token, text) && !findFact(token, text, profile)
 }
 
 // altListRe — OR-списки технологий в тексте требования. Вакансия
@@ -569,9 +954,14 @@ func tokenNegatedOnly(token, text string) bool {
 // OR-списком НЕ считается: «Kafka, PostgreSQL» — оба нужны.
 var (
 	parenAltRe = regexp.MustCompile(`\(([^()]*)\)`)
+
 	slashAltRe = regexp.MustCompile(`(?i)[a-z][a-z0-9+#.-]{1,30}\s*/\s*[a-z][a-z0-9+#.-]{1,30}`)
 	orAltRe    = regexp.MustCompile(`(?i)[a-z][a-z0-9+#.-]{1,30}(?:\s*,?\s+или\s+[a-z][a-z0-9+#.-]{1,30})+`)
 )
+
+// maxAltItems — сколько элементов в скобках ещё считаются перечнем
+// взаимозаменяемых альтернатив. Длинный перечень — описание требования.
+const maxAltItems = 4
 
 // altGroups — группы альтернатив требования, каждая как список
 // канонических токенов.
@@ -583,6 +973,16 @@ func altGroups(reqText string) [][]string {
 		}
 	}
 	for _, m := range parenAltRe.FindAllStringSubmatch(reqText, -1) {
+		// Скобки — не всякий перечень альтернатив. Короткий список из
+		// перечисляемых фич («(client credentials, device flow)») — это
+		// описание требования, а не «подойдёт любой из». Живой кейс (вакансия
+		// IAM): перечисление из 5 auth-потоков разбиралось как OR-список, и
+		// требование «глубокое знание OAuth» закрывалось по словам token/code/
+		// flow из письма, хотя письмо называло это расширением текущего опыта.
+		// Порог — 4 элемента: настоящие альтернативы короткие.
+		if strings.Count(m[1], ",")+1 > maxAltItems {
+			continue
+		}
 		add(m[1])
 	}
 	for _, m := range slashAltRe.FindAllString(reqText, -1) {
@@ -621,6 +1021,77 @@ func alternativesOnly(missing []string, found map[string]bool, reqText string) b
 	return true
 }
 
+// alternativeDirectionNegated — одно из альтернативных направлений целиком под
+// отрицанием в письме. Возвращает (true, честная нота) только когда ВСЕ токены
+// непокрытого направления найдены, но каждое найдено в клаузе с отрицанием —
+// то есть письмо честно назвало пробел по этому направлению.
+//
+// Условие «все» принципиально: частично отрицанное направление может иметь
+// и настоящие факты («Media/Video: стриминг делал, кодеки — нет»), и тогда
+// закрытие по альтернативе правомерно.
+func alternativeDirectionNegated(reqText, letter string, found map[string]bool) (bool, string) {
+	groups := altGroups(reqText)
+	if len(groups) < 2 {
+		// Нужно минимум два направления: одиночный OR-список внутри
+		// требования («Kafka или RabbitMQ») — обычное правило альтернатив.
+		return false, ""
+	}
+	cls := sentences(letter)
+	var negatedGroups [][]string
+	for _, g := range groups {
+		allNegated := len(g) > 0
+		for _, t := range g {
+			negOnly := false
+			for i, cl := range cls {
+				if findText(t, cl) && clauseNegated(cls, i) {
+					negOnly = true
+					break
+				}
+			}
+			if !negOnly {
+				allNegated = false
+				break
+			}
+		}
+		if allNegated {
+			negatedGroups = append(negatedGroups, g)
+		}
+	}
+	if len(negatedGroups) == 0 {
+		return false, ""
+	}
+	// Ищем покрытое направление: факт по другой группе или по токену вне групп.
+	covered := false
+	for _, g := range groups {
+		isNegated := false
+		for _, ng := range negatedGroups {
+			if slices.Equal(g, ng) {
+				isNegated = true
+				break
+			}
+		}
+		if isNegated {
+			continue
+		}
+		for _, t := range g {
+			if found[t] {
+				covered = true
+				break
+			}
+		}
+	}
+	if !covered {
+		return false, ""
+	}
+	labels := make([]string, 0, len(negatedGroups))
+	for _, g := range negatedGroups {
+		labels = append(labels, strings.Join(g, "/"))
+	}
+	note := "в письме честно назван пробел по направлению: " +
+		strings.Join(labels, ", ") + " — закрыто по другому направлению"
+	return true, note
+}
+
 // matchTokens — покрытие требования по токенам в одном источнике: сначала
 // «все токены», затем OR-список альтернатив, затем правило большинства
 // («Linux (systemd, cron)»: systemd есть, cron нет — ядро требования
@@ -635,10 +1106,10 @@ func alternativesOnly(missing []string, found map[string]bool, reqText string) b
 // не засчитывается нигде — включая профиль: честный пробел письма
 // приоритетнее любого факта профиля, иначе matcher советует вписать
 // неприменённый опыт.
-func matchTokens(tokens []string, reqText, src, text, letter string) (string, string, bool) {
+func matchTokens(tokens []string, reqText, src, text, letter, profile string) (string, string, bool) {
 	all := true
 	for _, t := range tokens {
-		if !countsAsFact(t, src, text, letter) {
+		if !countsAsFact(t, src, text, letter, profile) {
 			all = false
 			break
 		}
@@ -652,7 +1123,7 @@ func matchTokens(tokens []string, reqText, src, text, letter string) (string, st
 	var missing []string
 	foundSet := map[string]bool{}
 	for _, t := range tokens {
-		if countsAsFact(t, src, text, letter) {
+		if countsAsFact(t, src, text, letter, profile) {
 			foundSet[t] = true
 		} else {
 			missing = append(missing, t)
@@ -668,12 +1139,27 @@ func matchTokens(tokens []string, reqText, src, text, letter string) (string, st
 		}
 		return src, "закрыто в письме по альтернативному списку" + note, true
 	}
+	// Направление-«ИЛИ» целиком под отрицанием: «Media/Video: опыта работы с
+	// видеопайплайнами и кодеками нет». Токены media/video есть в клаузе, но
+	// принадлежат честно отрицанному направлению, поэтому фактом они не
+	// являются — иначе «закрыто по альтернативному списку» называет ложное
+	// покрытие Media/Video при честном пробеле, названном в письме.
+	//
+	// Живой кейс AI-продукта (сентябрь 2026): требование «Экспертиза в одном
+	// из двух направлений: Media/Video … или AI Agents …» закрывалось целиком
+	// («закрыто в письме», score 100), хотя Media/Video было названо пробелом
+	// словами, а вердикт об этом не говорил нигде.
+	if len(missing) > 0 && len(foundSet) > 0 && alternativesOnly(missing, foundSet, reqText) {
+		if negated, label := alternativeDirectionNegated(reqText, letter, foundSet); negated {
+			return SrcUnknown, label, false
+		}
+	}
 	// Majority может закрыть, только если missing не содержит
 	// честно отрицаемых токенов: «почти всё, но один честно назван
 	// пробелом» — это unknown, а не letter/profile.
 	for _, mt := range missing {
-		if tokenNegatedOnly(mt, letter) {
-			if note, ok := honestGapNote(tokens, letter); ok {
+		if tokenNegatedOnly(mt, letter, profile) {
+			if note, ok := honestGapNote(tokens, letter, profile); ok {
 				return "", note, false
 			}
 		}
@@ -716,11 +1202,20 @@ func matchTokens(tokens []string, reqText, src, text, letter string) (string, st
 //     в письмо, закроется полностью» при живом ограничителе
 //     «Transactional outbox на PostgreSQL: НЕ использовал» — совет заявить
 //     неприменённый паттерн.
-func countsAsFact(t, src, text, letter string) bool {
-	if !findFact(t, text) || tokenNegatedOnly(t, letter) {
+func countsAsFact(t, src, text, letter, profile string) bool {
+	if src == SrcProfile {
+		// Запретный блок профиля не источник факта (живой кейс AI Agents:
+		// токен нашёлся внутри строки-запрета), но ограничителем он остаётся —
+		// declinedInProfile ниже работает по ПОЛНОМУ профилю.
+		if !findFact(t, stripForbiddenProfile(text), profile) || tokenNegatedOnly(t, letter, profile) {
+			return false
+		}
+		return !declinedInProfile(t, text)
+	}
+	if !findFact(t, text, profile) || tokenNegatedOnly(t, letter, profile) {
 		return false
 	}
-	return src != SrcProfile || !declinedInProfile(t, text)
+	return true
 }
 
 // bridgeLabelRe — метка моста в профиле («(мост к outbox)», «мост: polling-журнал»).
@@ -772,7 +1267,7 @@ func declinedInProfile(token, profile string) bool {
 		if !findText(token, c) {
 			continue
 		}
-		if backwardNegRe.MatchString(c) || notPartRe.MatchString(c) {
+		if backwardNegRe.MatchString(c) || notPartRe.MatchString(c) || profileGapRe.MatchString(c) {
 			declined = true
 			continue
 		}
@@ -796,6 +1291,12 @@ func coverage(concepts []Concept, req Requirement, letter, profile string) (sour
 		if note, ok := conceptHonestGap(concepts, req.Text, letter); ok {
 			return SrcUnknown, note
 		}
+		// Первое сработавшее понятие обязательно: «медиа/видео» и «агентские
+		// системы» стоят раньше общих концептов и не могут быть закрыты ими.
+		if name, gap := conceptPrimaryGap(concepts, req.Text, letter, profile); gap {
+			return SrcUnknown, "в письме и профиле нет опыта по «" + name + "» — проверь вручную, это не значит «опыта нет»"
+		}
+
 		// Ищем признаки в письме, потом в профиле.
 		for _, src := range []struct {
 			label, text string
@@ -818,7 +1319,15 @@ func coverage(concepts []Concept, req Requirement, letter, profile string) (sour
 		{SrcLetter, letter},
 		{SrcProfile, profile},
 	} {
-		if s, note, ok := matchTokens(tokens, req.Text, src.label, src.text, letter); ok {
+		if s, note, ok := matchTokens(tokens, req.Text, src.label, src.text, letter, profile); ok {
+			// Concept-уровневый честный пробел понижает буквальное закрытие:
+			// «observability» в письме есть (Prometheus), но трейсинг назван
+			// пробелом словами — «закрыто в письме» здесь нечестно.
+			if note2, gap := conceptGapNote(concepts, req.Text, letter, profile); gap {
+				if s == SrcLetter {
+					return SrcUnknown, note2
+				}
+			}
 			return s, note
 		}
 	}
@@ -826,7 +1335,7 @@ func coverage(concepts []Concept, req Requirement, letter, profile string) (sour
 	// с отрицанием («С OpenTelemetry опыта нет, готов освоить»). Это не
 	// закрытие — но и не «в письме нет вообще»: модель отработала чек-лист,
 	// пробел назван словами. unknown с человеческой нотой, не missing.
-	if note, ok := honestGapNote(tokens, letter); ok {
+	if note, ok := honestGapNote(tokens, letter, profile); ok {
 		return SrcUnknown, note
 	}
 	// Мост: по токенам требования (Kubernetes в bridges НЕ входит —
@@ -834,7 +1343,95 @@ func coverage(concepts []Concept, req Requirement, letter, profile string) (sour
 	if note, ok := bridgeHit(tokens, letter, profile); ok {
 		return SrcBridge, note
 	}
+	// Концепт-путь для требований с МАЛЫМ числом токенов. Живой кейс PHP-
+	// архитектора (сентябрь 2026): «Работа с реляционными и NoSQL базами
+	// данных, понимание консистентности и производительности» почти целиком
+	// кириллическое, tokenRe извлекает из него ОДИН токен «nosql», которого в
+	// письме нет дословно. Ветка len(tokens)==0 не срабатывала, концепт «реля-
+	// ционные БД и SQL» с обоими сигналами в письме не спрашивался, и требова-
+	// ние уходило в missing при «Экспертное владение PostgreSQL, MySQL,
+	// ClickHouse, Redis, Oracle» прямо в письме.
+	//
+	// Порог 1 токен: если лексических зацепок почти нет, признаки концепта —
+	// единственный способ оценить требование. При 2+ токенах концепт-путь не
+	// подстраховывает: там token-матчинг отвечает за точность, а слабые
+	// совпадения по двум разным концептам дали бы ложные закрытия.
+	//
+	// ТОЛЬКО по письму. Первая версия проверяла и профиль, и это дало три
+	// регрессии: «Опыт эксплуатации Kubernetes в проде» (tokens=[k8s]) и
+	// «Опыт с Docker Swarm» закрывались концептом из ПРОФИЛЯ, хотя в письме
+	// («Стек: Go, Kafka») нет ничего — а это ровно тот ложный skip, который
+	// эти тесты и охраняют. Признаки из профиля не доказывают, что кандидат
+	// написал это в письмо.
+	if len(tokens) <= 1 {
+		// conceptPrimaryGap здесь НЕ применяется: у требования есть токен
+		// (k8s, observability), и «нет нигде» — это missing, а не unknown.
+		// Правило нужно только требованиям без токенов вообще (видео-рендеринг,
+		// AI-агенты), где концепт — единственная опора.
+		if name, hits := conceptHit(concepts, req.Text, letter, 2); name != "" {
+			return SrcLetter, "закрыто по признакам («" + name + "»: " +
+				strings.Join(hits, ", ") + ")"
+		}
+	}
 	return "", ""
+}
+
+// conceptGapNote — concept-уровневый честный пробел: часть сигналов концепта
+// в письме подтверждена, а часть названа пробелом словами. Живой кейс SRE
+// (сентябрь 2026): требование «observability (мониторинг, логи, трейсинг)»
+// закрывалось фактом Prometheus/Grafana, хотя письмо честно писало «Опыт
+// интеграции OpenTelemetry/Tempo отсутствует» — по буквальным токенам
+// требования («observability») пробел невидим, «трейсинг» в письме не
+// встречается вовсе.
+//
+// Срабатывает ТОЛЬКО при отрицании: молчание пробелом не считается, иначе
+// требование «PostgreSQL» с соседним «outbox» снова ушло бы в unknown там,
+// где письмо честно пишет «Transactional outbox не использовал» — там
+// отрицание буквальное, оно ловится token-путём раньше.
+func conceptGapNote(concepts []Concept, reqText, letter, profile string) (string, bool) {
+	if strings.TrimSpace(letter) == "" {
+		return "", false
+	}
+	for _, c := range concepts {
+		if !c.Trigger.MatchString(reqText) {
+			continue
+		}
+		var positive, declined []string
+		for _, sig := range c.Signals {
+			// Отрицание понижает требование ТОЛЬКО если само требование
+			// называет эту способность. Принцип scope-отрицания
+			// (TestEvaluateNegationClauseScoped): требование «Выстраивание
+			// observability» закрыто Prometheus, и честно отрицанный
+			// соседний OpenTelemetry не при чём — он не назван в требовании.
+			// А требование «observability (мониторинг, логи, трейсинг)»
+			// трейсинг называет прямо, и вот тут пробел честный.
+			if !sig.Re.MatchString(reqText) {
+				continue
+			}
+			found, negated := false, false
+			for i, cl := range sentences(letter) {
+				if !sig.Re.MatchString(cl) {
+					continue
+				}
+				found = true
+				if clauseNegated(sentences(letter), i) || understandingRe.MatchString(cl) {
+					negated = true
+				}
+			}
+			switch {
+			case found && negated:
+				declined = append(declined, sig.Label)
+			case found:
+				positive = append(positive, sig.Label)
+			}
+		}
+		if len(positive) > 0 && len(declined) > 0 {
+			note := "в письме есть " + strings.Join(positive, ", ") +
+				", но честно назван пробел: " + strings.Join(declined, ", ")
+			return note, true
+		}
+	}
+	return "", false
 }
 
 // honestGapNote — нота честного пробела: токены требования названы в письме
@@ -842,13 +1439,13 @@ func coverage(concepts []Concept, req Requirement, letter, profile string) (sour
 // называет («в письме есть postgresql, но outbox честно назван пробелом») —
 // иначе кажется, что не упомянуто вообще ничего. ok=false, когда честно
 // отрицанных токенов нет.
-func honestGapNote(tokens []string, letter string) (string, bool) {
+func honestGapNote(tokens []string, letter, profile string) (string, bool) {
 	var negTokens, posTokens []string
 	for _, t := range tokens {
 		switch {
-		case tokenNegatedOnly(t, letter):
+		case tokenNegatedOnly(t, letter, profile):
 			negTokens = append(negTokens, t)
-		case findFact(t, letter):
+		case findFact(t, letter, profile):
 			posTokens = append(posTokens, t)
 		}
 	}
@@ -874,10 +1471,13 @@ func bridgeHit(tokens []string, letter, profile string) (string, bool) {
 	return "", false
 }
 
-// LoadProfile читает context/*.md для матчинга фита (тот же набор
-// файлов, что cover.BuildUserPrompt кладёт в промпт, — в сыром виде).
+// LoadProfile читает context/*.md для матчинга фита — в том виде, в каком их
+// увидела модель: drops применяются к содержимому каждого файла, поэтому
+// вырезанный композером раздел не может закрыть требование как «факт есть в
+// профиле». Без этого вердикт противоречил письму: модель раздела не видела,
+// а fit звал fit-fix за фактом, которого в промпте нет.
 // Ошибка/отсутствие папки — не фатально: матчинг идёт по пустой строке.
-func LoadProfile(contextDir string) string {
+func LoadProfile(contextDir string, drops []prompt.Drop) string {
 	var b strings.Builder
 	entries, err := os.ReadDir(contextDir)
 	if err != nil {
@@ -903,9 +1503,21 @@ func LoadProfile(contextDir string) string {
 		if i > 0 {
 			b.WriteString("\n\n")
 		}
-		b.Write(raw)
+		b.WriteString(cover.DropSections(string(raw), dropsFor(name, drops)))
 	}
 	return b.String()
+}
+
+// dropsFor — только дропы, относящиеся к данному файлу (регистр имён не
+// важен: модель могла вернуть имя в другом регистре расширения).
+func dropsFor(name string, drops []prompt.Drop) []prompt.Drop {
+	var out []prompt.Drop
+	for _, d := range drops {
+		if strings.EqualFold(d.File, name) {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // fitBuilder собирает Fit по мере обхода must-have: держит сумму весов,
@@ -931,22 +1543,22 @@ func (b *fitBuilder) addMust(r Requirement, src, note string) {
 	switch src {
 	case SrcLetter:
 		b.sum += 1.0
-		b.f.Covered = append(b.f.Covered, Req{r.Text, src, note})
+		b.f.Covered = append(b.f.Covered, Req{r.Text, src, note, r.Kind})
 	case SrcProfile:
 		b.sum += 0.7
-		b.f.Covered = append(b.f.Covered, Req{r.Text, src, note})
+		b.f.Covered = append(b.f.Covered, Req{r.Text, src, note, r.Kind})
 		b.f.Advice = append(b.f.Advice, "в профиле есть факт по «"+r.Text+"», но в письмо он не попал — впиши в письмо, закроется полностью")
 	case SrcBridge:
 		b.sum += 0.5
-		b.f.Caveats = append(b.f.Caveats, Req{r.Text, src, note})
+		b.f.Caveats = append(b.f.Caveats, Req{r.Text, src, note, r.Kind})
 		b.f.Advice = append(b.f.Advice, note+" — в письме и на собеседовании это будет слабое место")
 	case SrcUnknown:
 		b.sum += 0.2
 		// Построчного совета нет: все unknown сведены в одну строку
 		// после обхода (шесть одинаковых «проверь вручную» — шум).
-		b.f.Caveats = append(b.f.Caveats, Req{r.Text, src, note})
+		b.f.Caveats = append(b.f.Caveats, Req{r.Text, src, note, r.Kind})
 	default:
-		b.f.Missing = append(b.f.Missing, Req{r.Text, SrcMissing, b.missingNote(r.Text)})
+		b.f.Missing = append(b.f.Missing, Req{r.Text, SrcMissing, b.missingNote(r.Text), r.Kind})
 		b.missingAdvice = append(b.missingAdvice, "обязательное требование «"+r.Text+"» не закрыто ничем — письмом это не лечится")
 	}
 }
@@ -962,7 +1574,7 @@ func (b *fitBuilder) missingNote(reqText string) string {
 	note := "в профиле и письме нет, моста нет"
 	var partial []string
 	for _, t := range reqTokens(reqText) {
-		if findFact(t, b.profile) || findFact(t, b.letter) {
+		if findFact(t, b.profile, b.profile) || findFact(t, b.letter, b.profile) {
 			partial = append(partial, t)
 		}
 	}
@@ -1018,6 +1630,14 @@ func (b *fitBuilder) finish(reqs Requirements, profile, letter string) Fit {
 	// (живой регресс Evolution CMS: 5 закрыто цитатами, 0 missing,
 	// 3 unknown → skip).
 	missN, unkN, brN := len(f.Missing), 0, 0
+	// hardMiss — незакрытые ТРЕБОВАНИЯ (без обязанностей): обязанность
+	// видна в списке, но вердикт «не откликаться» дают только требования.
+	hardMiss := 0
+	for _, c := range f.Missing {
+		if c.Kind != "duty" {
+			hardMiss++
+		}
+	}
 	for _, c := range f.Caveats {
 		switch c.Source {
 		case SrcBridge:
@@ -1035,9 +1655,9 @@ func (b *fitBuilder) finish(reqs Requirements, profile, letter string) Fit {
 		}
 	}
 	switch {
-	case missN >= 2 || (missN == 1 && unkN >= 2) || roleMismatch(reqs, profile):
+	case hardMiss >= 2 || (hardMiss == 1 && unkN >= 2) || roleMismatch(reqs, profile):
 		f.Verdict = Skip
-	case missN == 1 || brN >= 1 || unkN >= 1 || len(f.Caveats) > 0:
+	case hardMiss == 1 || brN >= 1 || unkN >= 1 || len(f.Caveats) > 0:
 		f.Verdict = Caveats // оговорка обязана назвать слабое место — Advice уже заполнен
 	default:
 		f.Verdict = Apply
@@ -1050,8 +1670,8 @@ func (b *fitBuilder) finish(reqs Requirements, profile, letter string) Fit {
 			f.Advice = append([]string{"не тратить время на отклик: есть незакрытые must-have"}, f.Advice...)
 		}
 	case Caveats:
-		if missN == 1 {
-			f.Advice = append([]string{"откликаться с оговоркой: один must-have не закрыт («" + f.Missing[0].Text + "») — оцени, критичен ли он для этой вакансии"}, f.Advice...)
+		if hardMiss == 1 {
+			f.Advice = append([]string{"откликаться с оговоркой: один must-have не закрыт («" + firstHardMiss(f.Missing) + "») — оцени, критичен ли он для этой вакансии"}, f.Advice...)
 		} else {
 			f.Advice = append([]string{"откликаться с оговоркой — слабое место названо ниже"}, f.Advice...)
 		}
@@ -1063,7 +1683,12 @@ func (b *fitBuilder) finish(reqs Requirements, profile, letter string) Fit {
 	// ли он») — построчный совет дублировал бы его. При skip заголовок
 	// без имён («не тратить время») — построчные советы обязательны,
 	// иначе непонятно, какое именно требование не закрыто.
-	if !(f.Verdict == Caveats && missN == 1) {
+	// Обязанности называем отдельной строкой: пробел виден, но skip не дают.
+	if missN > hardMiss {
+		f.Advice = append(f.Advice, "не закрыты обязанности (не требования): "+
+			strings.Join(dutyGaps(f.Missing), ", ")+" — оцени, критичны ли они")
+	}
+	if !(f.Verdict == Caveats && hardMiss == 1) {
 		f.Advice = append(f.Advice, b.missingAdvice...)
 	}
 	// unknown — одним сводным советом, а не построчно: шесть одинаковых
@@ -1145,4 +1770,175 @@ func roleMismatch(reqs Requirements, profile string) bool {
 	// и расширяем окно до 60 символов, чтобы ловить «PHP (2005+)» и «PHP, 17 лет опыта».
 	phpCand := regexp.MustCompile(`(?i)php-разработчик|основн.{0,15}php|\bphp\b.{0,60}(production|prod|лет|опыт|20\d\d)|((production|prod|лет|опыт|20\d\d).{0,60}\bphp\b|\bphp\b\s*\(\s*20\d\d)`).MatchString(profile)
 	return phpRole && goCand && !phpCand
+}
+
+// profileForbiddenRe — маркеры запретного буллета профиля. Такой блок
+// ЗАПРЕЩАЕТ заявку, а не подтверждает факт: токен внутри него — не факт.
+//
+// Живой кейс Fullstack Backend (октябрь 2026): fit сообщил «в профиле есть
+// факт по большинству токенов (не упомянуты: tool) — впиши в письмо» и повесил
+// это в fitFixable. Единственное упоминание «AI Agents» во всём контексте —
+// context/01:340, ВНУТРИ запрета «ИИ-инструменты — НЕ заявлять без факта …
+// модель дописывает … ловится на интервью». Факта нет: закрыть требование
+// нельзя (писать запрещено), и автоправка зацикливалась вхолостую.
+//
+// Маркеры проверены по контексту: все 16 вхождений — только в запретных
+// буллетах (production-grade IAM, Consensus/Paxos/Raft, Service Mesh,
+// ИИ-инструменты, гарантия порядка Kafka, go-queue-broker).
+var profileForbiddenRe = regexp.MustCompile(`НЕ заявлять|0 вхождений|дописывает|ловится на интервью`)
+
+// stripForbiddenProfile — профиль без запретных блоков, ТОЛЬКО для поиска
+// фактов. Блок = непрерывная группа строк буллета (начало: «- »/«* »/«#»
+// или пустая; продолжение — с ведущими пробелами): маркеры запретов
+// разбросаны по 5 строкам, и построчный сплит их не вырезал бы.
+//
+// ВАЖНО: ограничители (declinedInProfile/tokenNegatedOnly) считаются по
+// ПОЛНОМУ профилю — запрет обязан продолжать работать вето. Вырезается
+// только путь «найдено → факт».
+func stripForbiddenProfile(profile string) string {
+	var kept []string
+	var block []string
+	flush := func() {
+		if len(block) == 0 {
+			return
+		}
+		if !profileForbiddenRe.MatchString(strings.Join(block, "\n")) {
+			kept = append(kept, block...)
+		}
+		block = nil
+	}
+	for _, line := range strings.Split(profile, "\n") {
+		trim := strings.TrimSpace(line)
+		if trim == "" || strings.HasPrefix(trim, "- ") ||
+			strings.HasPrefix(trim, "* ") || strings.HasPrefix(trim, "#") {
+			flush()
+		}
+		block = append(block, line)
+	}
+	flush()
+	return strings.Join(kept, "\n")
+}
+
+// genericTokens — токены-метки области, а не технологии. «AI-агентов» после
+// normToken даёт единственный токен «ai» (дефис срезан), и он находился в
+// «AI-системы» письма — требование про агентские системы закрывалось без
+// агентского опыта (живой кейс Fullstack/mistral, октябрь 2026). Такие токены
+// уводят требование в концепт-путь, где судится понятие, а не метка.
+var genericTokens = map[string]bool{
+	"ai": true, "ml": true, "ii": true, "ui": true,
+}
+
+// conceptSignalCount — сколько сигналов концепта подтверждено в тексте
+// (клаузы под отрицанием не считаются: честный пробел — не сигнал).
+func conceptSignalCount(c Concept, text string) int {
+	if strings.TrimSpace(text) == "" {
+		return 0
+	}
+	clauses := sentences(text)
+	n := 0
+	for _, s := range c.Signals {
+		for i, cl := range clauses {
+			if s.Re.MatchString(strings.ToLower(cl)) && !clauseNegated(clauses, i) {
+				n++
+				break
+			}
+		}
+	}
+	return n
+}
+
+// conceptPrimaryGap — требование нацелено на ПЕРВОЕ сработавшее понятие, и
+// фактов этого понятия нет ни в письме, ни в профиле. Тогда закрытие соседним,
+// более общим концептом нечестно.
+//
+// Живые кейсы (октябрь 2026): «Обеспечение быстрого и отказоустойчивого
+// рендеринга видео» закрывалось концептом «эксплуатация и observability» (его
+// триггер содержит «отказоустойчив», сигналами стали Prometheus/Grafana —
+// дашборды, не видеорендеринг); «Улучшение логики AI-агентов» — концептом
+// GenAI по «AI-системам». Понятия «медиа/видео» и «агентские системы» стоят
+// в списке выше и обязаны быть проверены первыми.
+func conceptPrimaryGap(concepts []Concept, reqText, letter, profile string) (string, bool) {
+	low := strings.ToLower(reqText)
+	for _, c := range concepts {
+		if !c.Trigger.MatchString(low) {
+			continue
+		}
+		if conceptSignalCount(c, letter) == 0 && conceptSignalCount(c, profile) == 0 {
+			return c.Name, true
+		}
+		return "", false
+	}
+	return "", false
+}
+
+// adaptationListRe — буллет «перечисление стека вакансии», за которым идёт
+// признание пробела: «TypeScript/React Native/Expo/Convex/Remotion/E2B: имею
+// опыт fullstack…; готова оперативно освоить ваш стек». Такое перечисление
+// называет стек РАБОТОДАТЕЛЯ, а не опыт кандидата.
+var adaptationListRe = regexp.MustCompile(`(?i)^\s*[-*•]?\s*(?:[A-Za-z][A-Za-z0-9+#.-]*(?:\s+[A-Za-z][A-Za-z0-9+#.-]*)*\s*[/,]\s*){2,}[A-Za-z][A-Za-z0-9+#.-]*(?:\s+[A-Za-z][A-Za-z0-9+#.-]*)*\s*:`)
+
+// adaptationHeadRe — та же форма, но от ДВУХ позиций: «Protobuf/JSON-RPC: …»
+// и «JSON-RPC: …» тоже называют стек работодателя, а adaptationListRe их
+// пропускал. Причина в живом кейсе АФЛТ-Системс: перечисление из двух
+// технологий — самый частый вид буллета адаптации («Protobuf/JSON-RPC»,
+// «TypeScript/React»), и именно он не распознавался.
+var adaptationHeadRe = regexp.MustCompile(`(?i)^\s*[-*•]?\s*[A-Za-z][A-Za-z0-9+#.-]*(?:\s+[A-Za-z][A-Za-z0-9+#.-]*)*\s*(?:[/,]\s*[A-Za-z][A-Za-z0-9+#.-]*(?:\s+[A-Za-z][A-Za-z0-9+#.-]*)*)*\s*:`)
+
+// adaptationListing — токен назван внутри буллета-перечисления стека вакансии,
+// который в ТОЙ ЖЕ строке признаёт отсутствие опыта («готов/готова … освоить»).
+//
+// Живой кейс Fullstack/mistral (октябрь 2026): пять требований (TypeScript,
+// React Native/Expo, Convex, Remotion, E2B) отмечались «закрыто в письме»,
+// хотя письмо их только перечисляло. sentences() режет по «;», поэтому
+// «готова оперативно освоить» оставалось в соседней клаузе и understandingRe
+// в findFact не срабатывал. Проверка идёт по СТРОКЕ (буллету), а не по клаузе:
+// так «Kafka: consumer groups» из соседнего буллета не задевается.
+func adaptationClause(text, token, clause string) bool {
+	cl := strings.TrimSpace(clause)
+	if strings.TrimSpace(token) == "" || cl == "" {
+		return false
+	}
+	for _, line := range strings.Split(text, "\n") {
+		if !understandingRe.MatchString(line) {
+			continue
+		}
+		// Правило 1 (голова буллета): технология названа ДО двоеточия, которое
+		// открывает перечисление стека работодателя.
+		if adaptationHeadRe.MatchString(line) {
+			if idx := strings.Index(line, ":"); idx >= 0 && findText(token, line[:idx]) {
+				return true
+			}
+		}
+		// Правило 2 (прежнее): длинное перечисление (3+ позиции) — весь буллет
+		// перечисляет стек вакансии, любая его клауза под адаптацию не факт.
+		if !adaptationListRe.MatchString(line) {
+			continue
+		}
+		if strings.Contains(line, cl) {
+			return true
+		}
+	}
+	return false
+}
+
+// firstHardMiss — текст первого незакрытого ТРЕБОВАНИЯ (не обязанности):
+// совет «один must-have не закрыт» обязан называть именно требование.
+func firstHardMiss(missing []Req) string {
+	for _, c := range missing {
+		if c.Kind != "duty" {
+			return c.Text
+		}
+	}
+	return ""
+}
+
+// dutyGaps — тексты незакрытых обязанностей (kind=duty).
+func dutyGaps(missing []Req) []string {
+	var out []string
+	for _, c := range missing {
+		if c.Kind == "duty" {
+			out = append(out, "«"+c.Text+"»")
+		}
+	}
+	return out
 }

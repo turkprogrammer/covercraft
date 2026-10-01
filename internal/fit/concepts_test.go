@@ -457,3 +457,60 @@ func TestBuildConceptTooFewTriggers(t *testing.T) {
 		t.Error("< 2 trigger_terms должен отвергаться")
 	}
 }
+
+// TestConceptHitGaming — требование «Опыт в игровой индустрии» не содержит ни
+// одного латинского токена, поэтому закрывается только концептом: без него
+// вердикт по игровому требованию всегда «нет данных», сколько бы фактов ни
+// лежало в профиле.
+func TestConceptHitGaming(t *testing.T) {
+	concepts := DefaultConcepts()
+	const req = "Опыт в игровой индустрии — Опыт работы в индустрии видеоигр, " +
+		"разработки или эксплуатации платформ для разработчиков игр, издателей или игроков"
+	const letter = "Игра Pathfinder Chronicles: sci-fi выживач на Symfony 6.1 + Redis, " +
+		"hexagonal, 61 YAML-сцена и 7 концовок, публичный open-source (MIT)."
+
+	if name, _ := conceptHit(concepts, req, letter, 2); name != "игровая индустрия и геймдев" {
+		t.Errorf("conceptHit по игровому требованию = %q, хочу «игровая индустрия и геймдев»", name)
+	}
+	// Тот же факт в профиле (письмо могло не назвать проект) — тоже закрывает.
+	const profile = "## 12. ИГРОВАЯ ИНДУСТРИЯ — Pathfinder Chronicles\n" +
+		"- 4 главы, 61 YAML-сцена, 7 концовок, survival на Symfony + Redis"
+	if name, _ := conceptHit(concepts, req, profile, 2); name != "игровая индустрия и геймдев" {
+		t.Errorf("conceptHit по профилю = %q, хочу «игровая индустрия и геймдев»", name)
+	}
+}
+
+// TestConceptHitGamingIgnoresMigrations — триггер игрового концепта не должен
+// ловить «миграции»: в RE2 нет границ слов для кириллицы, и наивное `игр`
+// матчится внутри «миграция», а такое требование не про игры.
+func TestConceptHitGamingIgnoresMigrations(t *testing.T) {
+	for _, c := range DefaultConcepts() {
+		if c.Name != "игровая индустрия и геймдев" {
+			continue
+		}
+		for _, req := range []string{"опыт с миграциями без даунтайма", "миграция легаси на PostgreSQL"} {
+			if c.Trigger.MatchString(req) {
+				t.Errorf("триггер игрового концепта сработал на %q", req)
+			}
+			if _, ok := conceptHonestGap([]Concept{c}, req, "С миграциями не работал"); ok {
+				t.Errorf("требование %q не должно уходить в игровой честный пробел", req)
+			}
+		}
+		return
+	}
+	t.Error("концепт «игровая индустрия и геймдев» отсутствует в DefaultConcepts")
+}
+
+// TestGamingConceptHonestGapNotCovered — письмо с честным пробелом по теме
+// концепта не должно закрывать требование: раньше «Игровая индустрия — пробел:
+// нет опыта» попадала в «закрыто» по упоминанию темы.
+func TestGamingConceptHonestGapNotCovered(t *testing.T) {
+	reqs := mustReqs([]string{"Опыт в игровой индустрии"}, nil, "other")
+	letter := "Go/PHP-бэкенд, Kafka, PostgreSQL.\n\nИгровая индустрия — пробел: нет опыта."
+	profile := "ИГРОВАЯ ИНДУСТРИЯ — Pathfinder Chronicles: 61 сцена, 7 концовок, Symfony + Redis."
+
+	res := Evaluate(DefaultConcepts(), reqs, profile, letter, "Требуется опыт в игровой индустрии")
+	if len(res.Covered) != 0 {
+		t.Errorf("честно названный пробел не должен закрывать требование: %+v", res.Covered)
+	}
+}

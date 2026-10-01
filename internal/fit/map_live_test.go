@@ -47,7 +47,7 @@ func TestTmpLiveHybrid(t *testing.T) {
 	} {
 		reqs.MustHave = append(reqs.MustHave, Requirement{Text: m, Kind: "must", Category: "stack"})
 	}
-	profile := LoadProfile("../../context")
+	profile := LoadProfile("../../context", nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	f, err := MapCoverage(ctx, fn, DefaultConcepts(), reqs, profile, letter, vacancy)

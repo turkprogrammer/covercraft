@@ -1,6 +1,7 @@
 package cover
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,12 +96,17 @@ func TestBuildUserPromptChecklist(t *testing.T) {
 	if !(iHead >= 0 && iVac > iHead) {
 		t.Errorf("чек-лист должен идти перед вакансией:\n%s", withChecklist)
 	}
-	if !strings.Contains(withChecklist, "не выдумывай") {
-		t.Error("чек-лист должен запрещать выдумывать факты")
+	// Правила письма — в системном промпте (settings.DefaultSystemPrompt).
+	// В user-промпте остаётся только чек-лист фактов: дублирующие инструкции
+	// конфликтовали с v4 (тот запрещает начинать пробел с «не применял»).
+	if !strings.Contains(withChecklist, "Закрой в письме каждое обязательное требование") {
+		t.Errorf("чек-лист должен требовать закрытия каждого требования:\n%s", withChecklist)
 	}
-	// Требование конкретики: «имею опыт» не считается закрытием.
-	if !strings.Contains(withChecklist, "конкретный проект и факт") {
-		t.Errorf("чек-лист должен требовать конкретный проект/факт, а не абстракцию:\n%s", withChecklist)
+	if strings.Contains(withChecklist, "готов освоить") {
+		t.Error("формула пробела «X не применял — есть Y, готов освоить» противоречит v4 и должна жить только в промпте")
+	}
+	if strings.Contains(withChecklist, "БЕЗ названия технологий из фактов") {
+		t.Error("запрет называть технологии из фактов противоречит v4 (мост строится ИМЕННО на названном факте)")
 	}
 
 	without := BuildUserPrompt(dir, "V", nil, nil)
@@ -199,5 +205,72 @@ func TestBuildUserPromptDropsScopedToFile(t *testing.T) {
 	noOp := BuildUserPrompt(dir, "V", nil, []prompt.Drop{{File: "03-нет.md", Heading: "## Нужно"}})
 	if !strings.Contains(noOp, "б-контент") {
 		t.Errorf("дроп чужого файла не должен трогать чужой контент:\n%s", noOp)
+	}
+}
+
+// TestBuildFitFixPromptSelectsRelevantSections — живой баг (октябрь 2026):
+// fit-fix отправлял модели ВЕСЬ профиль (85.7 КБ context/*.md) вместе с
+// письмом на каждую итерацию. Модель тонет в объёме и отвечает эхом промпта,
+// после чего правки откатываются — «автофикс не может исправить даже через
+// несколько попыток». В fit-fix должны уходить только секции профиля,
+// релевантные caveat-строкам, плюс вакансия и чек-лист.
+func TestBuildFitFixPromptSelectsRelevantSections(t *testing.T) {
+	dir := writeContext(t, map[string]string{
+		"01-profile.md": "# Профиль\n\n## Go и highload\n" +
+			"Stable ID: Kafka, 10 000 RPS, at-least-once, идемпотентность через ClickHouse Upsert.\n\n" +
+			"## Маркетинг и SEO\n" +
+			"Собрал воронку, настроил таргетированную рекламу, курил контент-план.\n",
+		"02-projects.md": "# Проекты\n\n## vpnctl\nМенеджер VPN на Go.\n",
+	})
+	caveats := []string{"Highload-требование: Kafka at-least-once идемпотентность — впиши в письмо"}
+
+	got := BuildFitFixUserPrompt(dir, "Go backend engineer", nil, caveats, nil)
+
+	if !strings.Contains(got, "Stable ID: Kafka, 10 000 RPS") {
+		t.Errorf("релевантная секция профиля не попала в fit-fix промпт:\n%s", got)
+	}
+	if strings.Contains(got, "воронку") || strings.Contains(got, "таргетированную") {
+		t.Errorf("нерелевантная секция (маркетинг) не должна попадать в fit-fix:\n%s", got)
+	}
+	if !strings.Contains(got, "Go backend engineer") {
+		t.Errorf("вакансия должна остаться в промпте:\n%s", got)
+	}
+}
+
+// TestBuildFitFixPromptFallsBackToFullProfile — отбор не должен обнулять
+// промпт: если ни одна секция не совпала с caveat (формулировки бывают
+// далеки от текста профиля), модель получает полный профиль, как раньше, —
+// иначе автоправка не найдёт факт и начнёт выдумывать.
+func TestBuildFitFixPromptFallsBackToFullProfile(t *testing.T) {
+	dir := writeContext(t, map[string]string{
+		"01-profile.md": "# Профиль\n## Разное\nУмею чинить принтеры и варить кофе.\n",
+	})
+	caveats := []string{"Oпыт работы с квантовыми вычислениями — впиши в письмо"}
+
+	got := BuildFitFixUserPrompt(dir, "Go engineer", nil, caveats, nil)
+
+	if !strings.Contains(got, "чинить принтеры") {
+		t.Errorf("при нулевом отборе нужен фоллбэк на полный профиль:\n%s", got)
+	}
+}
+
+// TestBuildFitFixPromptBounded — промпт fit-fix обязан быть существенно меньше
+// полного профиля: потолок зафиксирован константой, а не «как получится».
+func TestBuildFitFixPromptBounded(t *testing.T) {
+	big := "# Профиль\n"
+	for i := 0; i < 60; i++ {
+		big += fmt.Sprintf("\n## Раздел %d\nУникальная реализация №%d: Raft-консенсус, snapshot, compaction.\n", i, i)
+	}
+	dir := writeContext(t, map[string]string{"01-profile.md": big})
+	caveats := []string{"Raft-консенсус snapshot compaction — впиши в письмо"}
+
+	got := BuildFitFixUserPrompt(dir, "Go engineer", nil, caveats, nil)
+
+	if len(got) > fitFixProfileMaxBytes {
+		t.Errorf("промпт fit-fix %d байт превышает лимит %d", len(got), fitFixProfileMaxBytes)
+	}
+	// Релевантный раздел обязан быть в отборе при лимите.
+	if !strings.Contains(got, "Raft-консенсус") {
+		t.Errorf("релевантный раздел потерялся при усечении:\n%.500s", got)
 	}
 }

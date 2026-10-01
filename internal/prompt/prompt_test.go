@@ -3,38 +3,17 @@ package prompt
 import (
 	"strings"
 	"testing"
-	"unicode/utf8"
 )
 
-// defaultBase — усечённая база для тестов: инварианты обязаны прийти из
-// самой Compose, а не из base.
-const defaultBase = "Базовый системный промпт."
-
 var testSections = []Section{
+	{File: "00-контакты.md", Heading: "## КОНТАКТЫ"},
 	{File: "01.md", Heading: "## PHP"},
 	{File: "03.md", Heading: "## ML"},
 	{File: "02.md", Heading: "## ФАКТЫ-ОГРАНИЧИТЕЛИ ИЗ ДОКОВ (не выдумывать сверх)"},
 }
 
-func TestComposeCarriesInvariantsIntoSystem(t *testing.T) {
-	system, _ := Compose(defaultBase, "Вакансия PHP", "php-primary",
-		[]string{"опыт PHP 5+ лет"}, []Section{{File: "01.md", Heading: "## PHP"}})
-	for _, want := range []string{
-		"факты из профиля", "ничего не выдумывай", "Язык письма", "до 200 слов",
-		"приветствие", "подпись: если в инструкции уже задана дословная подпись", "не излагай пробел как слабость",
-	} {
-		if !strings.Contains(system, want) {
-			t.Errorf("в system композера нет инварианта %q", want)
-		}
-	}
-	if !strings.HasPrefix(system, defaultBase) {
-		t.Error("base должна идти первым куском system — мета-инструкция поверх неё")
-	}
-}
-
 func TestComposeUserCarriesVacancyMustsAndSections(t *testing.T) {
-	_, user := Compose(defaultBase, "Вакансия PHP", "php-primary",
-		[]string{"опыт PHP 5+ лет", "  "}, testSections)
+	_, user := Compose("Вакансия PHP", "php-primary", []string{"опыт PHP 5+ лет", "  "}, testSections)
 	for _, want := range []string{
 		"Вакансия PHP",
 		"- опыт PHP 5+ лет", // каждый must попал в user
@@ -50,19 +29,35 @@ func TestComposeUserCarriesVacancyMustsAndSections(t *testing.T) {
 	}
 }
 
-func TestComposeRoleDirectiveOnlyForKnownRole(t *testing.T) {
-	systemML, _ := Compose(defaultBase, "Вакансия", "ml-research", nil, nil)
-	if !strings.Contains(systemML, "ML-опыт") {
-		t.Error("для ml-research в system должна попасть доменная директива")
+// TestComposeSystemForbidsProtectedSections — хард-защита должна быть и в
+// инструкции, а не только в Parse: модель не может нарушить правило, которого
+// не знает.
+func TestComposeSystemForbidsProtectedSections(t *testing.T) {
+	system, _ := Compose("Вакансия", "php-primary", nil, testSections)
+	for _, want := range []string{"ФАКТЫ-ОГРАНИЧИТЕЛИ", "КОНТАКТЫ", "dropSections", "reason"} {
+		if !strings.Contains(system, want) {
+			t.Errorf("в инструкции отбора нет %q:\n%s", want, system)
+		}
 	}
-	systemUnknown, _ := Compose(defaultBase, "Вакансия", "самодельная-роль", nil, nil)
-	if strings.Contains(systemUnknown, "ML-опыт") || strings.Contains(systemUnknown, "PHP-вакансии") {
-		t.Error("неизвестная роль не должна получать доменные директивы")
+	// Системный промпт письма в инструкцию больше не подмешивается.
+	if strings.Contains(system, "до 200 слов") || strings.Contains(system, "ничего не выдумывай") {
+		t.Error("инструкция отбора не должна содержать правил промпта письма — их владелец settings.DefaultSystemPrompt")
+	}
+}
+
+func TestComposeRoleHintOnlyForKnownRole(t *testing.T) {
+	ml, _ := Compose("Вакансия", "ml-research", nil, nil)
+	if !strings.Contains(ml, "ML-вакансия") {
+		t.Error("для ml-research в инструкции должна быть подсказка по роли")
+	}
+	unknown, _ := Compose("Вакансия", "самодельная-роль", nil, nil)
+	if strings.Contains(unknown, "ML-вакансия") || strings.Contains(unknown, "вакансия Go:") {
+		t.Error("неизвестная роль не должна получать подсказки по роли")
 	}
 }
 
 func TestComposeEmptyContractIsValid(t *testing.T) {
-	system, user := Compose(defaultBase, "Вакансия X", "other", nil, nil)
+	system, user := Compose("Вакансия X", "other", nil, nil)
 	if strings.TrimSpace(system) == "" || !strings.Contains(user, "Вакансия X") {
 		t.Error("пустые musts и sections не должны ронять Compose")
 	}
@@ -70,16 +65,13 @@ func TestComposeEmptyContractIsValid(t *testing.T) {
 
 func TestParseStripsFenceAndPreamble(t *testing.T) {
 	raw := "Вот ответ:\n```json\n" +
-		`{"systemPrompt":"промпт под вакансию","dropSections":[{"file":"03.md","heading":"## ML"}],"reason":"PHP — ML не релевантен"}` +
+		`{"dropSections":[{"file":"03.md","heading":"## ML"}],"reason":"PHP — ML не релевантен"}` +
 		"\n```"
 	res, err := Parse(raw, testSections)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if res.SystemPrompt != "промпт под вакансию" {
-		t.Errorf("systemPrompt = %q", res.SystemPrompt)
-	}
-	if len(res.Drop) != 1 || res.Drop[0].Heading != "## ML" {
+	if len(res.Drop) != 1 || res.Drop[0].Heading != "## ML" || res.Drop[0].File != "03.md" {
 		t.Errorf("дропы: %+v", res.Drop)
 	}
 	if res.Reason != "PHP — ML не релевантен" {
@@ -87,8 +79,21 @@ func TestParseStripsFenceAndPreamble(t *testing.T) {
 	}
 }
 
+// TestParseEmptyDropListIsValid — «резать нечего» — валидный ответ, а не
+// ошибка: иначе compose падал бы 502 на честном решении модели ничего не
+// вырезать.
+func TestParseEmptyDropListIsValid(t *testing.T) {
+	res, err := Parse(`{"dropSections":[],"reason":"все разделы релевантны"}`, testSections)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(res.Drop) != 0 || res.Reason != "все разделы релевантны" {
+		t.Errorf("res = %+v", res)
+	}
+}
+
 func TestParseDropsUnknownHeading(t *testing.T) {
-	raw := `{"systemPrompt":"п","dropSections":[` +
+	raw := `{"dropSections":[` +
 		`{"file":"03.md","heading":"## ML"},` +
 		`{"file":"xx.md","heading":"## Выдуманный раздел"}],"reason":"r"}`
 	res, err := Parse(raw, testSections)
@@ -100,65 +105,20 @@ func TestParseDropsUnknownHeading(t *testing.T) {
 	}
 }
 
-func TestParseNeverDropsProtectedSection(t *testing.T) {
-	// Хард-защита: заголовок реально существует в sections, но вырезать
-	// «ФАКТЫ-ОГРАНИЧИТЕЛИ» нельзя — антигаллюцинация важнее выигрыша в токенах.
-	raw := `{"systemPrompt":"п","dropSections":[` +
+// TestParseNeverDropsProtectedSections — контакты (вариант A: приватный
+// context/00-контакты.md) защищены наравне с ФАКТЫ-ОГРАНИЧИТЕЛИ: их вырезание
+// лишило бы письмо контактов.
+func TestParseNeverDropsProtectedSections(t *testing.T) {
+	raw := `{"dropSections":[` +
 		`{"file":"02.md","heading":"## ФАКТЫ-ОГРАНИЧИТЕЛИ ИЗ ДОКОВ (не выдумывать сверх)"},` +
+		`{"file":"00-контакты.md","heading":"## КОНТАКТЫ"},` +
 		`{"file":"03.md","heading":"## ML"}],"reason":"r"}`
 	res, err := Parse(raw, testSections)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
 	if len(res.Drop) != 1 || res.Drop[0].Heading != "## ML" {
-		t.Errorf("защищённый раздел обязан остаться, дропы: %+v", res.Drop)
-	}
-}
-
-func TestParseEmptySystemPromptIsError(t *testing.T) {
-	if _, err := Parse(`{"systemPrompt":"  ","dropSections":[]}`, testSections); err == nil {
-		t.Error("пустой systemPrompt → ошибка, иначе UI затрёт поле")
-	}
-	if _, err := Parse("без мусора и JSON", testSections); err == nil {
-		t.Error("ответ без JSON → ошибка")
-	}
-	if _, err := Parse("{битый JSON}", testSections); err == nil {
-		t.Error("битый JSON → ошибка")
-	}
-}
-
-func TestParseTruncatesAtLineBoundary(t *testing.T) {
-	total := maxPromptLines + 15
-	var b strings.Builder
-	for i := 0; i < total; i++ {
-		b.WriteString("строка номер ")
-		b.WriteString(string(rune('a' + i%26)))
-		b.WriteString("\n")
-	}
-	long := b.String() // строк больше лимита → обрезка по строкам
-	res, err := Parse(`{"systemPrompt":`+quoteJSON(long)+`}`, testSections)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if !res.Truncated {
-		t.Errorf("%d строк при лимите %d → Truncated=true", total, maxPromptLines)
-	}
-	if got := strings.Count(res.SystemPrompt, "\n") + 1; got > maxPromptLines {
-		t.Errorf("строк в промпте = %d, лимит %d", got, maxPromptLines)
-	}
-	wantTail := "строка номер " + string(rune('a'+(maxPromptLines-1)%26))
-	if !strings.HasSuffix(res.SystemPrompt, wantTail) {
-		t.Errorf("обрезка должна идти по границе строки, ждали хвост %q, получили: %q", wantTail, res.SystemPrompt)
-	}
-
-	// Одна длинная строка без переводов строк → обрезка по байтам на границе.
-	huge := strings.Repeat("x", maxPromptChars+600)
-	res2, err := Parse(`{"systemPrompt":`+quoteJSON(huge)+`}`, testSections)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if !res2.Truncated || len(res2.SystemPrompt) > maxPromptChars {
-		t.Errorf("truncated=%v len=%d", res2.Truncated, len(res2.SystemPrompt))
+		t.Errorf("защищённые разделы обязаны остаться, дропы: %+v", res.Drop)
 	}
 }
 
@@ -166,20 +126,14 @@ func TestParseTruncatesAtLineBoundary(t *testing.T) {
 // такой дроп не вырежет ничего (cover фильтрует дропы по файлу), поэтому Parse
 // обязан его отбросить, а не отчитаться в UI об успехе, которого нет.
 func TestParseDropsMismatchedFile(t *testing.T) {
-	raw := `{"systemPrompt":"п","dropSections":[` +
-		`{"file":"03.md","heading":"## ML"},` +
-		`{"file":"99.md","heading":"## ML"}],"reason":"r"}`
-	res, err := Parse(raw, testSections)
+	res, err := Parse(`{"dropSections":[{"file":"03.md","heading":"## ML"},{"file":"99.md","heading":"## ML"}]}`, testSections)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
 	if len(res.Drop) != 1 || res.Drop[0].File != "03.md" {
 		t.Errorf("дроп с чужим файлом обязан отброситься, дропы: %+v", res.Drop)
 	}
-
-	// Регистр имени файла не важен: это по-прежнему тот же файл.
-	rawCase := `{"systemPrompt":"п","dropSections":[{"file":"03.MD","heading":"## ML"}]}`
-	res2, err := Parse(rawCase, testSections)
+	res2, err := Parse(`{"dropSections":[{"file":"03.MD","heading":"## ML"}]}`, testSections)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -188,139 +142,10 @@ func TestParseDropsMismatchedFile(t *testing.T) {
 	}
 }
 
-// TestParseTruncatesCyrillicWithoutBreakingRunes — байтовая обрезка при
-// отсутствии перевода строки не должна рвать UTF-8-руну: иначе в запрос к
-// провайдеру уйдёт невалидный UTF-8. Префикс в один байт ставит границу
-// лимита ровно на продолжение кириллической руны — без гарда тест падает.
-func TestParseTruncatesCyrillicWithoutBreakingRunes(t *testing.T) {
-	long := "a" + strings.Repeat("ф", maxPromptChars) // 1 + 2*maxPromptChars байт, ни одного перевода строки
-	res, err := Parse(`{"systemPrompt":`+quoteJSON(long)+`}`, testSections)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if !res.Truncated {
-		t.Errorf("%d байт при лимите %d → Truncated=true", len(long), maxPromptChars)
-	}
-	if len(res.SystemPrompt) > maxPromptChars {
-		t.Errorf("длина = %d байт, лимит %d", len(res.SystemPrompt), maxPromptChars)
-	}
-	if !utf8.ValidString(res.SystemPrompt) {
-		t.Errorf("обрезка разорвала руну, хвост: %q", res.SystemPrompt[len(res.SystemPrompt)-4:])
-	}
-}
-
-// TestMissingInvariants — мягкая проверка безопасности playbook'а: имена
-// потерянных инвариантов уходят в Result.Missing, а не роняют Parse.
-func TestMissingInvariants(t *testing.T) {
-	res, err := Parse(`{"systemPrompt":"пиши хорошо"}`, testSections)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if len(res.Missing) == 0 {
-		t.Error("промпт без инвариантов обязан дать непустой Missing")
-	}
-
-	full := `{"systemPrompt":"Только факты из профиля, ничего не выдумывай. Язык письма — по вакансии. Объём — до 200 слов. Завершай подписью именем. Пробел — не слабость."}`
-	res2, err := Parse(full, testSections)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if len(res2.Missing) != 0 {
-		t.Errorf("все инварианты на месте, Missing = %v", res2.Missing)
-	}
-
-	// Прямой контракт хелпера: перефразирование тоже считается нахождением.
-	if got := MissingInvariants("Язык — по вакансии, до 200 слов, подпись есть, не выдумывай, пробел как мост"); len(got) != 0 {
-		t.Errorf("MissingInvariants = %v, хочу пусто", got)
-	}
-}
-
-// TestParseAttributesLostInvariants — инвариант, срезанный лимитом, и
-// инвариант, потерянный моделью, — это разные поломки: лечатся по-разному.
-// Missing честно перечисляет оба (в письмо уходит промпт без них), а
-// MissingCut отделяет вину clamp'а от вины модели. Это регресс на решение
-// «считать инварианты до обрезки»: так предупреждение врало бы, что виновата
-// модель, и потеря инварианта в финальном промпте проходила бы молча.
-func TestParseAttributesLostInvariants(t *testing.T) {
-	// Хвост с «пробел — не слабость» уходит за лимит: модель инвариант
-	// написала, clamp его срезал.
-	head := "Только факты из профиля, ничего не выдумывай. Язык письма — по вакансии. Объём — до 200 слов. Завершай подписью именем.\n"
-	raw := `{"systemPrompt":` + quoteJSON(head+strings.Repeat("Подробности.\n", 400)+"Пробел — не слабость.") + `}`
-	res, err := Parse(raw, testSections)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if !res.Truncated {
-		t.Fatalf("преmise: длинный промпт обязан обрезаться, len = %d", len(head))
-	}
-	if len(res.Missing) == 0 {
-		t.Fatal("срезанный инвариант обязан попасть в Missing — он отсутствует в письме")
-	}
-	if len(res.MissingCut) == 0 {
-		t.Errorf("Missing пуст при обрезке: виноват clamp, а не модель — Missing = %v", res.Missing)
-	}
-	for _, inv := range res.MissingCut {
-		if !contains(res.Missing, inv) {
-			t.Errorf("MissingCut %q не входит в Missing %v", inv, res.Missing)
+func TestParseRejectsGarbage(t *testing.T) {
+	for _, raw := range []string{"без мусора и JSON", "{битый JSON}", "```json\n"} {
+		if _, err := Parse(raw, testSections); err == nil {
+			t.Errorf("ответ %q → ожидал ошибку", raw)
 		}
 	}
-
-	// Модель не написала инвариант вовсе и промпт не обрезан: виновата она.
-	plain := `{"systemPrompt":"Только факты из профиля, ничего не выдумывай. Язык письма — по вакансии. Объём — до 200 слов. Завершай подписью именем."}`
-	res2, err := Parse(plain, testSections)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if len(res2.Missing) == 0 {
-		t.Fatal("преmise: без «пробел — не слабость» инвариант обязан потеряться")
-	}
-	if len(res2.MissingCut) != 0 {
-		t.Errorf("без обрезки MissingCut обязан быть пуст, получено %v", res2.MissingCut)
-	}
-}
-
-func contains(list []string, v string) bool {
-	for _, x := range list {
-		if x == v {
-			return true
-		}
-	}
-	return false
-}
-
-// TestMetaInstructionTellsBudget — модель не может уложиться в кап, которого
-// не знает: лимиты и требование «инварианты первыми строками» обязаны быть
-// в мете явно. Регресс на реальный прогон, где хвост с «пробел — не
-// слабость» срезался именно потому, что мета про лимит молчала.
-func TestMetaInstructionTellsBudget(t *testing.T) {
-	sys, _ := Compose("базовая инструкция", "Fullstack-разработчик", "вакансия", nil, testSections)
-	for _, want := range []string{
-		"Уложись в лимиты итогового systemPrompt",
-		"40",
-		"5000",
-		"первыми строками",
-		"не выбрасывай раздел",
-	} {
-		if !strings.Contains(sys, want) {
-			t.Errorf("в мета-инструкции нет %q — модель не уложится в лимит вслепую", want)
-		}
-	}
-}
-func quoteJSON(s string) string {
-	var b strings.Builder
-	b.WriteByte('"')
-	for _, r := range s {
-		switch r {
-		case '"':
-			b.WriteString(`\"`)
-		case '\\':
-			b.WriteString(`\\`)
-		case '\n':
-			b.WriteString(`\n`)
-		default:
-			b.WriteRune(r)
-		}
-	}
-	b.WriteByte('"')
-	return b.String()
 }

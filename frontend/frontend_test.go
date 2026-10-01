@@ -156,10 +156,9 @@ func TestLiveRegions(t *testing.T) {
 	}
 }
 
-// TestComposePromptButton — кнопка compose, откат и прокидывание dropSections
-// в генерацию: фича обязана быть в разметке и в теле запроса. Отдельно
-// проверяются две страховки: сброс устаревших дропов при смене вакансии и
-// предупреждение о потерянных инвариантах безопасности.
+// TestComposePromptButton — кнопка compose: отбор разделов профиля и его откат.
+// Композер НЕ переписывает системный промпт, поэтому в UI не должно остаться
+// ни статуса «авто», ни предупреждений о потерянных инвариантах playbook'а.
 func TestComposePromptButton(t *testing.T) {
 	for _, want := range []string{
 		`id="composePrompt"`,
@@ -174,17 +173,60 @@ func TestComposePromptButton(t *testing.T) {
 		"function dropStaleDrops()",
 		"dropStaleDrops();",
 		"promptVacancy",
-		"missingInvariants",
-		"missingInvariantsCut",
-		"срезано лимитом",
 		"отбор разделов сброшен",
 	} {
 		if !strings.Contains(IndexHTML, want) {
 			t.Errorf("в UI нет %q — кнопка compose обязана быть", want)
 		}
 	}
+	for _, gone := range []string{"missingInvariants", "missingInvariantsCut", "promptAuto", "заменить его результатом compose"} {
+		if strings.Contains(IndexHTML, gone) {
+			t.Errorf("в UI осталось %q от переписывания промпта — снято вместе с контрактом", gone)
+		}
+	}
 	// Три режима генерации передают drops.
 	if got := strings.Count(IndexHTML, "dropSections: promptDrops"); got < 3 {
 		t.Errorf("dropSections: promptDrops встречается %d раз(а), хочу минимум 3 (generate/auditFix/fitFix)", got)
+	}
+}
+
+// TestFitFixStopsWhenNoProgress — живой баг: повторный фит на вакансии IAM
+// крутил 3 итерации по 60+90 сек (~7,5 мин молчания), даже если fitFixable
+// не уменьшался. Цикл обязан останавливаться, как только улучшения нет.
+func TestFitFixStopsWhenNoProgress(t *testing.T) {
+	for _, want := range []string{
+		"fitMaxIter",    // сервер получает бюджет итераций
+		"prevFixable",   // предыдущее число fixable для сравнения
+		"без прогресса", // понятный статус вместо молчания
+	} {
+		if !strings.Contains(IndexHTML, want) {
+			t.Errorf("в index.html нет %q — цикл fit-fix не ограничен", want)
+		}
+	}
+}
+
+// TestFitFixBudgetDefaultsToOne — по умолчанию одна итерация: повторный
+// клик пользователь делает осознанно, а не ждёт 3×150 сек.
+func TestFitFixBudgetDefaultsToOne(t *testing.T) {
+	if !strings.Contains(IndexHTML, "fitMaxIter: 1") {
+		t.Error("fitFix должен отправлять fitMaxIter: 1 по умолчанию")
+	}
+}
+
+func TestLetterSyncFromServerResponse(t *testing.T) {
+	// Живой баг (октябрь 2026): сервер отклонил эхо промпта и вернул
+	// исходное письмо в data.letter, а UI продолжал показать дельты потока
+	// (мусор) и блокировал копирование. Каждая точка, где результат
+	// зависит от data.letter, обязана сверять поле с ответом сервера.
+	if strings.Count(IndexHTML, "data.letter !== els.result.textContent") < 3 {
+		t.Error("generate/auditFix/fitFix должны приводить поле к data.letter — найдено меньше 3 мест")
+	}
+}
+
+func TestGenerateReportsEmptyLetterAsError(t *testing.T) {
+	// Пустой ответ после отклонённого эха — не «ок»: пользователь должен
+	// увидеть причину, а не считать, что письмо готово.
+	if !strings.Contains(IndexHTML, "err: письмо не сохранено") {
+		t.Error("пустой letter после генерации должен давать err-статус")
 	}
 }

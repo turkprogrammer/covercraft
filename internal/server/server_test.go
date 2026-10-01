@@ -318,7 +318,13 @@ func TestGenerateEndpointAuditFix(t *testing.T) {
 	var gotUser string
 	h := New(Config{ContextDir: t.TempDir(), LLM: func(ctx context.Context, system, user string) (string, error) {
 		gotUser = user
-		return "Стек: Go, PHP, ML, PostgreSQL.\nSymfony 7.2 (E-commerce-Lite), Yii2 production, Lumen; PHPUnit + TDD.", nil // исправленное письмо
+		// Исправленное письмо: полная структура v4 (адаптация, стек с префиксом,
+		// контакты, финальная строка) — иначе постпроверка честно ругается.
+		return "Symfony 7.2 (E-commerce-Lite), Yii2 production, Lumen; PHPUnit + TDD.\n\n" +
+			"Адаптация под ваш стек: пробелов нет — всё закрыто фактами.\n\n" +
+			"Стек: Go, PHP, ML, PostgreSQL, Redis, Kafka, Docker, Linux.\n\n" +
+			"+7 (000) 000-00-00 | Telegram: @handle\n\n" +
+			"Буду рад обсудить ваши задачи. Спасибо за внимание!", nil // исправленное письмо
 	}, FitLLM: func(ctx context.Context, system, user string) (string, error) {
 		return "{}", nil // пустой разбор: fit не влияет на проверки автоправки
 	}})
@@ -865,7 +871,7 @@ func TestComposePromptEndpoint(t *testing.T) {
 		ContextDir: contextDirWithSections(t),
 		ComposeLLM: func(ctx context.Context, system, user string) (string, error) {
 			gotSystem, gotUser = system, user
-			return `{"systemPrompt":"промпт под вакансию","dropSections":[{"file":"03-ml-опыт-выжимка.md","heading":"## ML"}],"reason":"вакансия PHP — ML не релевантен"}`, nil
+			return `{"dropSections":[{"file":"03-ml-опыт-выжимка.md","heading":"## ML"}],"reason":"вакансия PHP — ML не релевантен"}`, nil
 		},
 		FitLLM: func(ctx context.Context, system, user string) (string, error) {
 			return `{"role":"php-primary","mustHave":[{"text":"опыт PHP 5+ лет","kind":"must","category":"stack"}]}`, nil
@@ -884,9 +890,6 @@ func TestComposePromptEndpoint(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("битый ответ: %v", err)
 	}
-	if out.SystemPrompt != "промпт под вакансию" {
-		t.Errorf("systemPrompt = %q", out.SystemPrompt)
-	}
 	if len(out.DropSections) != 1 || out.DropSections[0].Heading != "## ML" {
 		t.Errorf("дропы: %+v", out.DropSections)
 	}
@@ -896,8 +899,9 @@ func TestComposePromptEndpoint(t *testing.T) {
 	if out.DroppedBytes <= 0 {
 		t.Errorf("droppedBytes = %d, хочу > 0", out.DroppedBytes)
 	}
-	if len(gotSystem) == 0 {
-		t.Error("композер не получил system")
+	// Системный промпт в ответе отсутствует: его владелец — поле UI.
+	if strings.Contains(rec.Body.String(), "systemPrompt") {
+		t.Errorf("compose не должен возвращать systemPrompt: %s", rec.Body.String())
 	}
 	for _, want := range []string{"PHP-вакансия", "опыт PHP 5+ лет", "01.md :: ## PHP"} {
 		if !strings.Contains(gotUser, want) {
@@ -905,58 +909,11 @@ func TestComposePromptEndpoint(t *testing.T) {
 		}
 	}
 	if !strings.Contains(gotSystem, "ФАКТЫ-ОГРАНИЧИТЕЛИ") {
-		t.Error("мета-инструкция обязана запрещать вырезать ФАКТЫ-ОГРАНИЧИТЕЛИ")
+		t.Error("инструкция обязана запрещать вырезать ФАКТЫ-ОГРАНИЧИТЕЛИ")
 	}
-}
-
-// TestComposePromptReportsMissingInvariants — мягкая страховка D2: playbook
-// заменяет дефолтный системный промпт целиком, поэтому потерянные инварианты
-// безопасности должны быть видны в ответе. 200, а не 502: перефразирование
-// моделью не должно ронять фичу, решение — за пользователем в UI.
-func TestComposePromptReportsMissingInvariants(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-
-	newHandler := func(systemPrompt string) *Handler {
-		return New(Config{
-			ContextDir: contextDirWithSections(t),
-			ComposeLLM: func(ctx context.Context, system, user string) (string, error) {
-				b, _ := json.Marshal(map[string]string{"systemPrompt": systemPrompt})
-				return string(b), nil
-			},
-			FitLLM: func(ctx context.Context, system, user string) (string, error) {
-				return "{}", nil
-			},
-		})
-	}
-	call := func(h *Handler) composeResponse {
-		t.Helper()
-		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodPost, "/api/prompt/compose",
-			bytes.NewReader([]byte(`{"vacancy":"PHP-вакансия"}`)))
-		req.Header.Set("Content-Type", "application/json")
-		h.ServeHTTP(rec, req)
-		if rec.Code != 200 {
-			t.Fatalf("код = %d, тело: %s", rec.Code, rec.Body.String())
-		}
-		var out composeResponse
-		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-			t.Fatalf("битый ответ: %v", err)
-		}
-		return out
-	}
-
-	weak := call(newHandler("пиши хорошо"))
-	if len(weak.MissingInvariants) == 0 {
-		t.Error("playbook без инвариантов обязан вернуть непустой missingInvariants")
-	}
-	if !strings.Contains(strings.Join(weak.MissingInvariants, ", "), "только факты профиля") {
-		t.Errorf("в missingInvariants нет ключевого инварианта: %v", weak.MissingInvariants)
-	}
-
-	full := call(newHandler("Только факты из профиля, ничего не выдумывай. Язык письма — по вакансии. " +
-		"Объём — до 200 слов. Завершай подписью именем. Пробел — не слабость."))
-	if len(full.MissingInvariants) != 0 {
-		t.Errorf("инварианты на месте, а missingInvariants = %v", full.MissingInvariants)
+	// Правил промпта письма в инструкции больше нет: их владелец — settings.
+	if strings.Contains(gotSystem, "до 200 слов") {
+		t.Error("инструкция отбора не должна подмешивать правила промпта письма")
 	}
 }
 
@@ -1010,7 +967,7 @@ func TestComposePromptSurfacesLLMErrors(t *testing.T) {
 	h2 := New(Config{
 		ContextDir: contextDirWithSections(t),
 		ComposeLLM: func(ctx context.Context, system, user string) (string, error) {
-			return `{"systemPrompt":"п","dropSections":[],"reason":"r"}`, nil
+			return `{"dropSections":[],"reason":"r"}`, nil
 		},
 		FitLLM: func(ctx context.Context, system, user string) (string, error) {
 			return "", errLLM{}
@@ -1025,7 +982,7 @@ func TestComposePromptSurfacesLLMErrors(t *testing.T) {
 		t.Errorf("отказ FitLLM не фатален: код=%d тело=%s", rec2.Code, rec2.Body.String())
 	}
 
-	// Битый ответ композера (нет systemPrompt) → 502, поле в UI не затирается.
+	// Битый ответ композера (нет JSON) → 502.
 	h3 := New(Config{
 		ContextDir: t.TempDir(),
 		ComposeLLM: func(ctx context.Context, system, user string) (string, error) {
@@ -1160,5 +1117,240 @@ func TestDoneCarriesUsedSystemPrompt(t *testing.T) {
 	}
 	if done := send("кастом-промпт"); done.UsedSystemPrompt != "кастом-промпт" {
 		t.Errorf("кастом → он же в done, получено %q", done.UsedSystemPrompt)
+	}
+}
+
+// TestFitFixRejectsPromptEcho — живой баг (сентябрь 2026, повторный фит на
+// вакансии IAM): модель на user-промпте из 80 КБ профиля вернула его кусок
+// вместо письма. UI показал в LETTER.OUT весь файл профиля, и цикл fit-fix
+// продолжал крутиться. Эхо нужно ловить на сервере: исходное письмо —
+// пользовательский актив, подменять его выводом модели нельзя.
+func TestFitFixRejectsPromptEcho(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	// Реальный профиль: эхом модель возвращала его длинные строки.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "01-профиль.md"),
+		[]byte("## КАРТА ФАКТОВ\n- **Stable ID:** Kafka, 10 000 RPS, at-least-once, идемпотентность через ClickHouse Upsert\n"+
+			"- **Geo-mapping Service:** Llama-3.3-70B-Instruct, покрытие регионов 90%, снижение стоимости API на 70%\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	letter := "Здравствуйте! Опыт Go 3 года, Kafka в Stable ID."
+	h := New(Config{
+		ContextDir: dir,
+		LLMStream: func(ctx context.Context, system, user string, onDelta func(string)) (string, error) {
+			// Модель «забыла» задание и процитировала входной промпт.
+			echo := "### профиль\n" +
+				"## КАРТА ФАКТОВ\n" +
+				"- **Stable ID:** Kafka, 10 000 RPS, at-least-once, идемпотентность через ClickHouse Upsert\n" +
+				"- **Geo-mapping Service:** Llama-3.3-70B-Instruct, покрытие регионов 90%\n"
+			onDelta(echo)
+			return echo, nil
+		},
+	})
+	body, _ := json.Marshal(map[string]any{
+		"vacancy":    "Lead IAM Engineer (Go)",
+		"fitFix":     true,
+		"letter":     letter,
+		"fitCaveats": []string{"Опыт OAuth 2.0 / OIDC — впиши в письмо"},
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+
+	ev := parseSSE(t, rec.Body.String())
+	if ev.Err != "" {
+		t.Fatalf("ошибка стрима: %s", ev.Err)
+	}
+	if ev.Done == nil {
+		t.Fatal("нет done-события")
+	}
+	if ev.Done.Letter != letter {
+		t.Errorf("письмо подменено выводом модели:\n%q", ev.Done.Letter)
+	}
+	found := false
+	for _, w := range ev.Done.Warnings {
+		if strings.Contains(w, "промпт") || strings.Contains(w, "эхо") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("нет предупреждения про эхо промпта: %v", ev.Done.Warnings)
+	}
+}
+
+// TestIsPromptEchoIgnoresRealLetter — стоп-тест: живое письмо пересказывает
+// факты профиля своими словами и НЕ должно считаться эхом, иначе фит-guard
+// заблокировал бы нормальные правки.
+func TestIsPromptEchoIgnoresRealLetter(t *testing.T) {
+	user := "### профиль\n## КАРТА ФАКТОВ\n" +
+		"- **Stable ID:** Kafka, 10 000 RPS, at-least-once, идемпотентность через ClickHouse Upsert\n" +
+		"- **Geo-mapping Service:** Llama-3.3-70B-Instruct, покрытие регионов 90%\n\n### Вакансия\nLead IAM Engineer (Go)"
+	letter := "Здравствуйте! Стабильный айдентификатор: Kafka, 10 000 RPS, идемпотентность через Upsert в ClickHouse. " +
+		"Geo-mapping: покрытие регионов 90%, стоимость API ниже на 70%."
+	if isPromptEcho(letter, user, "") {
+		t.Errorf("настоящее письмо принято за эхо промпта:\n%q", letter)
+	}
+}
+
+// TestPlainGenerateRejectsPromptEcho — живой баг (сентябрь 2026): защита от
+// эха стояла только под fitFix (`if fitFix && isPromptEcho`), поэтому на
+// ПЕРВОМ обычном проходе модель отдала кусок файла context/01 (заголовки
+// «### 1.3 Bundle ID Service», «1.4 Domain ID», пометки «🔴 Не переносить…»)
+// — и UI показал это как письмо. Письмо пришло «грязным», дальше цикл
+// fit-fix накручивал на него новое, и приложение падало.
+func TestPlainGenerateRejectsPromptEcho(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "01-профиль.md"),
+		[]byte("## КАРТА ФАКТОВ\n### 1.3 Bundle ID Service — классификация приложений\n"+
+			"- **Task Flow:** Kafka (predict input + train input) — Transport Workers — ProcessManager — Worker Workflow\n"+
+			"- **Stable ID:** Kafka, 10 000 RPS, at-least-once, идемпотентность через ClickHouse Upsert\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := New(Config{
+		ContextDir: dir,
+		LLMStream: func(ctx context.Context, system, user string, onDelta func(string)) (string, error) {
+			// Эхо: модель переписала входной промпт вместо письма.
+			echo := "### 1.3 Bundle ID Service — классификация приложений\n" +
+				"- **Task Flow:** Kafka (predict input + train input) — Transport Workers — ProcessManager — Worker Workflow\n" +
+				"- **Stable ID:** Kafka, 10 000 RPS, at-least-once, идемпотентность через ClickHouse Upsert\n" +
+				"### 1.4 Domain ID / Domain Classification Service\n"
+			onDelta(echo)
+			return echo, nil
+		},
+	})
+	body, _ := json.Marshal(map[string]any{
+		"vacancy": "Go backend engineer",
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+
+	ev := parseSSE(t, rec.Body.String())
+	if ev.Err != "" {
+		t.Fatalf("ошибка стрима: %s", ev.Err)
+	}
+	if ev.Done == nil {
+		t.Fatal("нет done-события")
+	}
+	if strings.Contains(ev.Done.Letter, "1.3 Bundle ID Service") ||
+		strings.Contains(ev.Done.Letter, "КАРТА ФАКТОВ") {
+		t.Errorf("эхо профиля попало в письмо при обычной генерации:\n%q", ev.Done.Letter)
+	}
+	found := false
+	for _, w := range ev.Done.Warnings {
+		if strings.Contains(w, "эхо") || strings.Contains(w, "промпт") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("нет предупреждения про эхо промпта: %v", ev.Done.Warnings)
+	}
+}
+
+// TestFitFixKeepsValidEdit — главный регресс автофикса (октябрь 2026).
+//
+// fitFixPrompt вкладывает исходное письмо в user («Письмо: …»). Поэтому
+// ответ модели — это же письмо с правкой, и оно дословно лежит в user:
+// доля дословного ≈ 100% при любом содержательном исправлении. Детектор эха
+// (echoHitRatio=45%) считал каждую правку эхом и откатывал её на origLetter —
+// «автофикс не может исправить никак».
+//
+// Правило: строки, входящие в ИСХОДНОЕ письмо, — это не эхо промпта, а сам
+// текст письма, который модель обязана сохранить. Эхо = дословное повторение
+// СВЕРХ письма (профиль, инструкции, вакансия).
+func TestFitFixKeepsValidEdit(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "01-профиль.md"),
+		[]byte("## КАРТА ФАКТОВ\n- **Stable ID:** Kafka, 10 000 RPS, at-least-once, идемпотентность через ClickHouse Upsert\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	orig := "Здравствуйте!\n\n- Go и highload: Stable ID (Kafka, 10 000 RPS, at-least-once, идемпотентность через ClickHouse Upsert).\n\nБуду рад обсудить детали."
+	edited := orig + "\n\n- OAuth 2.0 / OIDC: интеграции в production не делал, но JWT HS256 и X-API-Key в Fraud Engine дают прямую базу."
+	h := New(Config{
+		ContextDir: dir,
+		// fitFixableCaveats намеренно нет — автоправка тут работает по слову fitFix.
+		// А caveat «впиши» обозначаем самим вызовом.
+		LLMStream: func(ctx context.Context, system, user string, onDelta func(string)) (string, error) {
+			onDelta(edited)
+			return edited, nil
+		},
+		// FitLLM не нужен: fit-fix берёт caveats из запроса.
+	})
+	body, _ := json.Marshal(map[string]any{
+		"vacancy":    "Lead IAM Engineer (Go)",
+		"fitFix":     true,
+		"letter":     orig,
+		"fitCaveats": []string{"OAuth 2.0 / OIDC — впиши в письмо"},
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+
+	ev := parseSSE(t, rec.Body.String())
+	if ev.Err != "" {
+		t.Fatalf("ошибка стрима: %s", ev.Err)
+	}
+	if ev.Done == nil {
+		t.Fatal("нет done-события")
+	}
+	if ev.Done.Letter != edited {
+		t.Errorf("валидная правка откатилась как эхо:\nполучено: %q\nхочу: %q", ev.Done.Letter, edited)
+	}
+	for _, w := range ev.Done.Warnings {
+		if strings.Contains(w, "эхо") || strings.Contains(w, "промпт") {
+			t.Errorf("ложное предупреждение об эхе на валидной правке: %s", w)
+		}
+	}
+}
+
+// TestAuditFixKeepsValidEdit — та же защита для audit-fix: раньше откат
+// терял письмо целиком (не было origLetter), а после унификации рисковал
+// откатывать каждую правку по той же причине, что и fit-fix.
+func TestAuditFixKeepsValidEdit(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "01-профиль.md"),
+		[]byte("## КАРТА ФАКТОВ\n- **Stable ID:** Kafka, 10 000 RPS, at-least-once, идемпотентность через ClickHouse Upsert\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	orig := "Здравствуйте!\n\n- Go: Stable ID (Kafka, 10 000 RPS, at-least-once, идемпотентность через ClickHouse Upsert).\n\nБуду рад обсудить."
+	edited := orig + "\n\nСтек: Go, Kafka, ClickHouse."
+	h := New(Config{
+		ContextDir: dir,
+		LLMStream: func(ctx context.Context, system, user string, onDelta func(string)) (string, error) {
+			onDelta(edited)
+			return edited, nil
+		},
+	})
+	body, _ := json.Marshal(map[string]any{
+		"vacancy":  "Lead IAM Engineer (Go)",
+		"auditFix": true,
+		"letter":   orig,
+		"warnings": []string{"нет обязательной секции «Адаптация под ваш стек»"},
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+
+	ev := parseSSE(t, rec.Body.String())
+	if ev.Err != "" {
+		t.Fatalf("ошибка стрима: %s", ev.Err)
+	}
+	if ev.Done == nil {
+		t.Fatal("нет done-события")
+	}
+	if ev.Done.Letter != edited {
+		t.Errorf("валидная правка audit-fix откатилась:\nполучено: %q\nхочу: %q", ev.Done.Letter, edited)
+	}
+	for _, w := range ev.Done.Warnings {
+		if strings.Contains(w, "эхо") || strings.Contains(w, "промпт") {
+			t.Errorf("ложное предупреждение об эхе на валидной правке: %s", w)
+		}
 	}
 }

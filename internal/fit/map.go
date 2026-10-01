@@ -191,8 +191,8 @@ func verifyItem(concepts []Concept, it CoverageItem, ok bool, r Requirement, let
 			// PostgreSQL. Матчер при этом может закрыть требование по
 			// большинству остальных токенов — тогда письмо действительно
 			// сильнее, и с моделью соглашаемся.
-			if note, gap := honestGapNote(tokens, letter); gap {
-				if src, _, _ := matchTokens(tokens, r.Text, SrcLetter, letter, letter); src != SrcLetter {
+			if note, gap := honestGapNote(tokens, letter, profile); gap {
+				if src, _, _ := matchTokens(tokens, r.Text, SrcLetter, letter, letter, profile); src != SrcLetter {
 					return SrcUnknown, note
 				}
 			}
@@ -208,7 +208,7 @@ func verifyItem(concepts []Concept, it CoverageItem, ok bool, r Requirement, let
 				}
 				// Модель процитировала клаузу-отрицание — это честный пробел,
 				// а не покрытие: «С OpenTelemetry опыта нет, готов освоить».
-				if note, ok := honestGapNote(tokens, letter); ok {
+				if note, ok := honestGapNote(tokens, letter, profile); ok {
 					return SrcUnknown, note
 				}
 			}

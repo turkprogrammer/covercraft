@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/turkprogrammer/covercraft/frontend"
+	"github.com/turkprogrammer/covercraft/internal/prompt"
 )
 
 // profileGo — фикстура профиля Go-кандидата (сокращённая карта фактов).
@@ -35,8 +36,32 @@ func TestLoadProfileSeesUppercaseExt(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "ПРОФИЛЬ.MD"), []byte("Go, PHP"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := LoadProfile(dir); !strings.Contains(got, "Go, PHP") {
+	if got := LoadProfile(dir, nil); !strings.Contains(got, "Go, PHP") {
 		t.Errorf("LoadProfile не увидел файл с заглавным расширением: %q", got)
+	}
+}
+
+// TestLoadProfileHonorsDrops — профиль грузится ровно в том виде, в каком его
+// увидела модель: вырезанный композером раздел не должен подтверждать
+// требование как «факт есть в профиле». Иначе вердикт противоречит письму:
+// модель раздела не видела, а fit отчитывается «впиши в письмо» и зовёт
+// fit-fix за фактом, которого в промпте нет.
+func TestLoadProfileHonorsDrops(t *testing.T) {
+	dir := t.TempDir()
+	raw := "# P\n\n## Go\n\ngo-факт\n\n## ML\n\nml-факт\n"
+	if err := os.WriteFile(filepath.Join(dir, "01-p.md"), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	full := LoadProfile(dir, nil)
+	if !strings.Contains(full, "ml-факт") {
+		t.Fatalf("премиса: без дропов профиль полный:\n%s", full)
+	}
+	cut := LoadProfile(dir, []prompt.Drop{{File: "01-p.md", Heading: "## ML"}})
+	if strings.Contains(cut, "ml-факт") {
+		t.Errorf("вырезанный раздел обязан исчезнуть из профиля фита:\n%s", cut)
+	}
+	if !strings.Contains(cut, "go-факт") {
+		t.Errorf("соседний раздел не должен пострадать:\n%s", cut)
 	}
 }
 
@@ -799,7 +824,7 @@ func TestLoadProfileEmptyDirLogs(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
 	defer slog.SetDefault(prev)
 
-	got := LoadProfile(dir)
+	got := LoadProfile(dir, nil)
 	if got != "" {
 		t.Errorf("LoadProfile(%q) = %q, хочу пустую строку", dir, got)
 	}
@@ -1284,5 +1309,183 @@ func TestMissingNoteAIgeneratedCode(t *testing.T) {
 		if strings.Contains(r.Text, "AI-generated") {
 			t.Errorf("требование с AI-generated должно закрываться «ИИ-код» через синоним: %+v", r)
 		}
+	}
+}
+
+// TestUnderstandingIsNotExperience — декларация понимания не равна опыту
+// эксплуатации. Живой случай (вакансия IAM): «**Kubernetes:** понимаю
+// архитектуру оркестрации…; прочная база в Docker Compose и GitLab CI/CD —
+// готов перенести на K8s, Helm…» — в письме не было маркера «нет», поэтому
+// findFact считал токен фактом и требование «Kubernetes — эксплуатация»
+// закрывалось как «закрыто в письме» при живом пробеле.
+func TestUnderstandingIsNotExperience(t *testing.T) {
+	reqs := mustReqs([]string{"Опыт развертывания и отладки сервисов в Kubernetes — эксплуатация в k8s-среде"}, nil, "go-primary")
+	letter := "- **Kubernetes:** понимаю архитектуру оркестрации и принципы работы сервисов в кластере; " +
+		"прочная база в Docker Compose и GitLab CI/CD — готов перенести на K8s, Helm и OpenTelemetry вашей инфраструктуры."
+	profile := "Secrets management: ENV-based, Docker secrets. Docker Compose, GitLab CI/CD — запуск пайплайнов."
+
+	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
+	for _, c := range f.Covered {
+		if strings.Contains(strings.ToLower(c.Text), "kubernetes") {
+			t.Fatalf("понимание засчитано как опыт эксплуатации: %+v", c)
+		}
+	}
+	if len(f.Missing) == 0 && len(f.Caveats) == 0 {
+		t.Fatalf("требование по Kubernetes должно попасть в пробел/оговорку, а не исчезнуть: %+v", f)
+	}
+}
+
+// TestNegatedVerbsCloseNothing — «не эксплуатировал / не развёртывал / не
+// внедрял / не настраивал» — те же отрицания опыта, что «не работал», но они
+// не были в negRe. Живой кейс (вакансия Lead IAM): письмо честно писало «K8s
+// не эксплуатировал, готов оперативно углубиться», а требование «Опыт
+// развертывания и отладки сервисов в Kubernetes» получало «закрыто в письме».
+func TestNegatedVerbsCloseNothing(t *testing.T) {
+	cases := []string{
+		"- **Kubernetes:** понимаю архитектуру оркестрации; прочная база в Docker Compose и GitLab CI/CD — готов перенести на K8s, Helm. K8s не эксплуатировал, готов оперативно углубиться.",
+		"- **Kubernetes:** не развёртывал сервисы в k8s, но база в Docker Compose и GitLab CI/CD.",
+		"- **Helm:** не внедрял; работа с артефактами в GitLab CI/CD.",
+		"- **OpenTelemetry:** не настраивал трассировку; Prometheus + Grafana в Fraud Engine.",
+	}
+	profile := "Docker Compose, GitLab CI/CD, Prometheus, Grafana — мониторинг и запуск пайплайнов."
+	for _, letter := range cases {
+		reqs := mustReqs([]string{"Опыт развертывания, эксплуатации и отладки сервисов в Kubernetes"}, nil, "go-primary")
+		f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
+		for _, c := range f.Covered {
+			if strings.Contains(strings.ToLower(c.Text), "kubernetes") {
+				t.Errorf("отрицание опыта засчитано как закрытие: %+v\nписьмо: %s", c, letter)
+			}
+		}
+	}
+}
+
+// TestRFCClosedByADRBridge — «навыки написания RFC и дизайн-документов»
+// закрывается фактом «ADR: 10, архитектурные решения, документация в
+// репозиториях» (context/01:24, :14). Моста rfc → ADR не было, поэтому живое
+// письмо получало «не закрыто» при фактически подтверждённом требовании.
+func TestRFCClosedByADRBridge(t *testing.T) {
+	reqs := mustReqs([]string{"Навыки написания RFC и дизайн-документов, которые действительно читают"}, nil, "go-primary")
+	profile := "Code review и менторство в командах (Go и PHP). Тесты: 155+ (Fraud Engine); ADR: 10. " +
+		"Документация в репозиториях: ProcessManager, multi-level caching, retry strategies."
+	// Живое письмо: буллета про RFC нет, вместо него ADR/архитектурные решения.
+	letter := "- **System Design:** ADR (10), Hexagonal Architecture, DDD; code review, архитектурные решения.\n" +
+		"- **Распределенные системы:** Event-driven архитектура (Stable ID: Kafka, ProcessManager)."
+	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
+	if len(f.Missing) > 0 {
+		t.Errorf("RFC должен закрываться мостом на ADR, а не быть пробелом: %+v", f.Missing)
+	}
+	// Пустой профиль и письмо — мост не должен срабатывать на голом слове.
+	empty := Evaluate(DefaultConcepts(), reqs, "", "Письмо без фактов.", "вакансия")
+	if len(empty.Missing) == 0 {
+		t.Errorf("мост rfc не должен закрывать требование без фактов: %+v", empty.Covered)
+	}
+}
+
+// TestLongParenListIsNotAlternatives — перечисление фич в скобках — это НЕ
+// список взаимозаменяемых технологий. Живой кейс (вакансия IAM): «(authorization
+// code + PKCE, client credentials, device flow, token introspection, refresh
+// strategies)» parenAltRe разбирал как OR-список, и требование «Глубокое
+// знание OAuth 2.0 / OIDC» закрывалось по словам token/code/flow из письма —
+// хотя письмо прямо говорило «естественное расширение».
+func TestLongParenListIsNotAlternatives(t *testing.T) {
+	reqs := mustReqs([]string{"Глубокое понимание OAuth 2.0, OIDC и связанных auth-потоков " +
+		"(authorization code + PKCE, client credentials, device flow, token introspection, refresh strategies)"}, nil, "go-primary")
+	letter := "- **OAuth 2.0 / OIDC:** имею успешный опыт проектирования и внедрения JWT-аутентификации " +
+		"и работы с токенами в production-системах — OAuth 2.0 / OIDC и расширенные auth-потоки будут " +
+		"естественным расширением текущего опыта. Реализация authorization code в CMS Blog, token bucket в Fraud Engine."
+	profile := "JWT HS256 (Task Flow, CMS Blog), X-API-Key, fail-closed, PII-маскирование 152-ФЗ."
+
+	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
+	for _, c := range f.Covered {
+		if strings.Contains(strings.ToLower(c.Text), "oauth") {
+			t.Fatalf("длинный перечень фич не должен закрывать требование: %+v", c)
+		}
+	}
+
+	// Короткий список альтернатив по-прежнему работает: «Kafka или NATS».
+	kafka := mustReqs([]string{"Опыт работы с Kafka или NATS"}, nil, "go-primary")
+	fk := Evaluate(DefaultConcepts(), kafka, profile,
+		"- **Kafka:** Stable ID, 10 000 RPS, at-least-once.", "вакансия")
+	if len(fk.Covered) == 0 {
+		t.Errorf("настоящая альтернатива «Kafka или NATS» обязана закрываться: %+v", fk)
+	}
+}
+
+// TestSREKubernetesGapIsNotClosedByUnderstanding — живой кейс (SRE-вакансия,
+// сентябрь 2026): письмо честно писало «Пробел по Kubernetes: Нет прямого опыта
+// администрирования кластеров… что позволяет быстро освоить отладку приложений
+// в K8s», а вердикт писал «Глубокое понимание Kubernetes — закрыто в письме».
+// Причина: understandingRe требовал слово «готов» («готов.{0,20}освоить»), а в
+// живом письме форма «быстро освоить» — декларация понимания, а не опыта.
+func TestSREKubernetesGapIsNotClosedByUnderstanding(t *testing.T) {
+	reqs := Requirements{Role: "go-primary", MustHave: []Requirement{
+		{Text: "Глубокое понимание Kubernetes и опыт отладки приложений в нем", Kind: "must", Category: "stack"},
+	}}
+	letter := "Пробел по Kubernetes: Нет прямого опыта администрирования кластеров. " +
+		"Однако имею глубокие знания containerization (Docker/Docker Compose для production-стеков) " +
+		"и принципы работы с инфраструктурой как кодом, что позволяет быстро освоить отладку приложений в K8s."
+	f := Evaluate(DefaultConcepts(), reqs, "ОБЩИЙ ПРОФИЛЬ: Go, PHP, Docker Compose.", letter, "SRE, Managed Kubernetes")
+	if f.Verdict != Caveats {
+		t.Errorf("вердикт = %s, хочу Caveats: k8s-пробел назван честно и не должен закрывать требование", f.Verdict)
+	}
+}
+
+// TestProfileAllowedUnderstandingKeepsRequirement — живой кейс (тот же SRE):
+// профиль САМ разрешает формулировку «понимаю принципы WAL» (context/01:293 —
+// «WAL-G/Patroni/pg_basebackup: НЕ работал; допустимо «понимаю принципы WAL»»).
+// understandingRe ловил «понимаю» и ронял сильнейшее PostgreSQL-требование в
+// «нет данных», хотя остальные его токены (индексы, запросы) подтверждены.
+// Профиль-разрешение должно побеждать декларацию понимания.
+func TestProfileAllowedUnderstandingKeepsRequirement(t *testing.T) {
+	reqs := Requirements{Role: "go-primary", MustHave: []Requirement{
+		{Text: "Глубокий опыт работы с PostgreSQL (понимание внутреннего устройства: индексы, WAL, запросы)", Kind: "must", Category: "stack"},
+	}}
+	profile := "PostgreSQL: индексы B-tree/GIN/partial/covering, autovacuum, execution plans.\n" +
+		"- **WAL-G/Patroni/pg_basebackup:** НЕ работал; допустимо «понимаю принципы WAL».\n" +
+		"- **SQL-Top:** автор, профилирование pg_stat_statements, Safe EXPLAIN, kill query."
+	letter := "PostgreSQL (глубокое знание): SQL-Top — профилирование запросов через pg_stat_statements, " +
+		"EXPLAIN и kill query; индексы B-tree/GIN/partial/covering, autovacuum, " +
+		"тюнинг shared_buffers/work_mem. Понимаю принципы работы WAL."
+	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "SRE, PostgreSQL: индексы, WAL, запросы")
+	if f.Verdict == Skip {
+		t.Fatalf("письмо не должно получать skip: %+v", f)
+	}
+	for _, c := range append(append([]Req{}, f.Caveats...), f.Missing...) {
+		if strings.Contains(c.Note, "wal") && strings.Contains(c.Note, "пробел") {
+			t.Errorf("WAL разрешён профилем как «понимаю принципы» — пробелом считаться не должен: %q", c.Note)
+		}
+	}
+}
+
+// TestDutyGapDoesNotForceSkip — живой кейс Fullstack/mistral (октябрь 2026):
+// продуктовые обязанности («платёжные шлюзы», «подписки», «веб-воронки»,
+// «онбординг», «мобильный интерфейс», «аналитика») выносятся в mustHave,
+// чтобы пробел по ним был виден. Но обязанность — не обязательное требование:
+// две незакрытые обязанности не должны ронять вердикт до «не откликаться».
+// Они обязаны остаться в Missing (видимыми), но skip считать по требованиям.
+func TestDutyGapDoesNotForceSkip(t *testing.T) {
+	reqs := Requirements{MustHave: []Requirement{
+		{Text: "Опыт эксплуатации Kubernetes в проде", Kind: "duty"},
+		{Text: "Опыт с Docker Swarm", Kind: "duty"},
+	}}
+	f := Evaluate(DefaultConcepts(), reqs, "", "Письмо без этих фактов.", "вакансия")
+	if f.Verdict == Skip {
+		t.Errorf("обязанности не должны давать skip: verdict=%s missing=%d", f.Verdict, len(f.Missing))
+	}
+	if len(f.Missing) != 2 {
+		t.Errorf("пробелы по обязанностям обязаны остаться видимыми: missing=%+v", f.Missing)
+	}
+}
+
+// TestMustGapStillForcesSkip — стоп-тест: настоящие обязательные требования
+// продолжают ронять вердикт.
+func TestMustGapStillForcesSkip(t *testing.T) {
+	reqs := Requirements{MustHave: []Requirement{
+		{Text: "Опыт эксплуатации Kubernetes в проде", Kind: "must"},
+		{Text: "Опыт с Docker Swarm", Kind: "must"},
+	}}
+	f := Evaluate(DefaultConcepts(), reqs, "", "Письмо без этих фактов.", "вакансия")
+	if f.Verdict != Skip {
+		t.Errorf("два незакрытых must обязаны давать skip: verdict=%s", f.Verdict)
 	}
 }

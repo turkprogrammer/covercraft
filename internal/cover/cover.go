@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/turkprogrammer/covercraft/internal/prompt"
 )
@@ -36,7 +37,7 @@ func BuildUserPrompt(contextDir, vacancy string, musts []string, drops []prompt.
 	}
 	if len(musts) > 0 {
 		b.WriteString("### Обязательный чек-лист\n\n")
-		b.WriteString("Закрой в письме каждое обязательное требование вакансии фактом из контекста выше — отдельным пунктом. Это приоритет письма: если не хватает объёма, сокращай второстепенные факты, а не пункты чек-листа.\n")
+		b.WriteString("Закрой в письме каждое обязательное требование вакансии фактом из контекста выше — отдельным пунктом. Это приоритет письма: если не хватает объёма, сокращай второстепенные факты, а не пункты чек-листа.\n\n")
 		for _, m := range musts {
 			m = strings.TrimSpace(m)
 			if m == "" {
@@ -44,19 +45,185 @@ func BuildUserPrompt(contextDir, vacancy string, musts []string, drops []prompt.
 			}
 			b.WriteString("- " + m + "\n")
 		}
-		b.WriteString("\nДля каждого пункта назови в письме конкретный проект и факт из контекста " +
-			"(название, цифры, технологии) — абстрактное «имею опыт» требование не закрывает. " +
-			"Если подходящих фактов несколько, выбери самые сильные и релевантные именно этому требованию.\n")
-		b.WriteString("\nЕсли факта для какого-то требования в контексте нет — не выдумывай его, " +
-			"а честно признай пробел и сразу покажи, как твой реальный опыт решает эту задачу " +
-			"(«X не применял — есть Y, готов освоить»; Y — ближайший факт из контекста). " +
-			"Не извиняйся и не излагай пробел как слабость. " +
-			"При уместности — добавь мост на ближайший факт, но БЕЗ названия технологий из фактов " +
-			"(пиши «есть опыт буферизации и идемпотентности», НЕ «в ClickHouse»).\n\n")
+		b.WriteString("\nКак закрывать требование и что делать с пробелом — в системной инструкции: строка пробела из требований вакансии, мост на ближайший факт из контекста, без выдуманных технологий и цифр.\n\n")
 	}
 	b.WriteString("### Вакансия\n\n")
 	b.WriteString(vacancy)
 	return b.String()
+}
+
+// fitFixProfileMaxBytes — потолок объёма профиля в user-промпте автоправки.
+// Живой баг (октябрь 2026): fit-fix гнал модели 85.7 КБ context/*.md вместе с
+// письмом на КАЖДУЮ итерацию; модель тонет в объёме и отвечает эхом промпта.
+// 24 КБ — достаточно для отбора релевантных секций под caveat-список
+// (полное письмо ~3 КБ, секции профиля ~1–3 КБ каждая).
+const fitFixProfileMaxBytes = 24 << 10
+
+// BuildFitFixUserPrompt — user-промпт режима fit-fix. Отличие от
+// BuildUserPrompt: в модель уходит НЕ весь профиль, а только секции,
+// релевантные строкам caveat (плюс вакансия и must-have чек-лист).
+//
+// Почему отбор: на полном профиле (85+ КБ) модель возвращала эхо входа
+// вместо правки письма, после чего правки откатывались — «автофикс не может
+// исправить даже через несколько попыток».
+//
+// Фоллбэк: если ни одна секция не совпала с caveat (формулировки вакансии
+// бывают совсем не похожи на текст профиля), отдаём полный профиль — лучше
+// старый объём, чем промпт, из которого модель выдумает факты.
+//
+// Секция = блок от ##-заголовка до следующего ##-заголовка того же уровня
+// (вложенные ### уходят с родителем); текст до первого ## — преамбула файла,
+// она включается только вместе с отобранной секцией (контекст заголовка).
+func BuildFitFixUserPrompt(contextDir, vacancy string, musts []string, caveats []string, drops []prompt.Drop) string {
+	profile := collectProfile(contextDir, drops)
+	if len(profile) == 0 {
+		return BuildUserPrompt(contextDir, vacancy, musts, drops)
+	}
+	keywords := caveatKeywords(caveats)
+	selected, _ := selectSections(profile, keywords)
+	if len(selected) == 0 {
+		// Отбор пуст — фоллбэк на полный профиль (с прежним потолком дропов).
+		return BuildUserPrompt(contextDir, vacancy, musts, drops)
+	}
+	var b strings.Builder
+	b.WriteString("### Профиль (только секции, релевантные автоправке)\n\n")
+	for _, sec := range selected {
+		b.WriteString(sec.text)
+		b.WriteString("\n\n")
+	}
+	if len(musts) > 0 {
+		b.WriteString("### Обязательный чек-лист\n\n")
+		for _, m := range musts {
+			m = strings.TrimSpace(m)
+			if m == "" {
+				continue
+			}
+			b.WriteString("- " + m + "\n")
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("### Вакансия\n\n")
+	b.WriteString(vacancy)
+	return b.String()
+}
+
+// fileSection — одна ##-секция файла вместе с его преамбулой (для контекста).
+type fileSection struct {
+	preamble string // текст файла до первого ## (пусто, если секция — первая)
+	text     string // сама секция, включая вложенные ###
+}
+
+// collectProfile — все ##-секции всех *.md с учётом дропов композера.
+func collectProfile(contextDir string, drops []prompt.Drop) []fileSection {
+	var out []fileSection
+	for _, name := range mdNames(contextDir) {
+		raw, err := os.ReadFile(filepath.Join(contextDir, name))
+		if err != nil {
+			continue // гонка с пользователем, редактирующим файлы
+		}
+		cleaned := DropSections(string(raw), dropsFor(name, drops))
+		preamble, sections := splitSections(cleaned)
+		for i, sec := range sections {
+			fs := fileSection{text: sec}
+			if i == 0 {
+				fs.preamble = preamble
+			}
+			out = append(out, fs)
+		}
+	}
+	return out
+}
+
+// splitSections — преамбула (до первого ##) и ##-секции файла. Уровень
+// секции именно два: вложенные ### и #### входят в текст родителя.
+func splitSections(raw string) (preamble string, sections []string) {
+	lines := strings.Split(raw, "\n")
+	var cur, pre []string
+	inSection := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		level := headingLevel(trimmed)
+		if level == 2 {
+			if inSection {
+				sections = append(sections, strings.Join(cur, "\n"))
+				cur = nil
+			}
+			inSection = true
+		}
+		if inSection {
+			cur = append(cur, line)
+		} else {
+			pre = append(pre, line)
+		}
+	}
+	if inSection && len(cur) > 0 {
+		sections = append(sections, strings.Join(cur, "\n"))
+	}
+	return strings.TrimRight(strings.Join(pre, "\n"), "\n"), sections
+}
+
+// caveatKeywords — содержательные слова из строк caveat: нормализация
+// (регистр, пунктуация) и отсечение служебных слов фита («впиши», «письмо»,
+// «профиль»), которые есть в каждой строке и не отбирают ничего.
+func caveatKeywords(caveats []string) []string {
+	stop := map[string]bool{
+		"впиши": true, "пишет": true, "письмо": true, "письме": true,
+		"профиле": true, "профиля": true, "профиль": true, "требование": true,
+		"требования": true, "требованиях": true, "вакансии": true, "вакансия": true,
+		"закроется": true, "полностью": true, "упомянут": true, "не": true,
+		"попал": true, "попала": true, "факт": true, "факты": true, "фактов": true,
+		"секции": true, "нужно": true, "есть": true, "опыт": true, "работа": true,
+		"разработки": true, "разработчик": true,
+	}
+	seen := map[string]bool{}
+	var words []string
+	for _, c := range caveats {
+		for _, w := range strings.FieldsFunc(strings.ToLower(c), func(r rune) bool {
+			return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+		}) {
+			if len(w) < 5 || stop[w] || seen[w] {
+				continue
+			}
+			seen[w] = true
+			words = append(words, w)
+		}
+	}
+	return words
+}
+
+// selectSections — отбор секций: каждая содержит ≥1 ключевое слово caveat.
+// Порядок файлов сохраняется; бюджет — общий потолок байт.
+// Возвращает отобранные секции и остаток бюджета; пустой срез — ничего
+// не подошло, вызывающий обязан сделать фоллбэк на полный профиль.
+func selectSections(profile []fileSection, keywords []string) ([]fileSection, int) {
+	budget := fitFixProfileMaxBytes
+	var out []fileSection
+	if len(keywords) == 0 {
+		return nil, 0 // caveat-строк нет — отбор бессмыслен, будет фоллбэк
+	}
+	for _, sec := range profile {
+		low := strings.ToLower(sec.text)
+		hit := false
+		for _, w := range keywords {
+			if strings.Contains(low, w) {
+				hit = true
+				break
+			}
+		}
+		if !hit {
+			continue
+		}
+		cost := len(sec.preamble) + len(sec.text)
+		if cost > budget {
+			continue // не влезает целиком — пропускаем, бюджет оставим меньшим
+		}
+		budget -= cost
+		if sec.preamble != "" {
+			sec.text = sec.preamble + "\n\n" + sec.text
+		}
+		out = append(out, sec)
+	}
+	return out, budget
 }
 
 // dropsFor — только дропы, относящиеся к данному файлу (регистр имён не

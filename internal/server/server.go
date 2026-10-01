@@ -21,6 +21,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -120,6 +122,17 @@ func bufferedLLMStream(fn LLMFunc) LLMStreamFunc {
 
 // ServeHTTP — единая точка входа: без внешних роутеров (KISS).
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Паника в хендлере не должна ронять соединение и оставлять UI в
+	// неопределённом состоянии (пользователю приходилось закрывать
+	// приложение — живой кейс, сентябрь 2026). Ловим, логируем и отвечаем
+	// ошибкой: клиент покажет её в статусной строке и остановит цикл.
+	defer func() {
+		if rc := recover(); rc != nil {
+			log.Printf("паника в %s %s: %v\n%s", r.Method, r.URL.Path, rc, debug.Stack())
+			defer func() { _ = recover() }() // ответ мог уже начаться
+			http.Error(w, "внутренняя ошибка сервера — детали в логе", http.StatusInternalServerError)
+		}
+	}()
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/":
 		io.WriteString(w, frontend.IndexHTML)
@@ -179,6 +192,10 @@ type generateRequest struct {
 	// факты в существующие буллеты, сохраняя остальной текст без изменений.
 	FitFix     bool     `json:"fitFix,omitempty"`
 	FitCaveats []string `json:"fitCaveats,omitempty"`
+	// FitMaxIter — бюджет итераций автоправки от UI. Ноль/отсутствие — один
+	// проход: каждая итерация стоит генерацию (до 60 сек) плюс fitMapTimeout
+	// (90 сек), и три прохода — это ~7,5 минут молчания (живой кейс, 2026-09).
+	FitMaxIter int `json:"fitMaxIter,omitempty"`
 	// DropSections — разделы профиля, вырезаемые из user-промпта (решил
 	// композер). Пусто — промпт как раньше.
 	DropSections []prompt.Drop `json:"dropSections,omitempty"`
@@ -288,6 +305,14 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "fitFix требует letter и fitCaveats", http.StatusBadRequest)
 		return
 	}
+	// Бюджет итераций: клиент вправе попросить больше одного прохода, но не
+	// больше потолка — иначе цикл растянется на минуты.
+	if req.FitMaxIter > maxFitIterations {
+		req.FitMaxIter = maxFitIterations
+	}
+	if req.FitMaxIter < 1 {
+		req.FitMaxIter = 1
+	}
 
 	// Извлечение требований вакансии — ДО генерации письма: must-have идут
 	// в промпт письма чек-листом, а тот же разбор переиспользуется в фите
@@ -309,8 +334,10 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
 		user = fixPrompt(req.Letter, req.Warnings) + "\n\n" +
 			cover.BuildUserPrompt(h.cfg.ContextDir, req.Vacancy, musts, req.DropSections)
 	case req.FitFix:
+		// Только релевантные caveat секции профиля, не все 85 КБ: на полном
+		// профиле модель тонет и отвечает эхом (живой баг, октябрь 2026).
 		user = fitFixPrompt(req.Letter, req.FitCaveats) + "\n\n" +
-			cover.BuildUserPrompt(h.cfg.ContextDir, req.Vacancy, musts, req.DropSections)
+			cover.BuildFitFixUserPrompt(h.cfg.ContextDir, req.Vacancy, musts, req.FitCaveats, req.DropSections)
 	default:
 		// User-промпт собирает сервер: context/*.md + вакансия + чек-лист.
 		user = cover.BuildUserPrompt(h.cfg.ContextDir, req.Vacancy, musts, req.DropSections)
@@ -326,7 +353,7 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	streamGenerate(w, ctx, h.cfg.LLMStream, system, user, req.Vacancy, fit.LoadProfile(h.cfg.ContextDir), reqs, extractOK, mapFn, h.concepts, timeoutSec)
+	streamGenerate(w, ctx, h.cfg.LLMStream, system, user, req.Vacancy, fit.LoadProfile(h.cfg.ContextDir, req.DropSections), reqs, extractOK, mapFn, h.concepts, timeoutSec, req.FitFix, req.Letter)
 }
 
 // fitMapTimeout — бюджет гибридной разметки покрытия. Разметка идёт после
@@ -357,7 +384,7 @@ func fitVerdict(ctx context.Context, concepts []fit.Concept, reqs fit.Requiremen
 //
 // reqs/extractOK — уже выполненный шаг 1 фита (см. generate): при
 // extractOK вердикт считается детерминированно, без новых LLM-вызовов.
-func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc, system, user, vacancy, profile string, reqs fit.Requirements, extractOK bool, mapFn fit.MapFunc, concepts []fit.Concept, timeoutSec int) {
+func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc, system, user, vacancy, profile string, reqs fit.Requirements, extractOK bool, mapFn fit.MapFunc, concepts []fit.Concept, timeoutSec int, fitFix bool, origLetter string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
@@ -393,9 +420,59 @@ func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc
 		flush()
 		return
 	}
+	// Эхо промпта: модель на входе из 80 КБ профиля иногда возвращает кусок
+	// самого промпта вместо письма (живой кейс — повторный фит, сентябрь 2026).
+	// Тогда UI показывал в LETTER.OUT весь файл профиля, а цикл автоправки
+	// крутился дальше. Исходное письмо — актив пользователя, выводом модели
+	// его не заменяем: отдаём письмо как было и предупреждаем.
+	//
+	// Условие fitFix здесь больше НЕ проверяется. Живой баг (сентябрь 2026):
+	// защита стояла только под автоправкой, поэтому на первом обычном проходе
+	// модель отдала кусок context/01 (заголовки «### 1.3 Bundle ID Service»,
+	// пометки «🔴 Не переносить…») — UI показал файл профиля как письмо, цикл
+	// fit-fix накручивал на него новое, и приложение падало. Эхо — это эхо
+	// независимо от режима генерации.
+	//
+	// Отсечка по размеру: ответ за пределами правдоподобного письма —
+	// это мусор (профиль, вакансия, повтор промпта), а не письмо. Письмо —
+	// 200–400 слов, то есть до ~4 КБ; берём потолок с запасом на длинный
+	// перечень фактов. Скриншот живого бага показывал 11 742 символа.
+	echoWarning := ""
+	if len([]rune(letter)) > maxLetterRunes {
+		letter = ""
+		echoWarning = "модель вернула ответ неприемлемого размера (" +
+			strconv.Itoa(len([]rune(letter))) + " символов вместо ~" +
+			strconv.Itoa(maxLetterRunes) + ") — похоже на кусок профиля или промпта. Письмо не сохранено, повтори генерацию"
+	}
+	if echoWarning == "" && isPromptEcho(letter, user, origLetter) {
+		if strings.TrimSpace(origLetter) != "" {
+			// fit-fix и audit-fix передают исходное письмо — это актив
+			// пользователя, откатываем на него (и при audit-fix тоже: раньше
+			// откат стоял только под fitFix, и audit-fix терял письмо целиком).
+			letter = origLetter
+			echoWarning = "модель вернула эхо промпта вместо письма — исходное письмо сохранено, правь вручную или повтори автоправку"
+		} else {
+			// Исходного письма нет: откатывать не на что, поэтому наружу не
+			// отдаём мусор — пустое письмо плюс явное объяснение.
+			letter = ""
+			echoWarning = "модель вернула эхо промпта вместо письма (вместо текста пришло содержимое профиля) — письмо не сохранено, повтори генерацию. Если повторяется — смени модель или сократи профиль"
+		}
+	}
 	// elapsedMs — счётчик времени ответа модели (замер пользователя).
 	// Постпроверка: теряемые факты и запрещённые паттерны видны в UI.
-	warnings := audit.Check(letter, vacancy).Warnings
+	var warnings []string
+	if echoWarning != "" {
+		// При отклонённом эхо аудит НЕ запускаем: letter может быть пустым или
+		// исходным — Check по нему выдаёт замечания-мусор («нет обязательной
+		// секции», «Потерян факт»), которые пользователь принимает за реальные
+		// дефекты письма. Наружу — ровно одна причина: эхо.
+		warnings = []string{echoWarning}
+	} else {
+		warnings = audit.Check(letter, vacancy).Warnings
+		// Сверка заявленных фактов с профилем: Check профиль не читает и выдумку
+		// («XSSI sanitization», «basic auth») пропускает — письмо уходило с ложью.
+		warnings = append(warnings, audit.CheckProfile(letter, profile).Warnings...)
+	}
 
 	// Пустой профиль — не ошибка запроса, но письмо без единого факта о
 	// кандидате; пользователь должен узнать об этом до отправки письма.
@@ -442,32 +519,24 @@ func writeSSE(w http.ResponseWriter, v any) error {
 	return werr
 }
 
-// composeResponse — ответ POST /api/prompt/compose: готовый системный промпт
-// под вакансию + решение о вырезании разделов профиля. sections/droppedBytes —
-// чтобы UI показал «было 67 КБ → стало N КБ», а не магию.
+// composeResponse — ответ POST /api/prompt/compose: отбор разделов профиля,
+// нерелевантных вакансии. Системный промпт здесь НЕ возвращается и моделью не
+// переписывается: поле #systemPrompt — актив пользователя, и compose его не
+// трогает (прежний контракт затирал рукописный промпт обрезанной до 5 КБ
+// производной). sections/droppedBytes — чтобы UI показал «было 74 КБ → стало
+// N КБ», а не магию.
 type composeResponse struct {
-	SystemPrompt string        `json:"systemPrompt"`
 	DropSections []prompt.Drop `json:"dropSections"`
 	Reason       string        `json:"reason"`
-	Truncated    bool          `json:"truncated"`
 	Sections     int           `json:"sections"`
 	DroppedBytes int           `json:"droppedBytes"`
 	ElapsedMs    int64         `json:"elapsedMs"`
-	// MissingInvariants — инварианты безопасности базового промпта, которых не
-	// нашлось в собранном playbook'е: playbook заменяет дефолт целиком (D2),
-	// поэтому UI обязан предупредить. Мягкая проверка — промпт не блокируется.
-	// Считается по финальному тексту, который уходит в письмо.
-	MissingInvariants []string `json:"missingInvariants,omitempty"`
-	// MissingInvariantsCut — подмножество Missing, срезанное лимитом, а не
-	// потерянное моделью: позволяет UI назвать настоящую причину («обрезано
-	// лимитом» vs «модель не сохранила»).
-	MissingInvariantsCut []string `json:"missingInvariantsCut,omitempty"`
 }
 
-// composePrompt — один не-стриминговый LLM-вызов: по текущей вакансии
-// генерирует самостоятельный системный промпт (playbook) и выбирает
-// нерелевантные разделы профиля. Пустая вакансия → 400 до LLM (прецедент
-// generate): пустое не должно стоить вызова.
+// composePrompt — один не-стриминговый LLM-вызов: по текущей вакансии выбирает
+// разделы профиля, которые в неё не попадают. Системный промпт не
+// переписывается — поле остаётся за пользователем. Пустая вакансия → 400 до LLM
+// (прецедент generate): пустое не должно стоить вызова.
 func (h *Handler) composePrompt(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Vacancy string `json:"vacancy"`
@@ -505,7 +574,7 @@ func (h *Handler) composePrompt(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	system, user := prompt.Compose(settings.DefaultSystemPrompt, req.Vacancy, role, musts, sections)
+	system, user := prompt.Compose(req.Vacancy, role, musts, sections)
 	raw, err := h.cfg.ComposeLLM(ctx, system, user)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "композер не ответил: " + err.Error()})
@@ -522,15 +591,11 @@ func (h *Handler) composePrompt(w http.ResponseWriter, r *http.Request) {
 	cut := cover.BuildUserPrompt(h.cfg.ContextDir, req.Vacancy, musts, res.Drop)
 
 	writeJSON(w, http.StatusOK, composeResponse{
-		SystemPrompt:         res.SystemPrompt,
-		DropSections:         res.Drop,
-		Reason:               res.Reason,
-		Truncated:            res.Truncated,
-		Sections:             len(sections),
-		DroppedBytes:         len(full) - len(cut),
-		ElapsedMs:            time.Since(start).Milliseconds(),
-		MissingInvariants:    res.Missing,
-		MissingInvariantsCut: res.MissingCut,
+		DropSections: res.Drop,
+		Reason:       res.Reason,
+		Sections:     len(sections),
+		DroppedBytes: len(full) - len(cut),
+		ElapsedMs:    time.Since(start).Milliseconds(),
 	})
 }
 
@@ -679,7 +744,7 @@ func (h *Handler) initConcepts() {
 	if strings.EqualFold(h.cfg.FitEngine, "llm") && h.cfg.FitLLM != nil && h.cfg.ContextDir != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		profile := fit.LoadProfile(h.cfg.ContextDir)
+		profile := fit.LoadProfile(h.cfg.ContextDir, nil)
 		if profile != "" {
 			concepts, raw, err := fit.GenerateConcepts(ctx, fit.LLMFunc(h.cfg.FitLLM), profile)
 			if err == nil && len(concepts) > 0 {
@@ -697,3 +762,122 @@ func (h *Handler) initConcepts() {
 	// Fallback на дефолты — лучше устаревший набор, чем ничего.
 	h.concepts = fit.DefaultConcepts()
 }
+
+// isPromptEcho — ответ модели является эхом собственного промпта, а не письмом.
+//
+// Живой кейс (вакансия IAM, сентябрь 2026): в режиме автоправки по фиту в
+// user-промпт уходит весь профиль (80 КБ), и модель возвращала его кусок
+// вместо письма. UI показывал в LETTER.OUT файл профиля, а цикл fit-fix
+// продолжал крутиться — отсюда «виснет и выводит полный контент профиля».
+//
+// Признак эха — длинный дословный фрагмент входа. Берём самые длинные строки
+// промпта (заголовки разделов и строки чек-листа) и ищем их в ответе: при
+// точном попадании модель явно цитирует вход, а не пишет письмо. Порог по
+// длине строки отсекает короткие совпадения вроде «### Вакансия» в письме
+// про вакансию.
+func isPromptEcho(letter, user, origLetter string) bool {
+	// norm снимает знаки-обвязки markdown и схлопывает пробелы: «**### Вакансия**»
+	// и «### Вакансия» — одно и то же эхо, а не совпадение по форме.
+	norm := func(s string) string {
+		s = strings.Map(func(r rune) rune {
+			if r == '*' || r == '`' || r == '#' || r == '_' {
+				return -1
+			}
+			return r
+		}, s)
+		return strings.Join(strings.Fields(strings.ToLower(s)), " ")
+	}
+	lowUser := norm(user)
+	if lowUser == "" {
+		return false
+	}
+	// fit-fix/audit-fix вкладывают исходное письмо в user («Письмо: …»), и
+	// ответ модели — это же письмо с правкой. Живой регресс (октябрь 2026):
+	// доля дословного была 100% при ЛЮБОЙ содержательной правке, и автофикс
+	// откатывал каждую попытку — «автофикс не может исправить никак».
+	// Строки самого письма эхом не считаются: эхо — это дословное повторение
+	// СВЕРХ письма (профиль, инструкции, вакансия).
+	lowOrig := norm(origLetter)
+	// Эхо — это когда ответ ПОЧТИ ЦЕЛИКОМ дословно из промпта, а не когда
+	// одна строка совпала. Живой баг (октябрь 2026): контактная строка письма
+	// (105 символов) дословно лежит в context/00-контакты.md, и построчный
+	// детектор отклонял ВАЛИДНОЕ письмо: done.letter = "", копирование
+	// блокировалось, аудит по пустой строке выдавал 7 замечаний-мусора, а
+	// fit-fix откатывал каждую исправленную версию — «деградация после
+	// нескольких попыток». Контакты, строка стека и цитаты фактов нормально
+	// воспроизводят профиль дословно — это письмо, а не эхо.
+	var hit, total int
+	for _, raw := range strings.Split(letter, "\n") {
+		line := norm(raw)
+		if len(line) < echoMinLineLen {
+			continue
+		}
+		if lowOrig != "" && strings.Contains(lowOrig, line) {
+			continue
+		}
+		total += len(line)
+		if strings.Contains(lowUser, line) {
+			hit += len(line)
+		}
+	}
+	if total > 0 && float64(hit) >= float64(total)*echoHitRatio {
+		return true
+	}
+	// Структурный признак эха: ответ выглядит как кусок профиля, а не как
+	// письмо. Живой случай (сентябрь 2026): модель переписала вход с
+	// переформатированием — «### 1.3 Bundle ID Service — классификация
+	// приложений» вместо заголовка профиля, пометки с эмодзи, двоеточия после
+	// заголовков. Дословного совпадения строк не осталось, и построчный
+	// детектор молчал, а UI показал файл профиля как письмо.
+	//
+	// Признаки, которые не пересекаются с настоящим письмом:
+	//   - ≥3 markdown-заголовка уровня ##/### (письмо использует жирные
+	//     подзаголовки «**Go и highload:**», а не решётки);
+	//   - при этом ни одного письменного обращения и ни подписи.
+	headings := 0
+	for _, raw := range strings.Split(letter, "\n") {
+		if sectionHeadingRe.MatchString(raw) {
+			headings++
+		}
+	}
+	if headings >= echoMinHeadings && !looksLikeLetter(letter) {
+		return true
+	}
+	return false
+}
+
+// sectionHeadingRe — markdown-заголовок уровня ## или ###.
+var sectionHeadingRe = regexp.MustCompile(`(?m)^\s{0,4}#{2,3}\s+\S`)
+
+// letterMarkerRe — признаки настоящего письма: обращение и подпись.
+var letterMarkerRe = regexp.MustCompile(`(?i)здравствуйте|добрый день|доброе утро|уважением|с уважением|спасибо за внимание|буду рад|рад вас|отправляю`)
+
+// looksLikeLetter — в ответе есть обращение или подпись.
+func looksLikeLetter(s string) bool {
+	return letterMarkerRe.MatchString(s)
+}
+
+// echoHitRatio — какая доля длины ответа должна быть дословно из промпта,
+// чтобы считать ответ эхом. Живое письмо с контактной строкой и цитатами
+// фактов даёт ~10–30% дословного; эхо профиля — почти целиком (≥ 80%).
+const echoHitRatio = 0.45
+
+// echoMinLineLen — минимальная длина строки ответа (после нормализации),
+// при которой её дословное совпадение с промптом считается эхом. Короткие
+// строки не ловятся намеренно: «### Вакансия» есть и в нормальном письме.
+const echoMinLineLen = 40
+
+// echoMinHeadings — сколько markdown-заголовков раздела в ответе означают
+// «это кусок профиля, а не письмо». Письмо оформляется жирными подзаголовками,
+// решётки использует только профиль.
+const echoMinHeadings = 3
+
+// maxFitIterations — потолк итераций автоправки по фиту. Три прохода по
+// 150 секунд — это ~7,5 минут молчания (живой кейс, сентябрь 2026), поэтому
+// дефолт — один проход, а предел жёсткий.
+const maxFitIterations = 3
+
+// maxLetterRunes — потолок размера письма. Письмо — до 200–400 слов, то есть
+// порядка 2–4 КБ символов; 8 КБ берём с запасом на развёрнутый перечень
+// фактов. Всё, что длиннее, — не письмо.
+const maxLetterRunes = 8000
