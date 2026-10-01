@@ -230,6 +230,17 @@ type sseDone struct {
 	// UsedSystemPrompt — фактически отправленный системный промпт
 	// (кастом или дефолт): для отладки, что реально применялось.
 	UsedSystemPrompt string `json:"usedSystemPrompt"`
+	// AppliedDropSections — дропы, реально вырезанные из профиля. Отличается
+	// от того, что вернул compose, если профиль успели поправить между
+	// вызовами: дроп по исчезнувшему заголовку молча ничего не вырезает,
+	// и UI обязан показать расхождение, а не рапортовать «вырезано N».
+	AppliedDropSections []prompt.Drop `json:"appliedDropSections,omitempty"`
+	// UsedUserPromptBytes — длина user-промпта, реально отправленного
+	// модели; UsedProfileBytes — длина профиля, ушедшего в фит. Оба поля
+	// сериализуются всегда (как FitFixable), чтобы фронт отличал «0 байт»
+	// от «поле не пришло».
+	UsedUserPromptBytes int `json:"usedUserPromptBytes"`
+	UsedProfileBytes    int `json:"usedProfileBytes"`
 }
 
 // sseError — событие ошибки внутри SSE-потока: после старта стрима код
@@ -353,7 +364,25 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	streamGenerate(w, ctx, h.cfg.LLMStream, system, user, req.Vacancy, fit.LoadProfile(h.cfg.ContextDir, req.DropSections), reqs, extractOK, mapFn, h.concepts, timeoutSec, req.FitFix, req.Letter)
+	// applied — дропы, реально вырезанные из профиля (может быть меньше
+	// req.DropSections, если профиль правили после compose); попадает в
+	// sseDone, чтобы UI показывал факт, а не намерение композера.
+	applied := cover.AppliedDrops(h.cfg.ContextDir, req.DropSections)
+
+	streamGenerate(w, ctx, streamParams{
+		fn:         h.cfg.LLMStream,
+		system:     system,
+		user:       user,
+		vacancy:    req.Vacancy,
+		profile:    fit.LoadProfile(h.cfg.ContextDir, req.DropSections),
+		reqs:       reqs,
+		extractOK:  extractOK,
+		mapFn:      mapFn,
+		concepts:   h.concepts,
+		timeoutSec: timeoutSec,
+		origLetter: req.Letter,
+		applied:    applied,
+	})
 }
 
 // fitMapTimeout — бюджет гибридной разметки покрытия. Разметка идёт после
@@ -376,6 +405,38 @@ func fitVerdict(ctx context.Context, concepts []fit.Concept, reqs fit.Requiremen
 	return fit.Evaluate(concepts, reqs, profile, letter, vacancy)
 }
 
+// streamParams — входные данные одного SSE-запуска письма. Раньше
+// streamGenerate принимал 14 позиционных параметров, из которых шесть
+// подряд типа string (system, user, vacancy, profile, origLetter) —
+// переставить их местами компилятор позволял, и ошибка выглядела бы как
+// «модель вернула эхо» вместо «перепутан профиль с вакансией». За сессию
+// сигнатуру правили трижды, каждый раз с риском сдвинуть соседние аргументы.
+// Именованные поля делают вызов читаемым и убирают класс ошибок.
+type streamParams struct {
+	// fn — шов стриминга; system/user — фактически отправленные промпты.
+	fn     LLMStreamFunc
+	system string
+	user   string
+	// vacancy — исходный текст вакансии для разбора требований.
+	vacancy string
+	// profile — профиль, реально ушедший в фит (после дропов).
+	profile string
+	// reqs/extractOK — результат шага 1 фита, выполненный ДО генерации.
+	reqs      fit.Requirements
+	extractOK bool
+	// mapFn — гибридная разметка покрытия (nil в детерминированном режиме).
+	mapFn fit.MapFunc
+	// concepts — концепты из ленивой инициализации хендлера.
+	concepts []fit.Concept
+	// timeoutSec — бюджет LLM-вызова.
+	timeoutSec int
+	// origLetter — письмо пользователя для автоправки: при отклонённом эхе
+	// отдаётся назад как есть, не заменяясь выводом модели.
+	origLetter string
+	// applied — дропы, реально вырезанные из профиля, для отчётности в UI.
+	applied []prompt.Drop
+}
+
 // streamGenerate вызывает LLM и пишет ответ как SSE: дельты по мере
 // генерации (каждая с flush — UI обновляется живьём), в конце событие
 // done с полным текстом, elapsedMs, warnings постпроверки и вердиктом
@@ -384,7 +445,15 @@ func fitVerdict(ctx context.Context, concepts []fit.Concept, reqs fit.Requiremen
 //
 // reqs/extractOK — уже выполненный шаг 1 фита (см. generate): при
 // extractOK вердикт считается детерминированно, без новых LLM-вызовов.
-func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc, system, user, vacancy, profile string, reqs fit.Requirements, extractOK bool, mapFn fit.MapFunc, concepts []fit.Concept, timeoutSec int, fitFix bool, origLetter string) {
+func streamGenerate(w http.ResponseWriter, ctx context.Context, p streamParams) {
+	// Алиасы для тела функции: тело писалось и менялось под плоский список
+	// параметров, и переименовывать сотни обращений здесь нецелесообразно.
+	fn, system, user := p.fn, p.system, p.user
+	vacancy, profile, origLetter := p.vacancy, p.profile, p.origLetter
+	reqs, extractOK := p.reqs, p.extractOK
+	mapFn, concepts, applied := p.mapFn, p.concepts, p.applied
+	timeoutSec := p.timeoutSec
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
@@ -438,13 +507,16 @@ func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc
 	// 200–400 слов, то есть до ~4 КБ; берём потолок с запасом на длинный
 	// перечень фактов. Скриншот живого бага показывал 11 742 символа.
 	echoWarning := ""
-	if len([]rune(letter)) > maxLetterRunes {
+	if n := len([]rune(letter)); n > maxLetterRunes {
+		// Длина меряется ДО обнуления letter. Раньше присваивание шло первым,
+		// и в сообщение попадал len("") = 0 — диагностика молчала, что это
+		// именно перебор по размеру.
 		letter = ""
 		echoWarning = "модель вернула ответ неприемлемого размера (" +
-			strconv.Itoa(len([]rune(letter))) + " символов вместо ~" +
+			strconv.Itoa(n) + " символов вместо ~" +
 			strconv.Itoa(maxLetterRunes) + ") — похоже на кусок профиля или промпта. Письмо не сохранено, повтори генерацию"
 	}
-	if echoWarning == "" && isPromptEcho(letter, user, origLetter) {
+	if echoWarning == "" && isPromptEcho(letter, user, profile, origLetter) {
 		if strings.TrimSpace(origLetter) != "" {
 			// fit-fix и audit-fix передают исходное письмо — это актив
 			// пользователя, откатываем на него (и при audit-fix тоже: раньше
@@ -485,8 +557,13 @@ func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc
 	// письма и переиспользуется). Детерминированный матчер — ноль токенов;
 	// гибрид (FitEngine="llm") добавляет один вызов модели на разметку
 	// покрытия с откатом на матчер при любой ошибке.
+	//
+	// При отклонённом эхе вердикт НЕ считается. Живой случай (октябрь 2026):
+	// поданное в качестве «письма» содержимое профиля давало ~87% покрытия,
+	// пользователь принимал это за оценку своего письма, а автофикс не
+	// находил проблем и крутил цикл дальше по мусору.
 	var verdict *fit.Fit
-	if extractOK {
+	if extractOK && echoWarning == "" {
 		f := fitVerdict(ctx, concepts, reqs, profile, letter, vacancy, mapFn)
 		if f.Verdict != "" {
 			verdict = &f
@@ -502,6 +579,8 @@ func streamGenerate(w http.ResponseWriter, ctx context.Context, fn LLMStreamFunc
 			Done: true, Letter: letter, ElapsedMs: elapsed.Milliseconds(),
 			Warnings: warnings, Fit: verdict, FitFixable: fixableN,
 			ProfileWarning: profileWarning, UsedSystemPrompt: system,
+			AppliedDropSections: applied,
+			UsedUserPromptBytes: len(user), UsedProfileBytes: len(profile),
 		}) // best-effort
 	}
 	flush()
@@ -775,7 +854,7 @@ func (h *Handler) initConcepts() {
 // точном попадании модель явно цитирует вход, а не пишет письмо. Порог по
 // длине строки отсекает короткие совпадения вроде «### Вакансия» в письме
 // про вакансию.
-func isPromptEcho(letter, user, origLetter string) bool {
+func isPromptEcho(letter, user, profile, origLetter string) bool {
 	// norm снимает знаки-обвязки markdown и схлопывает пробелы: «**### Вакансия**»
 	// и «### Вакансия» — одно и то же эхо, а не совпадение по форме.
 	norm := func(s string) string {
@@ -806,13 +885,32 @@ func isPromptEcho(letter, user, origLetter string) bool {
 	// fit-fix откатывал каждую исправленную версию — «деградация после
 	// нескольких попыток». Контакты, строка стека и цитаты фактов нормально
 	// воспроизводят профиль дословно — это письмо, а не эхо.
+	// Самоотменяющееся исключение — корень живого бага «виснет и выводит
+	// профиль» (октябрь 2026). Исключение по origLetter нужно, чтобы правка
+	// письма не считалась эхом: fit-fix вкладывает исходное письмо в user, и
+	// ответ дословно его повторяет (доля ~100% при ЛЮБОЙ содержательной правке).
+	//
+	// Но fit-fix берёт письмо для следующей итерации из результата ПРЕДЫДУЩЕЙ.
+	// Как только эхо один раз стало «письмом», оно попадает в origLetter и
+	// все его строки помечаются как «собственный текст письма» — детектор
+	// начинает оправдывать само себя, total падает в ноль, и последующие
+	// итерации эхо уже не видят. Именно это давало «несколько попыток
+	// автофикса → профиль на экране».
+	//
+	// Поэтому исключение работает только для строк, которых НЕТ в профиле:
+	// строка письма, случайно совпавшая с фактом, — это всё ещё текст письма,
+	// а строка, дословно взятая и из письма, и из профиля, — это цитата
+	// факта, которую письмо обязано сохранить. Эхо же воспроизводит профиль
+	// целиком, поэтому его строки почти всегда присутствуют в profile.
 	var hit, total int
+	lowProfile := norm(profile)
 	for _, raw := range strings.Split(letter, "\n") {
 		line := norm(raw)
 		if len(line) < echoMinLineLen {
 			continue
 		}
-		if lowOrig != "" && strings.Contains(lowOrig, line) {
+		if lowOrig != "" && strings.Contains(lowOrig, line) &&
+			(lowProfile == "" || !strings.Contains(lowProfile, line)) {
 			continue
 		}
 		total += len(line)
@@ -831,12 +929,17 @@ func isPromptEcho(letter, user, origLetter string) bool {
 	// детектор молчал, а UI показал файл профиля как письмо.
 	//
 	// Признаки, которые не пересекаются с настоящим письмом:
-	//   - ≥3 markdown-заголовка уровня ##/### (письмо использует жирные
-	//     подзаголовки «**Go и highload:**», а не решётки);
+	//   - ≥3 markdown-заголовка (письмо использует жирные подзаголовки
+	//     «**Go и highload:**», а не решётки);
 	//   - при этом ни одного письменного обращения и ни подписи.
+	//
+	// Учитывается и одиночная «#»: профиль открывает им файл верхнего
+	// уровня («# КАРТА МЕТРИК»), а прежняя регулярка ловила только ##/###.
+	// На живом эхе было ровно два «##» и одна «#» — до порога 3 дело не
+	// доходило, и структурный признак молчал.
 	headings := 0
 	for _, raw := range strings.Split(letter, "\n") {
-		if sectionHeadingRe.MatchString(raw) {
+		if anyHeadingRe.MatchString(raw) {
 			headings++
 		}
 	}
@@ -846,8 +949,9 @@ func isPromptEcho(letter, user, origLetter string) bool {
 	return false
 }
 
-// sectionHeadingRe — markdown-заголовок уровня ## или ###.
-var sectionHeadingRe = regexp.MustCompile(`(?m)^\s{0,4}#{2,3}\s+\S`)
+// anyHeadingRe — любой markdown-заголовок, включая одиночную «#»:
+// профиль открывает ей файл верхнего уровня («# КАРТА МЕТРИК»).
+var anyHeadingRe = regexp.MustCompile(`(?m)^\s{0,4}#{1,6}\s+\S`)
 
 // letterMarkerRe — признаки настоящего письма: обращение и подпись.
 var letterMarkerRe = regexp.MustCompile(`(?i)здравствуйте|добрый день|доброе утро|уважением|с уважением|спасибо за внимание|буду рад|рад вас|отправляю`)

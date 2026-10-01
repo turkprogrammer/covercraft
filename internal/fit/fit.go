@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/turkprogrammer/covercraft/internal/cover"
 	"github.com/turkprogrammer/covercraft/internal/prompt"
@@ -582,12 +583,40 @@ func tokenVariants(tok string) []string {
 // время на живых письмах.
 var wordReCache sync.Map
 
+// wordReCacheMax — потолок ёмкости кэша. Ключи приходят из
+// reqTokens(текст вакансии), то есть из пользовательского ввода, и без
+// ограничения процесс растёт всю жизнь.
+//
+// Замер (октябрь 2026): на обычной вакансии 13 токенов дают 16 записей, и
+// повторные прогоны той же вакансии кэш не растят. На синтетической вакансии
+// с 4 000 уникальных латинских слов накопилось 4 006 записей, удержание
+// HeapAlloc после GC — 9,5 МБ, то есть ~2,4 КБ на запись (скомпилированная
+// regexp много тяжелее строки-ключа). При потоке разных вакансий это
+// утечка без предела.
+//
+// 4 096 записей — с запасом выше любой реальной вакансии (сотни токенов) и
+// при этом ~10 МБ в худшем случае, что для десктопного сервиса приемлемо.
+const wordReCacheMax = 4096
+
+// wordReCacheSize — счётчик записей. sync.Map не отдаёт размер, а без него
+// потолок не проверить. Только наши Store, под синхронизацией.
+var wordReCacheSize atomic.Int64
+
 func wordRe(v string) *regexp.Regexp {
 	if r, ok := wordReCache.Load(v); ok {
 		return r.(*regexp.Regexp)
 	}
 	r := regexp.MustCompile(`(?i)(^|[^a-zа-я0-9])` + regexp.QuoteMeta(v) + `([^a-zа-я0-9]|$)`)
-	wordReCache.Store(v, r)
+	// Потолок проверяется ДО Store: при переполнении регулярка просто
+	// компилируется заново на каждый вызов. Это медленно ровно настолько,
+	// насколько вакансия патологична, и зато память ограничена. Для
+	// нормальной вакансии кэш всегда попадает внутрь и остаётся быстрым.
+	if wordReCacheSize.Load() >= wordReCacheMax {
+		return r
+	}
+	if _, loaded := wordReCache.LoadOrStore(v, r); !loaded {
+		wordReCacheSize.Add(1)
+	}
 	return r
 }
 
@@ -647,27 +676,6 @@ func sentences(text string) []string {
 // после позитивного факта, и отрицанием его считать нельзя.
 var bareNegRe = regexp.MustCompile(`(?i)^\s*(опыта нет|нет опыта|опыта\s+(?:\S+\s+){0,3}нет|опыты?[^.!?;]{0,60}нет|нет\s+(?:\S+\s+){0,3}опыта|не работал[а-яё]*|не использ\w*|отсутствует|не зафиксирован|не применял|не приходилось)\s*[.!]?\s*$`)
 
-// bulletHeaderRe — жирный фрагмент в начале буллета: «**Media / Video / Render
-// pipelines:** опыт оптимизации…». Это ЗАГОЛОВОК раздела, а не факт: он
-// повторяет тему требования и ничего не утверждает.
-//
-// Живой кейс Fullstack Backend (сентябрь 2026): требование «Экспертиза в
-// Media/Video» закрывалось как «закрыто в письме», потому что слова media и
-// video находились в заголовке буллета «Media / Video / Render pipelines»,
-// а фактическая часть говорила «готовность осваивать медиа-конвейеры».
-// Слова из заголовка не доказывают опыт: их пишет и пустой буллет-мост.
-var bulletHeaderRe = regexp.MustCompile("^\\W*\\*\\*[^*]{1,80}\\*\\*")
-
-// isHeaderFragment — клауза состоит ТОЛЬКО из жирного заголовка, без
-// содержательной части. Именно такой фрагмент ничего не утверждает:
-//
-//	«**Media / Video / Render pipelines:**»            → заголовок, тема
-//	«**Kafka:** Stable ID, 10 000 RPS, at-least-once»  → факт, закрывает
-//
-// Заголовок с текстом после него фактом считается: там и правда написано про
-// Kafka. Регресс-тесты TestLongParenListIsNotAlternatives («**Kafka:** Stable
-// ID, 10 000 RPS») и TestProfileLimiterDoesNotLeakToOtherTokens ловят ровно
-// это, поэтому отбрасывать можно ТОЛЬКО заголовок целиком.
 // nextIsDeclaration — сразу за текущей клаузой, в том же буллете, идёт
 // декларация готовности/понимания. Клаузы разбираются sentences(), поэтому
 // граница буллета в них потеряна; восстанавливаем её по исходному тексту:
@@ -678,7 +686,7 @@ func nextIsDeclaration(clause, text string) bool {
 	if idx < 0 || idx+1 >= len(sentences(text)) {
 		return false
 	}
-	if !endsWithContinuation(clause, text, idx) {
+	if !endsWithContinuation(clause, text) {
 		return false
 	}
 	return understandingRe.MatchString(sentences(text)[idx+1])
@@ -696,7 +704,7 @@ func clauseIndex(text, clause string) int {
 
 // endsWithContinuation — перед разделителем в исходном тексте стоял «;» или
 // «,», а не «.»/«?»/«!».
-func endsWithContinuation(clause, text string, idx int) bool {
+func endsWithContinuation(clause, text string) bool {
 	pos := strings.Index(text, clause)
 	if pos < 0 {
 		return false
@@ -814,7 +822,7 @@ func inBulletHeader(token, clause, text string) bool {
 	// фрагмент (метрика, имя проекта, технология), заголовок считается
 	// подтверждённым. Для Media/Video содержание — «готовность осваивать»,
 	// декларация, а не факт.
-	restStripped := strings.TrimLeft(rest, ",;:-  ")
+	restStripped := strings.TrimLeft(rest, ",;:-")
 	if restStripped == "" {
 		return true // заголовок без содержания: тема заявлена, факта нет
 	}
@@ -836,6 +844,16 @@ func inBulletHeader(token, clause, text string) bool {
 	return false
 }
 
+// isHeaderFragment — клауза состоит ТОЛЬКО из жирного заголовка, без
+// содержательной части. Именно такой фрагмент ничего не утверждает:
+//
+//	«**Media / Video / Render pipelines:**»            → заголовок, тема
+//	«**Kafka:** Stable ID, 10 000 RPS, at-least-once»  → факт, закрывает
+//
+// Заголовок с текстом после него фактом считается: там и правда написано про
+// Kafka. Регресс-тесты TestLongParenListIsNotAlternatives («**Kafka:** Stable
+// ID, 10 000 RPS») и TestProfileLimiterDoesNotLeakToOtherTokens ловят ровно
+// это, поэтому отбрасывать можно ТОЛЬКО заголовок целиком.
 func isHeaderFragment(clause string) bool {
 	c := stripListMarker(clause)
 	if !strings.HasPrefix(c, "**") {
@@ -846,8 +864,7 @@ func isHeaderFragment(clause string) bool {
 		return false
 	}
 	// Хвост после закрывающей рамки — содержательная часть буллета.
-	rest := strings.TrimLeft(strings.TrimSpace(c[end:]), ":*-—  ")
-	rest = strings.TrimLeft(rest, ":*-—  ")
+	rest := strings.TrimLeft(strings.TrimSpace(c[end:]), ":*-— \u00a0")
 	return rest == ""
 }
 
@@ -1345,7 +1362,7 @@ func coverage(concepts []Concept, req Requirement, letter, profile string) (sour
 			// Concept-уровневый честный пробел понижает буквальное закрытие:
 			// «observability» в письме есть (Prometheus), но трейсинг назван
 			// пробелом словами — «закрыто в письме» здесь нечестно.
-			if note2, gap := conceptGapNote(concepts, req.Text, letter, profile); gap {
+			if note2, gap := conceptGapNote(concepts, req.Text, letter); gap {
 				if s == SrcLetter {
 					return SrcUnknown, note2
 				}
@@ -1410,7 +1427,7 @@ func coverage(concepts []Concept, req Requirement, letter, profile string) (sour
 // требование «PostgreSQL» с соседним «outbox» снова ушло бы в unknown там,
 // где письмо честно пишет «Transactional outbox не использовал» — там
 // отрицание буквальное, оно ловится token-путём раньше.
-func conceptGapNote(concepts []Concept, reqText, letter, profile string) (string, bool) {
+func conceptGapNote(concepts []Concept, reqText, letter string) (string, bool) {
 	if strings.TrimSpace(letter) == "" {
 		return "", false
 	}

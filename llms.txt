@@ -35,7 +35,10 @@ internal/fit/               вердикт отклика: LLM разбирае�
                             кэш в ~/.config/covercraft/concepts.json)
 internal/audit/             постпроверка письма: дубли, стек, потерянные факты
 internal/server/            HTTP на 127.0.0.1:случайный порт,
-                            /api/settings, /api/generate (letter, elapsedMs)
+                            /api/settings, /api/generate (letter, elapsedMs,
+                            наблюдаемость фактической отправки в done:
+                            appliedDropSections, usedUserPromptBytes,
+                            usedProfileBytes)
 internal/window/            CGO: GTK3-окно + WebKit2GTK 4.1 (~70 строк)
 assets/icons/hicolor/       иконки: SVG-исходник + PNG 48–512
 ```
@@ -67,7 +70,7 @@ assets/icons/hicolor/       иконки: SVG-исходник + PNG 48–512
 | GET   | `/`             | UI (HTML из embed) |
 | GET   | `/api/settings` | текущие настройки |
 | POST  | `/api/settings` | сохранить настройки |
-| POST  | `/api/generate` | `{vacancy}` → SSE: `delta`…, `done {letter, elapsedMs, warnings, fit, usedSystemPrompt}` |
+| POST  | `/api/generate` | `{vacancy, systemPrompt, dropSections, letter}` → SSE: `delta`…, `done {letter, elapsedMs, warnings, fit, usedSystemPrompt, appliedDropSections, usedUserPromptBytes, usedProfileBytes}` |
 | POST  | `/api/prompt/compose` | `{vacancy}` → `{dropSections, reason, sections, droppedBytes, elapsedMs}` — отбор разделов, системный промпт не возвращается |
 
 ## Сборка и тесты

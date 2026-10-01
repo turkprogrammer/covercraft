@@ -274,3 +274,72 @@ func TestBuildFitFixPromptBounded(t *testing.T) {
 		t.Errorf("релевантный раздел потерялся при усечении:\n%.500s", got)
 	}
 }
+
+// TestAppliedDrops — AppliedDrops возвращает только реально вырезанные дропы.
+// UI обязан отличать «compose попросил вырезать N» от «вырезано M»: дроп по
+// заголовку, которого в профиле нет, молча ничего не вырезает, и без этой
+// проверки UI рапортовал бы «вырезано N» при полном профиле в модели.
+func TestAppliedDrops(t *testing.T) {
+	dir := writeContext(t, map[string]string{
+		"01-a.md": "# Профиль\n\n## Хвостовый\n\nпрочь\n\n## Нужный\n\nstay\n",
+		"02-b.md": "# Проект\n\n## Второй\n\nalso\n",
+	})
+
+	tests := []struct {
+		name  string
+		drops []prompt.Drop
+		want  []string // "file / heading" реально применённых
+	}{
+		{"точный дроп", []prompt.Drop{{File: "01-a.md", Heading: "## Хвостовый"}}, []string{"01-a.md / ## Хвостовый"}},
+		// Пробелы нормализуются, регистр заголовка — нет (как в DropSections);
+		// регистронезависим только ИМЯ ФАЙЛА (EqualFold в dropsFor).
+		{"нормализация пробелов", []prompt.Drop{{File: "01-a.md", Heading: "##   Хвостовый  "}}, []string{"01-a.md / ##   Хвостовый  "}},
+		{"регистр заголовка не списывается", []prompt.Drop{{File: "01-a.md", Heading: "## хвостовый"}}, nil},
+		{"регистр файла", []prompt.Drop{{File: "01-A.MD", Heading: "## Нужный"}}, []string{"01-A.MD / ## Нужный"}},
+		{"два дропа", []prompt.Drop{
+			{File: "01-a.md", Heading: "## Хвостовый"},
+			{File: "02-b.md", Heading: "## Второй"},
+		}, []string{"01-a.md / ## Хвостовый", "02-b.md / ## Второй"}},
+		{"нет такого файла", []prompt.Drop{{File: "99-нет.md", Heading: "## Хвостовый"}}, nil},
+		{"нет такого заголовка", []prompt.Drop{{File: "01-a.md", Heading: "## Исчезнувший"}}, nil},
+		{"пустой заголовок", []prompt.Drop{{File: "01-a.md", Heading: "   "}}, nil},
+		{"пустой вход", nil, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := AppliedDrops(dir, tt.drops)
+			var names []string
+			for _, d := range got {
+				names = append(names, d.File+" / "+d.Heading)
+			}
+			if strings.Join(names, "|") != strings.Join(tt.want, "|") {
+				t.Errorf("AppliedDrops = %v, хочу %v", names, tt.want)
+			}
+		})
+	}
+}
+
+// TestAppliedDropsAgreesWithDropSections — инвариант: AppliedDrops не может
+// сосчитать дроп применённым, если вырезание им фактически не изменило текст.
+// Это связывает функцию с реальным поведением DropSections, а не только с
+// наличием заголовка в файле.
+func TestAppliedDropsAgreesWithDropSections(t *testing.T) {
+	dir := writeContext(t, map[string]string{
+		"01-a.md": "# Профиль\n\n## Хвостовый\n\nпрочь\n\n## Нужный\n\nstay\n",
+	})
+	present := prompt.Drop{File: "01-a.md", Heading: "## Хвостовый"}
+	absent := prompt.Drop{File: "01-a.md", Heading: "## Исчезнувший"}
+
+	if len(AppliedDrops(dir, []prompt.Drop{present})) != 1 {
+		t.Error("существующий заголовок обязан быть применённым")
+	}
+	if len(AppliedDrops(dir, []prompt.Drop{absent})) != 0 {
+		t.Error("несуществующий заголовок обязан быть отброшен")
+	}
+	if BuildUserPrompt(dir, "V", nil, []prompt.Drop{absent}) != BuildUserPrompt(dir, "V", nil, nil) {
+		t.Error("дроп по отсутствующему заголовку обязан оставить промпт прежним")
+	}
+	if len(AppliedDrops(writeContext(t, map[string]string{}), []prompt.Drop{present})) != 0 {
+		t.Error("в пустом каталоге применённых дропов быть не может")
+	}
+}

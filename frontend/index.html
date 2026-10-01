@@ -263,6 +263,21 @@ input:focus-visible, textarea:focus-visible {
   line-height: 1.5;
 }
 
+/* Факт, подтверждённый генерацией: что реально ушло в модель. Отличается от
+   .prompt-dropinfo (там намерение композера) — расхождение между ними и есть
+   сигнал «compose посчитал не то», поэтому выделено цветом. */
+.prompt-sentinfo {
+  margin: 4px 0 8px;
+  font-size: 11px;
+  color: var(--ink-faint);
+  line-height: 1.5;
+}
+
+.prompt-sentinfo.mismatch {
+  color: var(--warn);
+  font-weight: 600;
+}
+
 
 /* ---------- Рекомендация отклика (internal/fit) ---------- */
 #fit-verdict {
@@ -460,6 +475,7 @@ body.busy #scan {
           <textarea id="systemPrompt" rows="6" spellcheck="false" placeholder="Ты помощник по сопроводительным письмам…"></textarea>
         </div>
         <div class="prompt-dropinfo" id="prompt-dropinfo" hidden></div>
+        <div class="prompt-sentinfo" id="prompt-sentinfo" role="status" hidden></div>
         <div class="btn-row">
           <button class="btn term" id="composePrompt" type="button"
                   title="собрать системный промпт под текущую вакансию и убрать нерелевантные разделы профиля — можно править вручную">
@@ -524,6 +540,7 @@ const els = {
   vacancy: $("vacancy"), apiSub: $("api-sub"), promptSub: $("prompt-sub"),
   composePrompt: $("composePrompt"), undoPrompt: $("undoPrompt"),
   promptDropInfo: $("prompt-dropinfo"),
+  promptSentInfo: $("prompt-sentinfo"),
   auditWarns: $("audit-warns"),
   profileWarning: $("profile-warning"),
   fitVerdict: $("fit-verdict"),
@@ -658,6 +675,77 @@ function renderDropInfo() {
   }
   el.hidden = parts.length === 0;
   el.textContent = parts.join(" ");
+}
+
+// renderSentInfo — что РЕАЛЬНО ушло в модель, по данным SSE-done.
+// Отдельный блок от renderDropInfo намеренно: там намерение композера
+// (предвычисление), здесь факт от сервера. Если promptDrops потерялись по
+// дороге, подпись compose останется прежней — увидит это только здесь.
+// Расхождение между заявленным и применённым числом дропов = compose считал
+// по устаревшему снимку профиля, нажмите compose заново.
+function renderSentInfo(data) {
+  const el = els.promptSentInfo;
+  if (!el) return;
+  const parts = [];
+  // КБ округляются до 0.1, поэтому короткий системный промпт выглядел бы как
+  // «0 КБ». Ниже килобайтового порога показываем байты — иначе строка вводит
+  // в заблуждение сильнее, чем помогает.
+  const kb = n => (n >= 1024 ? Math.round(n / 1024 * 10) / 10 + " КБ" : n + " Б");
+
+  // Системный промпт: пользователю важно, ушёл его текст или дефолт.
+  const sent = (data.usedSystemPrompt || "").trim();
+  const mine = els.systemPrompt.value.trim();
+  const src = sent && sent === mine ? "ваш" : (sent ? "дефолтный" : "пустой");
+  parts.push("в модель ушло: user-промпт " + kb(data.usedUserPromptBytes || 0) +
+    ", профиль для фита " + kb(data.usedProfileBytes || 0) +
+    "; системный промпт — " + src + " (" + kb(sent.length) + ").");
+
+  // Живой случай (октябрь 2026): в поле системного промпта оказался текст
+  // самой вакансии — 63 КБ вместо обычных 1–5 КБ. Модель получила вакансию
+  // дважды, причём второй раз в роли инструкции, а требования вроде
+  // «RabbitMQ» читались как команды. Порог — вчетверо больше дефолта и не
+  // меньше 8 КБ: ручной промпт с парой уточнений — норма, вакансия — нет.
+  //
+  // Условие намеренно НЕ привязано к src: если сервер отдал крупный промпт,
+  // а поле уже очистили (пользователь жмёт reset во время генерации), то
+  // src === "дефолтный" — но 58 КБ дефолтом быть не могут, и привязка к src
+  // промолчала бы ровно в том случае, где предупреждение нужнее всего.
+  let oversize = false;
+  if (sent.length >= 8192 && defaultPrompt &&
+      sent.length >= defaultPrompt.length * 4) {
+    oversize = true;
+    parts.push("внимание: системный промпт вчетверо больше дефолтного (" +
+      kb(sent.length) + " против " + kb(defaultPrompt.length) +
+      ") — если туда попал текст вакансии, вакансия уйдёт в модель дважды. " +
+      "Очистите поле (reset default) и вставьте промпт руками.");
+  }
+
+  const applied = data.appliedDropSections || [];
+  let mismatch = false;
+  if (promptDrops.length) {
+    if (applied.length === promptDrops.length) {
+      parts.push("реально вырезано " + applied.length + ": " +
+        applied.map(d => d.file + " / " + d.heading).join(", ") + ".");
+    } else {
+      mismatch = true;
+      parts.push("ожидалось вырезать " + promptDrops.length +
+        ", реально вырезано " + applied.length +
+        " — часть заголовков не найдена в профиле, нажмите compose заново.");
+    }
+  } else if (applied.length) {
+    // Сервер применил дропы, которых фронт не знает: значение изменилось
+    // извне (другая вкладка) — показываем фактическое.
+    parts.push("реально вырезано " + applied.length + ": " +
+      applied.map(d => d.file + " / " + d.heading).join(", ") + ".");
+  }
+  // Класс отражает оба тревожных признака: расхождение дропов и раздутый
+  // системный промпт. Оба означают «то, что ушло в модель, не то, что вы
+  // ожидали», и оба обязаны быть заметны без чтения текста.
+  el.className = (mismatch || oversize) ? "prompt-sentinfo mismatch" : "prompt-sentinfo";
+  el.textContent = parts.join(" ");
+  // Блок стартует скрытым и показывается только после ответа сервера: до
+  // завершения генерации факта «что ушло в модель» ещё нет.
+  el.hidden = false;
 }
 // composePrompt — один не-стриминговый вызов: отбор нерелевантных вакансии
 // разделов профиля. Поле промпта не трогается: композер его не пишет.
@@ -797,6 +885,9 @@ async function generate() {
   startTimer("генерация", t0);
   els.result.textContent = "";
   els.copy.disabled = true;
+  // Факт предыдущего прогона прячем сразу: пока идёт новая генерация, показанные
+  // байты и дропы относятся к уже завершённому письму, а не к текущему.
+  if (els.promptSentInfo) { els.promptSentInfo.hidden = true; els.promptSentInfo.textContent = ""; }
   let live = 0;
   try {
     const data = await streamGenerate(
@@ -812,6 +903,7 @@ async function generate() {
     showAuditWarnings(data.warnings);
     showFitVerdict(data.fit);
     setProfileWarning(data.profileWarning);
+    renderSentInfo(data);
     // Поле показывает поток дельт, а источник истины — data.letter. Если
     // сервер отклонил эхо промпта, в дельтах уже лежит мусор — приводим
     // вывод к ответу сервера (иначе копирование блокируется, а на экране
@@ -1035,6 +1127,7 @@ async function auditFix() {
     showAuditWarnings(data.warnings);
     showFitVerdict(data.fit);
     setProfileWarning(data.profileWarning);
+    renderSentInfo(data);
     // Как и в generate: ответ сервера важнее дельт — при отклонённом эхо
     // исходное письмо восстанавливается, мусор из потока убирается.
     if (data.letter !== els.result.textContent) {
@@ -1100,6 +1193,7 @@ async function fitFix(maxIter) {
         showAuditWarnings(data.warnings);
         showFitVerdict(data.fit);
         setProfileWarning(data.profileWarning);
+        renderSentInfo(data);
         // Показанный текст — это поток дельт, а НЕ то, что сервер вернул в
         // data.letter. При отклонённом эхе промпта сервер отдаёт исходное
         // письмо (или пустое), а в поток уже уехал кусок файла профиля.
@@ -1113,6 +1207,15 @@ async function fitFix(maxIter) {
         }
         if (!data.letter) {
           setStatus("err: модель вернула эхо промпта вместо письма — показывать нечего, повтори генерацию", "err");
+          break;
+        }
+        // Отклонённое эхо: сервер вернул исходное письмо (оно непустое, поэтому
+        // проверка выше прошла), но вердикт фита по эху НЕ считается — data.fit
+        // пуст. Без этой ветки UI сообщил бы «fit-разбор вакансии не удался»,
+        // хотя разбор как раз удался: письмо не было проверено вовсе.
+        const echoHit = (data.warnings || []).some(w => /эхо промпта/.test(w));
+        if (echoHit) {
+          setStatus("err: модель вернула эхо промпта вместо письма — исходное письмо сохранено, автоправка остановлена. Правь вручную или смени модель", "err");
           break;
         }
         if (!data.fit) {
@@ -1227,6 +1330,9 @@ async function boot() {
       els.result.textContent = ""; els.copy.disabled = true; countChars();
       showAuditWarnings([]);
       setProfileWarning("");
+      // Факт «что ушло в модель» относится к конкретному прогону: остановили —
+      // блок не должен продолжать показывать прошлый user-промпт.
+      if (els.promptSentInfo) { els.promptSentInfo.hidden = true; els.promptSentInfo.textContent = ""; }
       lastFit = null; lastFitCaveats = [];
     }
   });

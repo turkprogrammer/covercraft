@@ -30,6 +30,22 @@
      width="720">
 
 
+## Что нового в 0.3.2
+
+- Автофикс больше не выводит профиль вместо письма: эхо-детектор не мог
+  legitimировать сам себя — после первой успешной итерации эхо попадало в
+  исходное письмо и все его строки помечались как «собственный текст письма».
+  Исключение теперь действует только для строк, которых нет в профиле.
+- При отклонённом эхо фит-вердикт не отправляется: раньше UI получал
+  недостоверные данные, останавливая автофикс.
+- Видно, что реально ушло модели: `appliedDropSections` (дропы, реально
+  вырезанные из профиля), `usedUserPromptBytes`, `usedProfileBytes` и
+  предупреждение о чрезмерном размере промпта.
+- Кэш скомпилированных регулярок ограничен по размеру: его ключи приходят из
+  текста вакансии и никогда не сбрасывались, то есть росли всю жизнь процесса.
+
+Подробности — в [CHANGELOG.md](CHANGELOG.md).
+
 ## Что нового в 0.3.1
 
 - `[ compose ]` больше не переписывает системный промпт: кнопка только
@@ -245,7 +261,8 @@ internal/fit/            фит-матчер: извлечение требов�
                          (LLM-генерация, кэш ~/.config/covercraft/concepts.json)
 internal/server/         HTTP-роутер + швы LLMFunc/LLMStreamFunc для тестов,
                          /api/generate стримит SSE: дельты + done (letter,
-                         elapsedMs, warnings)
+                         elapsedMs, warnings, fit, наблюдаемость отправки);
+                         streamParams — вход одного запуска письма
 internal/window/         CGO: GTK-окно + WebKit2GTK 4.1
 internal/audit/          постпроверка письма: запрещённые паттерны,
                          потерянные факты, дубли, атрибуция метрик
@@ -262,8 +279,27 @@ context/                 user's context: *.md (gitignored, private)
 | GET   | `/`            | UI (HTML из embed) |
 | GET   | `/api/settings`| текущие настройки |
 | POST  | `/api/settings`| сохранить настройки |
-| POST  | `/api/generate`| `{vacancy, systemPrompt, dropSections}` → SSE: `delta`…, `done {letter, elapsedMs, warnings, fit, profileWarning, usedSystemPrompt}` |
+| POST  | `/api/generate`| `{vacancy, systemPrompt, dropSections, letter}` → SSE: `delta`…, `done {letter, elapsedMs, warnings, fit, profileWarning, usedSystemPrompt, appliedDropSections, usedUserPromptBytes, usedProfileBytes}` |
 | POST  | `/api/prompt/compose` | `{vacancy}` → `{dropSections, reason, sections, droppedBytes, elapsedMs}` — отбор разделов, системный промпт не возвращается |
+
+### Поля события `done`
+
+Поля наблюдаемости нужны, чтобы отличить **намерение** от **факта**: композер
+прислал `dropSections`, но профиль могли поправить между вызовами, и часть дропов
+тогда ничего не вырезает.
+
+| Поле | Что значит |
+|------|------------|
+| `appliedDropSections` | Дропы, реально вырезанные из профиля. Может быть короче запрошенного `dropSections` — UI обязан показать расхождение, а не рапортовать «вырезано N». |
+| `usedUserPromptBytes` | Длина user-промпта, реально отправленного модели. |
+| `usedProfileBytes` | Длина профиля, ушедшего в фит. |
+| `usedSystemPrompt` | Фактически отправленный системный промпт: кастом или дефолт. |
+
+`usedUserPromptBytes` и `usedProfileBytes` сериализуются **всегда**, чтобы клиент
+отличал «0 байт» от «поле не пришло». `warnings` предупреждает о prompt ≥8 КБ и
+≥4× от дефолта, а также о неприемлемом размере ответа — когда модель вернула
+кусок профиля или промпта вместо письма, в `warnings` попадает причина, и вердикт
+фита при таком ответе не отправляется.
 
 ## Тесты
 
@@ -271,12 +307,23 @@ context/                 user's context: *.md (gitignored, private)
 go test ./...
 ```
 
+Живой интеграционный прогон (`TestAFLTLiveEndToEnd`, `internal/fit`) по умолчанию
+пропускается: платные вызовы к модели, нужен `CC_LIVE=1` и промпт v4 по пути из
+`CC_V4_PROMPT`. Ключ никогда не берётся из исходников — только из
+`~/.config/covercraft/settings.json`.
+
 Юнит-тесты на все пакеты: настройки (roundtrip, битый JSON, права 0600),
 LLM-клиент (запрос/ответ/ошибки через httptest; reasoning_effort
 отправляется только когда задан), сборка промпта, HTTP-эндпоинты
 (включая 400/502 и elapsedMs), embed-фронтенд (копирайт, селект
 reasoning effort), постпроверка писем (запрещённые паттерны, потерянные
 факты, дубли, атрибуция метрик) и режим автоправки.
+
+Отдельно стоит детектор эха (`isPromptEcho`): он ловит модель, выдавшую кусок
+профиля или промпта вместо письма, и не должен срабатывать на обычной
+содержательной правке письма. Сценарии закрыты в `internal/server`; на живых
+письмах (PHP, SRE, AI-product, fullstack) зафиксированы правые требования,
+которые ранее ложно уходили в `missing`.
 
 ## Отладка
 

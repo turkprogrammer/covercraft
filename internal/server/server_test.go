@@ -1188,7 +1188,7 @@ func TestIsPromptEchoIgnoresRealLetter(t *testing.T) {
 		"- **Geo-mapping Service:** Llama-3.3-70B-Instruct, покрытие регионов 90%\n\n### Вакансия\nLead IAM Engineer (Go)"
 	letter := "Здравствуйте! Стабильный айдентификатор: Kafka, 10 000 RPS, идемпотентность через Upsert в ClickHouse. " +
 		"Geo-mapping: покрытие регионов 90%, стоимость API ниже на 70%."
-	if isPromptEcho(letter, user, "") {
+	if isPromptEcho(letter, user, user, "") {
 		t.Errorf("настоящее письмо принято за эхо промпта:\n%q", letter)
 	}
 }
@@ -1351,6 +1351,138 @@ func TestAuditFixKeepsValidEdit(t *testing.T) {
 	for _, w := range ev.Done.Warnings {
 		if strings.Contains(w, "эхо") || strings.Contains(w, "промпт") {
 			t.Errorf("ложное предупреждение об эхе на валидной правке: %s", w)
+		}
+	}
+}
+
+// TestDoneReportsWhatWasSent — done-событие обязано нести ФАКТ отправки:
+// сколько байт ушло в модель и какие дропы реально вырезаны.
+//
+// Зачем: UI до этого рисовал цифры из ответа /api/prompt/compose, то есть
+// намерение композера. Потеря promptDrops по дороге была невидима — подпись
+// оставалась прежней, а модель получала полный профиль. appliedDropSections
+// отличается от запрошенного ровно в этом случае (профиль правили после
+// compose), и расхождение теперь видно на экране.
+func TestDoneReportsWhatWasSent(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dir := t.TempDir()
+	files := map[string]string{
+		"01-jf.md": "# JF\n\n## JF\n\njoke-fact\n",
+		"02-ml.md": "# ML\n\n## ML\n\nml-fact\n",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var gotUser string
+	h := New(Config{
+		ContextDir: dir,
+		LLM: func(ctx context.Context, system, user string) (string, error) {
+			gotUser = user
+			return "ok", nil
+		},
+		FitLLM: func(ctx context.Context, system, user string) (string, error) {
+			return "{}", nil
+		},
+	})
+
+	send := func(extra map[string]any) *sseDone {
+		t.Helper()
+		bodyMap := map[string]any{"vacancy": "V"}
+		for k, v := range extra {
+			bodyMap[k] = v
+		}
+		body, _ := json.Marshal(bodyMap)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		h.ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("код = %d, тело: %s", rec.Code, rec.Body.String())
+		}
+		ev := parseSSE(t, rec.Body.String())
+		if ev.Done == nil {
+			t.Fatal("нет done-события")
+		}
+		return ev.Done
+	}
+
+	// Без дропов: байты отправлены, применённых дропов нет.
+	plain := send(nil)
+	if plain.UsedUserPromptBytes != len(gotUser) {
+		t.Errorf("usedUserPromptBytes = %d, хочу len(user) = %d", plain.UsedUserPromptBytes, len(gotUser))
+	}
+	if plain.UsedUserPromptBytes == 0 {
+		t.Error("usedUserPromptBytes = 0 при непустом user-промпте")
+	}
+	if plain.UsedProfileBytes == 0 {
+		t.Error("usedProfileBytes = 0 при непустом профиле")
+	}
+	if len(plain.AppliedDropSections) != 0 {
+		t.Errorf("без дропов appliedDropSections непуст: %+v", plain.AppliedDropSections)
+	}
+
+	// С дропом: применён ровно он, и в модель ушло меньше байт.
+	cut := send(map[string]any{
+		"dropSections": []map[string]string{{"file": "02-ml.md", "heading": "## ML"}},
+	})
+	if len(cut.AppliedDropSections) != 1 || cut.AppliedDropSections[0].Heading != "## ML" {
+		t.Errorf("appliedDropSections = %+v, хочу один дроп ## ML", cut.AppliedDropSections)
+	}
+	if cut.AppliedDropSections[0].File != "02-ml.md" {
+		t.Errorf("в appliedDropSections файл %q, хочу 02-ml.md", cut.AppliedDropSections[0].File)
+	}
+	if cut.UsedUserPromptBytes >= plain.UsedUserPromptBytes {
+		t.Errorf("после дропа %d байт, без дропа %d — вырезание обязано уменьшать промпт",
+			cut.UsedUserPromptBytes, plain.UsedUserPromptBytes)
+	}
+	if strings.Contains(gotUser, "ml-fact") {
+		t.Errorf("вырезанный факт попал в модель:\n%s", gotUser)
+	}
+
+	// Дроп по заголовку, которого в профиле нет: применённых дропов ноль,
+	// хотя запрошен один. Именно это расхождение показывает UI.
+	stale := send(map[string]any{
+		"dropSections": []map[string]string{{"file": "02-ml.md", "heading": "## Исчезнувший"}},
+	})
+	if len(stale.AppliedDropSections) != 0 {
+		t.Errorf("дроп по отсутствующему заголовку не должен считаться применённым: %+v", stale.AppliedDropSections)
+	}
+	if stale.UsedUserPromptBytes != plain.UsedUserPromptBytes {
+		t.Errorf("неприменённый дроп изменил промпт: %d против %d", stale.UsedUserPromptBytes, plain.UsedUserPromptBytes)
+	}
+}
+
+// TestDoneByteFieldsAlwaysSerialized — фронт обязан отличать «0 байт» от
+// «поле не пришло в ответе». Поэтому поля без omitempty (как FitFixable).
+func TestDoneByteFieldsAlwaysSerialized(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "01-p.md"), []byte("# P\n\n## P\n\nfact\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := New(Config{
+		ContextDir: dir,
+		LLM: func(ctx context.Context, system, user string) (string, error) {
+			return "ok", nil
+		},
+		FitLLM: func(ctx context.Context, system, user string) (string, error) {
+			return "{}", nil
+		},
+	})
+	body, _ := json.Marshal(map[string]any{"vacancy": "V"})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("код = %d", rec.Code)
+	}
+	for _, field := range []string{`"usedUserPromptBytes":`, `"usedProfileBytes":`} {
+		if !strings.Contains(rec.Body.String(), field) {
+			t.Errorf("в SSE нет %s — поле обязано сериализоваться всегда", field)
 		}
 	}
 }

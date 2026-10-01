@@ -238,6 +238,43 @@ func dropsFor(name string, drops []prompt.Drop) []prompt.Drop {
 	return out
 }
 
+// AppliedDrops — подмножество drops, реально вырезанных из профиля: файл
+// существует и заголовок в нём есть.
+//
+// Зачем: compose возвращает дропы по снимку секций, а профиль к моменту
+// генерации мог измениться (пользователь правил context/*.md). Дроп по
+// заголовку, которого больше нет, молча ничего не вырезает — UI обязан
+// показать расхождение, а не рапортовать «вырезано N».
+//
+// Сопоставление то же, что в DropSections: имя файла без учёта регистра
+// (dropsFor) + нормализованный заголовок как заголовок (headingLevel).
+func AppliedDrops(contextDir string, drops []prompt.Drop) []prompt.Drop {
+	if len(drops) == 0 {
+		return nil
+	}
+	var out []prompt.Drop
+	for _, name := range mdNames(contextDir) {
+		for _, d := range dropsFor(name, drops) {
+			h := normalizeHeading(d.Heading)
+			if h == "" {
+				continue
+			}
+			raw, err := os.ReadFile(filepath.Join(contextDir, name))
+			if err != nil {
+				continue // гонка с пользователем, редактирующим файлы
+			}
+			for _, line := range strings.Split(string(raw), "\n") {
+				trimmed := strings.TrimSpace(line)
+				if headingLevel(trimmed) > 0 && normalizeHeading(trimmed) == h {
+					out = append(out, d)
+					break
+				}
+			}
+		}
+	}
+	return out
+}
+
 // ProfileSections — квалифицированные заголовки всех *.md из contextDir:
 // "file.md :: ## Заголовок". Композер видит только эти строки вместо 67 КБ
 // профиля. Сортировка по именам файлов — как в BuildUserPrompt.

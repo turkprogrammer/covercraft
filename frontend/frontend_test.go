@@ -230,3 +230,74 @@ func TestGenerateReportsEmptyLetterAsError(t *testing.T) {
 		t.Error("пустой letter после генерации должен давать err-статус")
 	}
 }
+
+// TestSentInfoPanelShowsFactNotIntent — рядом с подписью compose (намерение,
+// предвычисление на клиенте) обязан стоять блок с фактом от SSE-done.
+// Без него потеря promptDrops между compose и /api/generate невидима: подпись
+// остаётся прежней, а модель получает полный профиль. usedSystemPrompt
+// бэкенд отдаёт и это покрыто TestDoneCarriesUsedSystemPrompt — фронт обязан
+// его читать, иначе доказательство отбрасывается.
+func TestSentInfoPanelShowsFactNotIntent(t *testing.T) {
+	for _, want := range []string{
+		`id="prompt-sentinfo"`,
+		"function renderSentInfo",
+		"renderSentInfo(data)",
+		"data.appliedDropSections",
+		"data.usedUserPromptBytes",
+		"data.usedProfileBytes",
+		"data.usedSystemPrompt",
+		"prompt-sentinfo mismatch", // расхождение обязано быть заметно
+		"нажмите compose заново",
+	} {
+		if !strings.Contains(IndexHTML, want) {
+			t.Errorf("в UI нет %q — факт отправки обязан быть виден", want)
+		}
+	}
+	// Факт приходит по всем путям: обычная генерация, audit-fix, fit-fix.
+	if got := strings.Count(IndexHTML, "renderSentInfo(data)"); got < 4 { // 3 вызова + объявление
+		t.Errorf("renderSentInfo(data) встречается %d раз(а), хочу минимум 4", got)
+	}
+}
+
+// TestSentInfoWarnsOnOversizedSystemPrompt — живой случай: в поле системного
+// промпта оказался текст самой вакансии (63 КБ вместо 1–5 КБ). Вакансия ушла
+// бы в модель дважды, второй раз в роли инструкции.
+func TestSentInfoWarnsOnOversizedSystemPrompt(t *testing.T) {
+	for _, want := range []string{
+		"sent.length >= 8192",
+		"defaultPrompt.length * 4",
+		"внимание: системный промпт вчетверо больше дефолтного",
+		"reset default",
+	} {
+		if !strings.Contains(IndexHTML, want) {
+			t.Errorf("в UI нет %q — раздутый системный промпт обязан быть виден", want)
+		}
+	}
+	// Флаг должен влиять на подсветку, а не только дописывать текст: иначе
+	// предупреждение есть, а блок выглядит как обычный.
+	if !strings.Contains(IndexHTML, `(mismatch || oversize) ? "prompt-sentinfo mismatch"`) {
+		t.Error("oversize не участвует в выборе класса — предупреждение останется незаметным")
+	}
+}
+
+// TestFitFixStopsOnRejectedEcho — правка 4 меняет контракт: при отклонённом
+// эхе сервер не считает вердикт фита (data.fit пуст), но возвращает исходное
+// непустое письмо. Без отдельной ветки UI сообщал бы «fit-разбор вакансии не
+// удался» — то есть обвинил бы не тот этап.
+func TestFitFixStopsOnRejectedEcho(t *testing.T) {
+	for _, want := range []string{
+		"const echoHit = (data.warnings || []).some(w => /эхо промпта/.test(w));",
+		"автоправка остановлена",
+	} {
+		if !strings.Contains(IndexHTML, want) {
+			t.Errorf("в UI нет %q — отклонённое эхо должно останавливать автофикс с внятной причиной", want)
+		}
+	}
+	// Ветка обязана стоять ДО проверки data.fit: при отклонённом эхе data.fit
+	// пуст по построению, иначе сработает неверное сообщение.
+	echoAt := strings.Index(IndexHTML, "const echoHit")
+	fitAt := strings.Index(IndexHTML, "if (!data.fit)")
+	if echoAt < 0 || fitAt < 0 || echoAt > fitAt {
+		t.Errorf("ветка отклонённого эха (поз. %d) должна идти раньше проверки data.fit (поз. %d)", echoAt, fitAt)
+	}
+}
