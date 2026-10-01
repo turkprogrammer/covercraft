@@ -10,7 +10,6 @@ dogfood/
 # IDE
 .idea/
 /dist/
-internal/fit/golden_test.go
 
 # локальные черновики агентов (планы, состояние сессий)
 .opencode/
