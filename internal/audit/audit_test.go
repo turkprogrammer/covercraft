@@ -411,3 +411,49 @@ func TestCheckProfileEmptyProfileIsSilent(t *testing.T) {
 		t.Errorf("без профиля проверять нечего, получили: %v", r.Warnings)
 	}
 }
+
+// TestNoSQLCategoryWithEngineInProfile — регресс живого прогона АФЛТ
+// (сентябрь 2026). Письмо писало «NoSQL и микросервисы: ClickHouse,
+// Elasticsearch», а guard ловил «NoSQL» как фабрикацию, потому что искал
+// буквальное слово «NoSQL» в профиле. ClickHouse и Elasticsearch —
+// NoSQL-движки, и профиль их подтверждает: категория закрыта своими
+// представителями.
+func TestNoSQLCategoryWithEngineInProfile(t *testing.T) {
+	letter := "• Микросервисы и БД: PostgreSQL, MySQL, Redis (кэш), Kafka; NoSQL и микросервисы: ClickHouse, Elasticsearch; проектирование event-driven архитектур."
+	profile := "PostgreSQL, MySQL, Redis, Kafka, ClickHouse, Elasticsearch, event-driven"
+	for _, w := range CheckProfile(letter, profile).Warnings {
+		if strings.Contains(w, "NoSQL") {
+			t.Errorf("NoSQL при ClickHouse/Elasticsearch в профиле — не фабрикация: %s", w)
+		}
+	}
+}
+
+// TestNoSQLWithoutEngineStillFlagged — обратная сторона: если в профиле нет
+// ни одного NoSQL-движка, «NoSQL» остаётся подозрительным.
+func TestNoSQLWithoutEngineStillFlagged(t *testing.T) {
+	letter := "• Опыт с NoSQL: ClickHouse и Elasticsearch в production."
+	profile := "PostgreSQL, Redis, Kafka"
+	flagged := false
+	for _, w := range CheckProfile(letter, profile).Warnings {
+		if strings.Contains(w, "NoSQL") {
+			flagged = true
+		}
+	}
+	if !flagged {
+		t.Error("NoSQL без движков в профиле должен оставаться под вопросом")
+	}
+}
+
+// TestStdlibCallNotFabrication — регресс живого прогона АФЛТ (сентябрь
+// 2026). «context.WithTimeout» — вызов стандартной библиотеки Go, а не
+// инструмент кандидата; infraCamelRe вытаскивал «WithTimeout» и требовал
+// найти его в профиле.
+func TestStdlibCallNotFabrication(t *testing.T) {
+	letter := "• Конкурентный код: ProcessManager (20+ воркеров, graceful shutdown), отмена через context.WithTimeout и time.After."
+	profile := "ProcessManager, graceful shutdown, channels"
+	for _, w := range CheckProfile(letter, profile).Warnings {
+		if strings.Contains(w, "WithTimeout") || strings.Contains(w, "After") {
+			t.Errorf("вызов стандартной библиотеки не должен считаться инструментом: %s", w)
+		}
+	}
+}

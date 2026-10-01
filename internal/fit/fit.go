@@ -286,6 +286,13 @@ var bridges = map[string]bridge{
 	"outbox":          {regexp.MustCompile(`(?i)at-least-once|идемпотентн|буферизац|polling|событийн.{0,20}журнал|журнал.{0,20}событ`), "мост: событийный журнал в БД с polling-потребителями (geolocation.alerts), буферизованный продюсер и идемпотентный Upsert → transactional outbox (без атомарности с транзакцией PG и брокерной доставки)"},
 	"rfc":             {regexp.MustCompile(`(?i)\badr\b|архитектурн.{0,20}решени|design[ _-]?doc|дизайн-документ|документаци|decision record`), "мост: архитектурные решения (ADR, документация в репозиториях) → RFC и дизайн-документы"},
 	"observability":   {regexp.MustCompile(`(?i)prometheus|grafana|мониторинг|трейсин|трейс`), "мост: опыт мониторинга метрик и дашбордов → observability"},
+	// HTTP — транспорт, а не отдельная технология в стеке. Кандидат пишет
+	// «gRPC» и «laravel-api», но слово «HTTP» в письме не употребляет, и
+	// требование «Опыт работы с HTTP» уходило в missing. Мост отражает
+	// фактическую связь: gRPC (HTTP/2) и REST API работают поверх HTTP.
+	// Живой кейс АФЛТ (сентябрь 2026).
+	"http": {regexp.MustCompile(`(?i)\bgrpc\b|\brest\b|api|веб-сервис|веб\s+приложен|http|сетев`),
+		"мост: gRPC и REST API работают поверх HTTP — транспорт закрыт опытом веб-сервисов"},
 }
 
 // softTerms — мягкие требования: не факты и не пробелы. Фит их не
@@ -381,7 +388,22 @@ var stopwords = map[string]bool{
 	"at": true, "to": true, "with": true, "for": true, "a": true,
 	"senior": true, "middle": true, "junior": true, "lead": true,
 	"years": true, "year": true, "experience": true, "work": true,
-	"com": true, "http": true, "https": true, "www": true,
+	"com": true, "https": true, "www": true, "web": true,
+	// «http» и «web» вынесены из стоп-слов. Стоп-слово — слово, которое НЕ
+	// является технологией никогда («years», «senior», «trade-offs»).
+	// «web» — существительное о типе приложения, а не технология. Живой
+	// кейс АФЛТ (сентябрь 2026): требование «Разработка производительных
+	// сервисов: API для web-приложений, интеграционных и служебных модулей»
+	// давало tokens=[api, web]; web в письме нет, found=1 < 2 (порог
+	// majority), а правило 50% требует len(tokens) >= 6 — требование уходило
+	// в missing, и ОДИН такой ложный пробел ронял вердикт в skip при
+	// полностью закрытых остальных must-have.
+	//
+	// «http» — наоборот, технология, которую кандидат закрывает опытом
+	// gRPC/REST API, но не пишет словом «HTTP». Со стоп-словом требование
+	// «Опыт работы с HTTP» уходило в ветку len(tokens)==0 и давало unknown
+	// «нет данных» — а это ложь: транспорт у кандидата есть. Теперь это
+	// мост (bridges["http"]) — честная оговорка, а не пробел.
 	// Функциональный шум англоязычных требований: «you've written tests
 	// and you believe in them, not just on your CV» — «written tests
 	// believe them just cv» не технологии, а нарратив. В reqTokens

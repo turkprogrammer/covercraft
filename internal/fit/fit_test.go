@@ -1489,3 +1489,70 @@ func TestMustGapStillForcesSkip(t *testing.T) {
 		t.Errorf("два незакрытых must обязаны давать skip: verdict=%s", f.Verdict)
 	}
 }
+
+// TestWebAPIServicesNotMissing — регресс живого прогона АФЛТ (сентябрь
+// 2026). Требование «Разработка производительных сервисов: API для
+// web-приложений…» давало tokens=[api, web]: «web» — существительное о типе
+// приложения, а не технология, и его в письме нет. found=1 при пороге
+// majority 2, а правило 50% требует len(tokens) >= 6 — требование уходило в
+// missing, и ОДИН такой ложный пробел ронял вердикт в skip при полностью
+// закрытых остальных must-have.
+func TestWebAPIServicesNotMissing(t *testing.T) {
+	reqs := Requirements{MustHave: []Requirement{
+		{Text: "Разработка производительных сервисов: API для web-приложений, интеграционных и служебных модулей", Kind: "must"},
+		{Text: "Глубокие знания Golang и его концепций", Kind: "must"},
+	}}
+	letter := "• Go и highload: Fraud Engine (multi-tenancy, Random Forest на Go), Stable ID (Kafka, 10 000 RPS).\n" +
+		"• Микросервисы: gRPC в микросервисах банка Росгосстрах, laravel-api, REST API."
+	f := Evaluate(DefaultConcepts(), reqs, "laravel-api, gRPC, REST API, Kafka", letter, "вакансия")
+	for _, r := range f.Missing {
+		if strings.Contains(r.Text, "web-приложений") {
+			t.Errorf("требование про web/API-сервисы не должно быть пробелом: %q", r.Note)
+		}
+	}
+	if f.Verdict == Skip {
+		t.Errorf("ложный пробел роняет вердикт: verdict=%s missing=%d", f.Verdict, len(f.Missing))
+	}
+}
+
+// TestHTTPRequirementIsHonestCaveatNotGap — «Опыт работы с HTTP» при
+// отсутствии слова «HTTP» в письме. Раньше «http» был стоп-словом, и
+// требование уходило в ветку len(tokens)==0 и давало unknown «нет данных».
+// Это ложь: HTTP-транспорт у кандидата есть, он закрыт опытом gRPC и REST
+// API. Теперь это мост — честная оговорка, а не пробел и не «нет данных».
+func TestHTTPRequirementIsHonestCaveatNotGap(t *testing.T) {
+	reqs := Requirements{MustHave: []Requirement{
+		{Text: "Опыт работы с HTTP", Kind: "must"},
+	}}
+	letter := "• Микросервисы: gRPC в микросервисах банка Росгосстрах, REST API (laravel-api)."
+	f := Evaluate(DefaultConcepts(), reqs, "gRPC, REST API, laravel-api", letter, "вакансия")
+	for _, r := range f.Missing {
+		if strings.Contains(r.Text, "HTTP") {
+			t.Errorf("HTTP не должен быть пробелом при гRPC/REST в письме: %q", r.Note)
+		}
+	}
+	if f.Verdict == Skip {
+		t.Errorf("HTTP-требование роняет вердикт: verdict=%s", f.Verdict)
+	}
+}
+
+// TestHTTPGapWhenNoWebExperience — мост не должен превращаться в амнистию.
+// Если в письме нет ни gRPC, ни REST, ни API, но кандидат ЧЕСТНО написал
+// «с HTTP не работал», требование становится unknown «пробел назван
+// словами» — это честное раскрытие, не missing. Главное здесь: письмо не
+// должно молча закрыть требование как «закрыто в письме».
+func TestHTTPGapWhenNoWebExperience(t *testing.T) {
+	reqs := Requirements{MustHave: []Requirement{
+		{Text: "Опыт работы с HTTP", Kind: "must"},
+	}}
+	letter := "• С HTTP не работал, готов освоить; писал на Go парсер CSV-файлов."
+	f := Evaluate(DefaultConcepts(), reqs, "CSV, Go", letter, "вакансия")
+	for _, r := range f.Covered {
+		if strings.Contains(r.Text, "HTTP") && r.Source == SrcLetter {
+			t.Errorf("мост закрыл HTTP без веб-опыта: %q", r.Note)
+		}
+	}
+	if len(f.Missing) == 0 && len(f.Caveats) == 0 {
+		t.Errorf("HTTP без веб-опыта обязан оставаться пробелом или оговоркой, а не закрытым: %+v", f)
+	}
+}

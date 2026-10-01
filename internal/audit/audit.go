@@ -684,16 +684,64 @@ func claimPositively(letter, term string) bool {
 // заявлен в письме утвердительно, но либо отсутствует в профиле, либо там
 // прямо отрицается. Слова из стоплиста и термины, реально подтверждённые
 // профилем, проверку проходят.
+// noSQLEngines — конкретные NoSQL-движки. Категория «NoSQL» подтверждена
+// профилем, если в нём назнен хотя бы один движок: письмо «NoSQL и
+// микросервисы: ClickHouse, Elasticsearch» не выдумывает NoSQL — оно
+// перечисляет его представителей, и профиль их подтверждает.
+// Живой прогон АФЛТ (сентябрь 2026): guard ловил «NoSQL» как фабрикацию,
+// хотя ClickHouse и Elasticsearch в том же письме и в профиле.
+//
+// Redis и Memcached сюда НЕ входят: это кэш, он есть почти в каждом
+// профиле, и с ним «NoSQL» подтверждаться не должен — иначе проверка
+// потеряла бы смысл для профилей без документных/колоночных NoSQL.
+var noSQLEngines = regexp.MustCompile(`(?i)clickhouse|elasticsearch|opensearch|mongo|mongodb|cassandra|couchbase|dynamodb|neo4j|couchdb|riak|arangodb`)
+
+// stdlibCallRe — обращение к символу пакета стандартной библиотеки
+// («context.WithTimeout», «sync.Mutex», «time.After»).
+var stdlibCallRe = regexp.MustCompile(`\b([a-z][a-z0-9]*(?:/[a-z0-9]+)*)\.([A-Z][A-Za-z0-9_]*)`)
+
+// stdlibQualifiedIdents — множество идентификаторов письма, которые
+// принадлежат пакету stdlib: перед точкой стоит известный stdlib-пакет.
+// Именно их infraCamelRe вытащит как CamelCase-термины, хотя проверять их
+// наличие в профиле не нужно.
+func stdlibQualifiedIdents(letter string) map[string]bool {
+	out := map[string]bool{}
+	for _, m := range stdlibCallRe.FindAllStringSubmatch(letter, -1) {
+		if stdlibPkgs.MatchString(m[1]) {
+			out[strings.ToLower(m[2])] = true
+		}
+	}
+	return out
+}
+
+// stdlibPkgs — пакеты стандартной библиотеки Go. «context.WithTimeout»
+// написан CamelCase, и infraCamelRe вытаскивает из письма именно «WithTimeout»
+// (без префикса пакета), после чего guard требует найти это слово в профиле.
+// Но это не инструмент кандидата, а вызов stdlib: проверять бессмысленно.
+// Живой прогон АФЛТ (сентябрь 2026).
+var stdlibPkgs = regexp.MustCompile(`(?i)^(context|sync|fmt|os|io|net/http|net/url|strings|strconv|bytes|errors|sort|time|math|regexp|encoding/json|encoding/base64|bufio|log|path/filepath|runtime|reflect|slices|maps|cmp|iter|testing|atomic|sync/atomic|embed|crypto|hash|container/heap|math/rand|unicode|html|compress/gzip|io/ioutil)$`)
+
 func CheckInfraClaims(letter, profile string) Result {
 	var r Result
 	low := strings.ToLower(profile)
 	seen := map[string]bool{}
+	stdlibIdent := stdlibQualifiedIdents(letter)
 	check := func(term string) {
 		key := strings.ToLower(term)
 		if len(term) < 3 || infraNeutralWords[key] || infraCommonWords[key] || seen[key] {
 			return
 		}
 		seen[key] = true
+		// Стандартная библиотека (context.WithTimeout) — не заявка на
+		// инструмент, а обращение к API языка.
+		if stdlibIdent[strings.ToLower(term)] {
+			return
+		}
+		// Категория, закрытая конкретными представителями: «NoSQL» при
+		// ClickHouse/Elasticsearch в профиле — подтверждённый факт.
+		if (key == "nosql" || key == "no-sql") && noSQLEngines.MatchString(profile) {
+			return
+		}
 		if !claimPositively(letter, term) {
 			return
 		}
