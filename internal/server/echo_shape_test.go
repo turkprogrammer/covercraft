@@ -368,3 +368,126 @@ func TestStreamParamsDistinctFieldsReachConsumers(t *testing.T) {
 		t.Error("user-промпт и профиль не могут иметь одинаковую длину — подозрение на перестановку")
 	}
 }
+
+// serverSource — исходник server.go для проверок по тексту. Пакет internal
+// компилируется из этих же файлов, поэтому os.ReadFile на собственный
+// исходник работает в тестах.
+func serverSource(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile("server.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// TestEchoSourceDistinguishedInMessage — при откате на исходное письмо эхо
+// вернула АВТОПРАВКА (исходное письмо подаётся только ей), а не генерация.
+// Прежний текст «модель вернула эхо промпта вместо письма» читался как
+// приговор самому письму, хотя письмо слева было нормальным — противоречие
+// прямо на экране (живой случай, октябрь 2026).
+func TestEchoSourceDistinguishedInMessage(t *testing.T) {
+	src := serverSource(t)
+	if !strings.Contains(src, "автоправка вернула эхо промпта вместо письма") {
+		t.Error("при откате на исходное письмо виновником должна называться автоправка")
+	}
+	if strings.Contains(src, `"модель вернула эхо промпта вместо письма — исходное письмо сохранено`) {
+		t.Error("формулировка «модель вернула эхо… — исходное письмо сохранено» вводила в заблуждение")
+	}
+	// Ветка без исходного письма — обычная генерация: «автоправка» тут неверна.
+	if !strings.Contains(src, "письмо не сохранено, повтори генерацию") {
+		t.Error("ветка без исходного письма должна предлагать повторить генерацию")
+	}
+}
+
+// TestAuditRunsOnEchoWithLetterKept — подавление аудита при отклонённом эхо
+// оправдано ТОЛЬКО когда письма нет: тогда Check даёт замечания-мусор по
+// пустой строке. Если письмо уцелело (откат на исходное), аудит обязан
+// отработать — иначе пользователь не видит настоящих дефектов письма,
+// включая превышение объёма (живой случай, октябрь 2026).
+func TestAuditRunsOnEchoWithLetterKept(t *testing.T) {
+	src := serverSource(t)
+	if !strings.Contains(src, `case echoWarning != "" && strings.TrimSpace(letter) == "":`) {
+		t.Error("подавление аудита должно срабатывать только на пустом письме")
+	}
+	checkAt := strings.Index(src, "audit.CheckWithMust(letter, vacancy, len(reqs.MustHave)).Warnings")
+	echoAppendAt := strings.Index(src, "warnings = append(warnings, echoWarning)")
+	if checkAt < 0 || echoAppendAt < 0 {
+		t.Fatalf("ожидались вызов аудита (поз. %d) и добавление эхо-диагностики (поз. %d)", checkAt, echoAppendAt)
+	}
+	if checkAt > echoAppendAt {
+		t.Error("аудит должен отработать раньше, чем эхо-диагностика попадёт в список")
+	}
+}
+
+// TestVerdictComputedOnEchoRollbackToLetter — живой баг (октябрь 2026):
+// автоправка вернула эхо, сервер откатил на исходное письмо. Панель
+// вердикта при этом ПУСТЕЛА, а кнопка fit-fix работала и письмо правила:
+// противоречие прямо на экране. Причина — условие `echoWarning == ""`,
+// по которому вердикт гасился и на живом письме тоже.
+//
+// Письмо после отката настоящее, его разбор вакансии выполнен, и разбор
+// требований удался — вердикт обязан считаться.
+func TestVerdictComputedOnEchoRollbackToLetter(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dir := t.TempDir()
+	profile := "# КАРТА МЕТРИК\n- 10 000 RPS — Stable ID (Kafka, 20+ воркеров)\n" +
+		"## 2. PHP — PRODUCTION\n- **Symfony:** E-commerce-Lite (7.2, Hexagonal)\n"
+	if err := os.WriteFile(filepath.Join(dir, "01-профиль.md"), []byte(profile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	orig := "Здравствуйте! Меня заинтересовала ваша вакансия PHP/Symfony разработчика.\n\n" +
+		"**Symfony:** E-commerce-Lite (7.2, Hexagonal), PHPUnit 13, production.\n\n" +
+		"**Адаптация под ваш стек:** Symfony для меня основной фреймворк.\n\n" +
+		"Стек: PHP, Symfony, PostgreSQL\n\n" +
+		"+7 (000) 000-00-00 | Telegram: @example\n" +
+		"Буду рад обсудить ваши задачи. Спасибо за внимание!\n"
+	h := New(Config{
+		ContextDir: dir,
+		LLMStream: func(ctx context.Context, system, user string, onDelta func(string)) (string, error) {
+			// Эхо профиля: сервер обязан откатиться на orig.
+			echo := "# КАРТА МЕТРИК\n- 10 000 RPS — Stable ID (Kafka, 20+ воркеров)\n" +
+				"## 2. PHP — PRODUCTION\n- **Symfony:** E-commerce-Lite (7.2, Hexagonal)\n"
+			onDelta(echo)
+			return echo, nil
+		},
+		FitLLM: func(ctx context.Context, system, user string) (string, error) {
+			return `{"role":"php-primary","mustHave":[{"text":"Symfony","kind":"must","category":"stack"}]}`, nil
+		},
+	})
+	body, _ := json.Marshal(map[string]any{
+		"vacancy":  "PHP/Symfony backend, требуется Symfony",
+		"auditFix": true,
+		"letter":   orig,
+		"warnings": []string{"«Symfony» потерян из буллетов"},
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+
+	ev := parseSSE(t, rec.Body.String())
+	if ev.Done == nil {
+		t.Fatal("нет done-события")
+	}
+	if ev.Done.Letter != orig {
+		t.Fatalf("после отката должно остаться исходное письмо, получили %q", ev.Done.Letter)
+	}
+	// Главное: вердикт по живому письму считается, панель не должна быть пустой.
+	if ev.Done.Fit == nil {
+		t.Fatal("вердикт по уцелевшему письму не посчитан — панель вердикта останется пустой при рабочей кнопке fit-fix")
+	}
+	if ev.Done.Fit.Verdict == "" {
+		t.Error("вердикт пустой")
+	}
+	// Диагностика об эхо обязана быть в замечаниях, а аудит — отработать.
+	var sawEcho bool
+	for _, w := range ev.Done.Warnings {
+		if strings.Contains(w, "эхо промпта") {
+			sawEcho = true
+		}
+	}
+	if !sawEcho {
+		t.Errorf("диагностика об эхо потерялась среди замечаний: %v", ev.Done.Warnings)
+	}
+}

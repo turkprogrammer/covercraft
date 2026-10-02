@@ -294,6 +294,10 @@ input:focus-visible, textarea:focus-visible {
 #fit-verdict.verdict-apply .fit-title { color: var(--ok); }
 #fit-verdict.verdict-apply_with_caveats .fit-title { color: var(--warn); }
 #fit-verdict.verdict-skip .fit-title { color: var(--danger); }
+/* verdict-note — вердикта нет, панель объясняет причину (упавший разбор
+   вакансии). Без этого панель просто исчезала, а кнопка fit-fix
+   оставалась: пользователь видел противоречие (живой баг, октябрь 2026). */
+#fit-verdict.verdict-note .fit-title { color: var(--warn); }
 #fit-verdict ul { margin: 0; padding-left: 18px; }
 #fit-verdict li { margin: 2px 0; }
 
@@ -901,7 +905,7 @@ async function generate() {
       },
     );
     showAuditWarnings(data.warnings);
-    showFitVerdict(data.fit);
+    showFitVerdict(data.fit, data.fitNote);
     setProfileWarning(data.profileWarning);
     renderSentInfo(data);
     // Поле показывает поток дельт, а источник истины — data.letter. Если
@@ -930,10 +934,21 @@ async function generate() {
 
 /* ---------- постпроверка письма ---------- */
 let lastWarnings = [];
+// lastDefects — реальные дефекты письма последней СОДЕРЖАТЕЛЬНОЙ проверки.
+// Нужен отдельно от lastWarnings: тот перезаписывается каждым ответом, и при
+// отклонённом эхо в нём остаётся только диагностика. Без lastDefects кнопка
+// «повтори автоправку» исчезала бы ровно тогда, когда сервер зовёт ею
+// воспользоваться (живой баг, октябрь 2026).
+let lastDefects = [];
 // lastFit — последние данные fit, используются fit-fix для повторных вызовов.
 let lastFit = null;
 // lastFitCaveats — строки caveat вида «текст — примечание», передаваемые в fitFix.
 let lastFitCaveats = [];
+// lastFitObjects — те же caveat, но объектами {text, note, source}. Нужны
+// отдельно от lastFitCaveats (готовых строк): при отклонённом эхо вердикта
+// нет, а перерисовать кнопку fit-fix можно только по объектам — строки не
+// содержат note, по которому hasFixableCaveats отбирает fixable.
+let lastFitObjects = [];
 
 // isEchoWarning — замечание-диагностика про отклонённый ответ модели, а не
 // дефект письма. Такое замечание нельзя отдавать модели на исправление:
@@ -991,6 +1006,10 @@ function showFitFixButton(fit) {
   }
   const fixable = buildFitCaveatsList(fit);
   if (fixable.length === 0) return;
+  // Вердикта может не быть (отклонённое эхо), а кнопка автоправки нужна.
+  // В этом случае панель скрыта, и кнопка внутри неё была бы невидимой —
+  // выносим её в отдельный блок, который показываем рядом с баннером замечаний.
+  const host = box.hidden ? fitFixFallbackBox() : box;
   const btn = document.createElement("button");
   btn.className = "btn term";
   btn.id = "fitFix";
@@ -998,7 +1017,22 @@ function showFitFixButton(fit) {
   btn.style.marginTop = "8px";
   btn.innerHTML = "<span>fit-fix (" + fixable.length + ")</span>";
   btn.addEventListener("click", () => fitFix(3));
-  box.appendChild(btn);
+  host.appendChild(btn);
+}
+
+// fitFixFallbackBox — видимый контейнер для кнопки fit-fix на случай, когда
+// панель вердикта скрыта (отклонённое эхо: fit == null). Отдельный блок рядом
+// с панелью, потому что вердикт показывать нечего, а продолжать правку нужно.
+function fitFixFallbackBox() {
+  let el = document.getElementById("fitFixFallback");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "fitFixFallback";
+    el.style.marginTop = "8px";
+    els.fitVerdict.parentNode.insertBefore(el, els.fitVerdict.nextSibling);
+  }
+  el.hidden = false;
+  return el;
 }
 
 function showAuditWarnings(warnings) {
@@ -1009,6 +1043,9 @@ function showAuditWarnings(warnings) {
   // которое проверяли и не нашли (живой кейс: эхо отклонено, письмо целое).
   const defects = letterDefects(lastWarnings);
   const echoMsgs = lastWarnings.filter(isEchoWarning);
+  // Содержательная проверка обновила набор дефектов; эхо — нет: письмо не
+  // проверяли, и прежние дефекты остаются в силе.
+  if (defects.length > 0) lastDefects = defects;
   const box = els.auditWarns;
   if (lastWarnings.length === 0) {
     box.hidden = true;
@@ -1037,15 +1074,21 @@ function showAuditWarnings(warnings) {
     ul.appendChild(li);
   }
   if (listed.length) box.appendChild(ul);
-  // Кнопку рисуем только когда есть что чинить. Отправлять пустой список
-  // нельзя: сервер отвечает 400 «auditFix требует letter и warnings».
-  if (defects.length > 0) {
+  // Кнопка нужна в двух случаях. Обычный — есть свежие дефекты. И второй:
+  // при отклонённом эхо, когда письмо не проверяли, — повторяем автоправку по
+  // ПРЕЖНИМ дефектам (lastDefects), потому что сервер прямо зовёт «правь
+  // вручную или повтори автоправку». Кнопка при этом возвращает ровно то,
+  // что и раньше, и не отправляет модели эхо-диагностику.
+  if (defects.length > 0 || lastDefects.length > 0) {
     const fixBtn = document.createElement("button");
     fixBtn.className = "btn term";
     fixBtn.id = "auditFix";
     fixBtn.type = "button";
     fixBtn.style.marginTop = "8px";
-    fixBtn.innerHTML = "<span>auto-fix</span>";
+    const n = defects.length > 0 ? defects.length : lastDefects.length;
+    fixBtn.innerHTML = defects.length > 0
+      ? "<span>auto-fix</span>"
+      : "<span>auto-fix (" + n + ")</span> — повторить по прошлым замечаниям";
     fixBtn.addEventListener("click", auditFix);
     box.appendChild(fixBtn);
   }
@@ -1055,17 +1098,49 @@ function showAuditWarnings(warnings) {
 /* ---------- рекомендация отклика (internal/fit) ---------- */
 
 // showFitVerdict рендерит вердикт фита из события done. fit == null —
-// разбор вакансии не удался, панель просто не выходит (письмо важнее).
-function showFitVerdict(fit) {
+// разбор вакансии не удался, панель без вердикта. fitNote — причина
+// (упавший/пустой разбор): её показываем ВНУТРИ панели, иначе она
+// просто исчезала, а кнопка fit-fix оставалась — пользователь видел
+// противоречие и принимал это за поломку (живой баг, октябрь 2026).
+function showFitVerdict(fit, fitNote) {
   lastFit = fit;
-  lastFitCaveats = buildFitCaveatsList(fit);
+  // При отклонённом эхо fit == null, и прошлые caveat перестали бы быть
+  // доступны: кнопка fit-fix живёт в панели вердикта и исчезала бы вместе с
+  // ней. А именно в этом состоянии пользователю нужно продолжать правку.
+  // Храним ОБЪЕКТЫ caveat, а не готовые строки: hasFixableCaveats и
+  // showFitFixButton читают c.note, и строки прошли бы мимо как {note: ""}.
+  if (fit) {
+    lastFitObjects = [...(fit.caveats || []), ...(fit.covered || [])];
+    lastFitCaveats = buildFitCaveatsList(fit);
+  }
   const box = els.fitVerdict;
   if (!fit || !fit.verdict) {
-    box.hidden = true;
     box.textContent = "";
     box.className = "";
+    if (fitNote) {
+      // Вердикта нет — но почему, пользователь должен увидеть, а не
+      // гадать по исчезнувшей панели.
+      box.hidden = false;
+      box.className = "verdict-note";
+      const note = document.createElement("span");
+      note.className = "fit-title";
+      note.textContent = "⚠ " + fitNote;
+      box.appendChild(note);
+    } else {
+      box.hidden = true;
+    }
+    // Вердикта нет, но продолжить автоправку можно — рисуем кнопку из
+    // сохранённых caveat, только если они реально есть.
+    if (lastFitObjects.length > 0) showFitFixButton({ caveats: lastFitObjects });
+    else {
+      const fb = document.getElementById("fitFixFallback");
+      if (fb) fb.hidden = true;
+    }
     return;
   }
+  // Вердикт есть — кнопка живёт в панели, запасной блок не нужен.
+  const stale = document.getElementById("fitFixFallback");
+  if (stale) { stale.hidden = true; stale.textContent = ""; }
   const labels = {
     apply: "откликаться",
     apply_with_caveats: "откликаться с оговоркой",
@@ -1137,10 +1212,13 @@ async function auditFix() {
   // Модели уходят только дефекты письма. Эхо-предупреждение в список не идёт:
   // это диагностика про прошлый ответ, и инструкция «исправь это» приводила
   // к повтору эха у любого провайдера (живой кейс, октябрь 2026).
-  // Проверка ДО setBusy/try: ранний return внутри try не дошёл бы до finally
-  // и оставил бы интерфейс заблокированным.
+  // При отклонённом эхо письмо не проверяли — автоправка повторяется по
+  // ПРЕЖНИМ дефектам (lastDefects), иначе кнопка, которую сервер просит
+  // нажать, ничего не отправила бы. Проверка ДО setBusy/try: ранний return
+  // внутри try не дошёл бы до finally и оставил бы интерфейс заблокированным.
   const defects = letterDefects(lastWarnings);
-  if (defects.length === 0) {
+  const toSend = defects.length > 0 ? defects : lastDefects;
+  if (toSend.length === 0) {
     setStatus("err: отклонённое эхо — исправлять нечего, письмо не проверялось. Правь вручную или смени модель", "err");
     return;
   }
@@ -1159,7 +1237,7 @@ async function auditFix() {
         systemPrompt: els.systemPrompt.value,
         auditFix: true,
         letter: letter,
-        warnings: defects,
+        warnings: toSend,
         dropSections: promptDrops,
       },
       delta => {
@@ -1170,7 +1248,7 @@ async function auditFix() {
       },
     );
     showAuditWarnings(data.warnings);
-    showFitVerdict(data.fit);
+    showFitVerdict(data.fit, data.fitNote);
     setProfileWarning(data.profileWarning);
     renderSentInfo(data);
     // Как и в generate: ответ сервера важнее дельт — при отклонённом эхо
@@ -1236,7 +1314,7 @@ async function fitFix(maxIter) {
         },
       );
         showAuditWarnings(data.warnings);
-        showFitVerdict(data.fit);
+        showFitVerdict(data.fit, data.fitNote);
         setProfileWarning(data.profileWarning);
         renderSentInfo(data);
         // Показанный текст — это поток дельт, а НЕ то, что сервер вернул в
@@ -1255,19 +1333,27 @@ async function fitFix(maxIter) {
           break;
         }
         // Отклонённое эхо: сервер вернул исходное письмо (оно непустое, поэтому
-        // проверка выше прошла), но вердикт фита по эху НЕ считается — data.fit
-        // пуст. Без этой ветки UI сообщил бы «fit-разбор вакансии не удался»,
-        // хотя разбор как раз удался: письмо не было проверено вовсе.
+        // проверка выше прошла). Продолжать цикл бессмысленно — модель только
+        // что вернула эхо, и повтор по тем же замечаниям повторит его.
         const echoHit = (data.warnings || []).some(isEchoWarning);
         if (echoHit) {
-          setStatus("err: модель вернула эхо промпта вместо письма — исходное письмо сохранено, автоправка остановлена. Правь вручную или смени модель", "err");
+          // Вердикт по уцелевшему письму теперь считается на сервере, панель
+          // выше уже показана. Различаем два случая: с вердиктом сообщаем, что
+          // он актуален; без него — что оценки нет.
+          setStatus(data.fit
+            ? "автоправка вернула эхо — исходное письмо сохранено, вердикт выше актуален. Правь вручную или повтори автоправку"
+            : "err: автоправка вернула эхо — исходное письмо сохранено, вердикт фита недоступен. Правь вручную или смени модель",
+            data.fit ? "" : "err");
           break;
         }
         if (!data.fit) {
           // Разбор вакансии упал — вердикта нет, а fitFixable при этом 0.
           // Без этой проверки пользователь видит «fit-fix завершён» и считает,
           // что письмо доведено, хотя цикл проверки просто не отработал.
-          setStatus("err: fit-разбор вакансии не удался — цикл прерван, проверь письмо вручную", "err");
+          // Причина (fitNote) важна: «упал разбор» и «требований нет» —
+          // разные действия пользователя.
+          setStatus("err: fit-разбор вакансии не удался — цикл прерван, проверь письмо вручную"
+            + (data.fitNote ? " · " + data.fitNote : ""), "err");
           break;
         }
         countChars(data.elapsedMs);
@@ -1378,7 +1464,10 @@ async function boot() {
       // Факт «что ушло в модель» относится к конкретному прогону: остановили —
       // блок не должен продолжать показывать прошлый user-промпт.
       if (els.promptSentInfo) { els.promptSentInfo.hidden = true; els.promptSentInfo.textContent = ""; }
-      lastFit = null; lastFitCaveats = [];
+      lastFit = null; lastFitCaveats = []; lastFitObjects = [];
+      lastDefects = [];
+      const fb = document.getElementById("fitFixFallback");
+      if (fb) { fb.hidden = true; fb.textContent = ""; }
     }
   });
   els.vacancy.focus();

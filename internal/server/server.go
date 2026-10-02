@@ -227,6 +227,11 @@ type sseDone struct {
 	// потому что warnings возвращаются модели при автоправке — инструкция
 	// «профиль пуст» заставила бы её выдумывать факты.
 	ProfileWarning string `json:"profileWarning,omitempty"`
+	// FitNote — причина, по которой вердикта фита нет (упавший или пустой
+	// разбор вакансии). Без неё панель вердикта просто исчезала, а кнопка
+	// fit-fix оставалась — пользователь видел противоречие и не понимал,
+	// что произошло (живой баг, октябрь 2026).
+	FitNote string `json:"fitNote,omitempty"`
 	// UsedSystemPrompt — фактически отправленный системный промпт
 	// (кастом или дефолт): для отладки, что реально применялось.
 	UsedSystemPrompt string `json:"usedSystemPrompt"`
@@ -329,9 +334,29 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
 	// в промпт письма чек-листом, а тот же разбор переиспользуется в фите
 	// (один LLM-вызов на извлечение, второго нет). Ошибка разбора — не
 	// фатальна: письмо генерируется без чек-листа, вердикта не будет.
-	reqs, extractOK := fit.Requirements{}, false
-	if r, err := fit.ExtractRequirements(ctx, fit.LLMFunc(h.cfg.FitLLM), req.Vacancy); err == nil {
+	//
+	// Разбор повторяется один раз: после нескольких итераций автофикса
+	// провайдер начинал отдавать сбои/пустой JSON, err молча глотался, и
+	// панель вердикта исчезала, хотя кнопка fit-fix оставалась (живой баг,
+	// октябрь 2026). ОШИБКА ПРИ ЭТОМ НЕ ТЕРЯЕТСЯ: extractNote уходит в UI.
+	reqs, extractOK, extractNote := fit.Requirements{}, false, ""
+	for attempt := 0; attempt < 2 && !extractOK; attempt++ {
+		r, err := fit.ExtractRequirements(ctx, fit.LLMFunc(h.cfg.FitLLM), req.Vacancy)
+		if err != nil {
+			extractNote = "разбор вакансии не удался (" + err.Error() + ")"
+			continue
+		}
+		// Пустой разбор (модель ответила JSON без must_have/nice_to_have)
+		// по сути тоже отказ: fit.Evaluate всё равно не даёт вердикта.
+		if len(r.MustHave) == 0 && len(r.NiceToHave) == 0 {
+			extractNote = "разбор вакансии не дал ни одного требования — модель вернула пустой результат"
+			continue
+		}
 		reqs, extractOK = r, true
+		extractNote = ""
+	}
+	if !extractOK && extractNote == "" {
+		extractNote = "разбор вакансии не удался"
 	}
 	musts := make([]string, 0, len(reqs.MustHave))
 	for _, m := range reqs.MustHave {
@@ -374,18 +399,19 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
 	applied := cover.AppliedDrops(h.cfg.ContextDir, req.DropSections)
 
 	streamGenerate(w, ctx, streamParams{
-		fn:         h.cfg.LLMStream,
-		system:     system,
-		user:       user,
-		vacancy:    req.Vacancy,
-		profile:    fit.LoadProfile(h.cfg.ContextDir, req.DropSections),
-		reqs:       reqs,
-		extractOK:  extractOK,
-		mapFn:      mapFn,
-		concepts:   h.concepts,
-		timeoutSec: timeoutSec,
-		origLetter: req.Letter,
-		applied:    applied,
+		fn:          h.cfg.LLMStream,
+		system:      system,
+		user:        user,
+		vacancy:     req.Vacancy,
+		profile:     fit.LoadProfile(h.cfg.ContextDir, req.DropSections),
+		reqs:        reqs,
+		extractOK:   extractOK,
+		extractNote: extractNote,
+		mapFn:       mapFn,
+		concepts:    h.concepts,
+		timeoutSec:  timeoutSec,
+		origLetter:  req.Letter,
+		applied:     applied,
 	})
 }
 
@@ -426,8 +452,11 @@ type streamParams struct {
 	// profile — профиль, реально ушедший в фит (после дропов).
 	profile string
 	// reqs/extractOK — результат шага 1 фита, выполненный ДО генерации.
-	reqs      fit.Requirements
-	extractOK bool
+	// extractNote — почему разбор не удался; идёт в UI, чтобы исчезнувшая
+	// панель вердикта не оставалась без объяснения.
+	reqs        fit.Requirements
+	extractOK   bool
+	extractNote string
 	// mapFn — гибридная разметка покрытия (nil в детерминированном режиме).
 	mapFn fit.MapFunc
 	// concepts — концепты из ленивой инициализации хендлера.
@@ -454,7 +483,7 @@ func streamGenerate(w http.ResponseWriter, ctx context.Context, p streamParams) 
 	// параметров, и переименовывать сотни обращений здесь нецелесообразно.
 	fn, system, user := p.fn, p.system, p.user
 	vacancy, profile, origLetter := p.vacancy, p.profile, p.origLetter
-	reqs, extractOK := p.reqs, p.extractOK
+	reqs, extractOK, extractNote := p.reqs, p.extractOK, p.extractNote
 	mapFn, concepts, applied := p.mapFn, p.concepts, p.applied
 	timeoutSec := p.timeoutSec
 
@@ -525,8 +554,15 @@ func streamGenerate(w http.ResponseWriter, ctx context.Context, p streamParams) 
 			// fit-fix и audit-fix передают исходное письмо — это актив
 			// пользователя, откатываем на него (и при audit-fix тоже: раньше
 			// откат стоял только под fitFix, и audit-fix терял письмо целиком).
+			//
+			// Формулировка различает источник: исходное письмо подаётся ТОЛЬКО
+			// автоправкой, значит эхо вернула именно она. Прежний текст
+			// «модель вернула эхо промпта вместо письма» читался как приговор
+			// самому письму — а письмо слева было нормальным (живой случай,
+			// октябрь 2026: противоречие прямо на экране).
 			letter = origLetter
-			echoWarning = "модель вернула эхо промпта вместо письма — исходное письмо сохранено, правь вручную или повтори автоправку"
+			echoWarning = "автоправка вернула эхо промпта вместо письма — исходное письмо сохранено, " +
+				"правь вручную или повтори автоправку"
 		} else {
 			// Исходного письма нет: откатывать не на что, поэтому наружу не
 			// отдаём мусор — пустое письмо плюс явное объяснение.
@@ -537,17 +573,33 @@ func streamGenerate(w http.ResponseWriter, ctx context.Context, p streamParams) 
 	// elapsedMs — счётчик времени ответа модели (замер пользователя).
 	// Постпроверка: теряемые факты и запрещённые паттерны видны в UI.
 	var warnings []string
-	if echoWarning != "" {
-		// При отклонённом эхо аудит НЕ запускаем: letter может быть пустым или
-		// исходным — Check по нему выдаёт замечания-мусор («нет обязательной
-		// секции», «Потерян факт»), которые пользователь принимает за реальные
-		// дефекты письма. Наружу — ровно одна причина: эхо.
+	switch {
+	case echoWarning != "" && strings.TrimSpace(letter) == "":
+		// Отклонённое эхо, откатывать не на что: письма нет. Check по пустой
+		// строке выдаёт замечания-мусор («нет обязательной секции», «Потерян
+		// факт»), которые пользователь принимает за реальные дефекты.
+		// Наружу — ровно одна причина: эхо.
 		warnings = []string{echoWarning}
-	} else {
-		warnings = audit.Check(letter, vacancy).Warnings
+	default:
+		// Аудит отрабатывает и когда письмо уцелело после отката на исходное.
+		// Живой кейс (октябрь 2026): автоправка вернула эхо, сервер откатил
+		// на исходное письмо — а аудит по нему НЕ запускался. Пользователь
+		// видел «модель вернула эхо промпта вместо письма» рядом с нормальным
+		// письмом и не получал ни одного настоящего замечания (в т.ч. по
+		// объёму). Диагностика об эхо уходит в конец списка: это причина, по
+		// которой автоправка не сработала, а не дефект письма.
+		//
+		// Число обязательных требований идёт в аудит: промпт (v4 §2.3) сам
+		// разрешает до 300 слов при 6+ must-have, и жёсткие 200 ругали бы на
+		// легальное письмо, которое автоправка исправить не может (живой
+		// кейс, октябрь 2026: бесконечный цикл «1 замечание» по объёму).
+		warnings = audit.CheckWithMust(letter, vacancy, len(reqs.MustHave)).Warnings
 		// Сверка заявленных фактов с профилем: Check профиль не читает и выдумку
 		// («XSSI sanitization», «basic auth») пропускает — письмо уходило с ложью.
 		warnings = append(warnings, audit.CheckProfile(letter, profile).Warnings...)
+		if echoWarning != "" {
+			warnings = append(warnings, echoWarning)
+		}
 	}
 
 	// Пустой профиль — не ошибка запроса, но письмо без единого факта о
@@ -566,11 +618,28 @@ func streamGenerate(w http.ResponseWriter, ctx context.Context, p streamParams) 
 	// поданное в качестве «письма» содержимое профиля давало ~87% покрытия,
 	// пользователь принимал это за оценку своего письма, а автофикс не
 	// находил проблем и крутил цикл дальше по мусору.
+	//
+	// Критерий — ПИСЬМО, а не эхо. echoWarning != "" бывает и при откате на
+	// исходное письмо (оно живое, его надо оценивать), поэтому прежнее условие
+	// `echoWarning == ""` гасило вердикт и на нормальном письме: панель
+	// вердикта пустела, а кнопка fit-fix работала и письмо правила (живой
+	// случай, октябрь 2026). Подавление остаётся там, где опасно: письма нет
+	// вовсе и оценивать нечего.
 	var verdict *fit.Fit
-	if extractOK && echoWarning == "" {
+	if extractOK && strings.TrimSpace(letter) != "" {
 		f := fitVerdict(ctx, concepts, reqs, profile, letter, vacancy, mapFn)
 		if f.Verdict != "" {
 			verdict = &f
+		}
+	}
+	// Письмо есть, а вердикта нет — объясняем причину. Иначе панель
+	// фита просто исчезала, и пользователь читал это как поломку,
+	// хотя кнопка fit-fix работала по прошлым caveat.
+	fitNote := ""
+	if verdict == nil && strings.TrimSpace(letter) != "" {
+		fitNote = extractNote
+		if fitNote == "" {
+			fitNote = "разбор вакансии не удался — вердикт фита не посчитан"
 		}
 	}
 
@@ -583,6 +652,7 @@ func streamGenerate(w http.ResponseWriter, ctx context.Context, p streamParams) 
 			Done: true, Letter: letter, ElapsedMs: elapsed.Milliseconds(),
 			Warnings: warnings, Fit: verdict, FitFixable: fixableN,
 			ProfileWarning: profileWarning, UsedSystemPrompt: system,
+			FitNote:             fitNote,
 			AppliedDropSections: applied,
 			UsedUserPromptBytes: len(user), UsedProfileBytes: len(profile),
 		}) // best-effort

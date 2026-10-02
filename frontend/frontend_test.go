@@ -287,18 +287,35 @@ func TestSentInfoWarnsOnOversizedSystemPrompt(t *testing.T) {
 func TestFitFixStopsOnRejectedEcho(t *testing.T) {
 	for _, want := range []string{
 		"const echoHit = (data.warnings || []).some(isEchoWarning);",
-		"автоправка остановлена",
+		"автоправка вернула эхо — исходное письмо сохранено",
 	} {
 		if !strings.Contains(IndexHTML, want) {
 			t.Errorf("в UI нет %q — отклонённое эхо должно останавливать автофикс с внятной причиной", want)
 		}
 	}
-	// Ветка обязана стоять ДО проверки data.fit: при отклонённом эхе data.fit
-	// пуст по построению, иначе сработает неверное сообщение.
+	// Ветка обязана стоять ДО проверки data.fit: цикл прерывается на эхо, и
+	// сообщение про «fit-разбор не удался» тут было бы неверным — разбор-то
+	// как раз удался, просто автоправка вернула эхо.
 	echoAt := strings.Index(IndexHTML, "const echoHit")
 	fitAt := strings.Index(IndexHTML, "if (!data.fit)")
 	if echoAt < 0 || fitAt < 0 || echoAt > fitAt {
 		t.Errorf("ветка отклонённого эха (поз. %d) должна идти раньше проверки data.fit (поз. %d)", echoAt, fitAt)
+	}
+}
+
+// TestFitFixEchoMessageReflectsVerdict — после отката на исходное письмо
+// вердикт по нему СЧИТАЕТСЯ, поэтому сообщение обязано это отражать. Раньше
+// оно утверждало «вердикт недоступен» при заполненной панели, а кнопка
+// fit-fix при этом работала — противоречие на экране.
+func TestFitFixEchoMessageReflectsVerdict(t *testing.T) {
+	for _, want := range []string{
+		"вердикт выше актуален",
+		"вердикт фита недоступен",
+		`data.fit ? "" : "err"`,
+	} {
+		if !strings.Contains(IndexHTML, want) {
+			t.Errorf("в UI нет %q — сообщение об эхо должно различать случаи с вердиктом и без", want)
+		}
 	}
 }
 
@@ -311,23 +328,63 @@ func TestEchoWarningNotSentBackToModel(t *testing.T) {
 	for _, want := range []string{
 		"function isEchoWarning(w)", // одно место распознавания
 		"function letterDefects(warnings)",
-		"warnings: defects,", // не lastWarnings
-		"исправлять нечего, письмо не проверялось",
+		"const toSend = defects.length > 0 ? defects : lastDefects;", // не lastWarnings
+		"warnings: toSend,",
 	} {
 		if !strings.Contains(IndexHTML, want) {
 			t.Errorf("в UI нет %q — эхо-замечание не должно уходить модели как дефект", want)
 		}
 	}
-	// Кнопка auto-fix не должна рисоваться, когда чинить нечего: сервер
-	// отвечает 400 на пустой warnings (server.go: AuditFix требует letter и
-	// warnings), то есть кнопка привела бы к ошибке вместо тишины.
+	// Кнопка рисуется, когда есть свежие дефекты ИЛИ когда они были раньше и
+	// автоправка повторяется после отклонённого эха. Раньше проверка была
+	// `defects.length > 0`, и при эхо кнопка исчезала ровно тогда, когда сервер
+	// звал «правь вручную или повтори автоправку» (живой баг, октябрь 2026).
+	if !strings.Contains(IndexHTML, "if (defects.length > 0 || lastDefects.length > 0) {") {
+		t.Error("кнопка auto-fix должна рисоваться и по прошлым дефектам (lastDefects)")
+	}
 	fixBtnAt := strings.Index(IndexHTML, `fixBtn.id = "auditFix"`)
-	guardAt := strings.Index(IndexHTML, "if (defects.length > 0) {")
+	guardAt := strings.Index(IndexHTML, "if (defects.length > 0 || lastDefects.length > 0) {")
 	if fixBtnAt < 0 || guardAt < 0 || guardAt > fixBtnAt {
-		t.Errorf("создание кнопки auto-fix (поз. %d) должно идти под проверкой defects.length > 0 (поз. %d)", fixBtnAt, guardAt)
+		t.Errorf("создание кнопки auto-fix (поз. %d) должно идти под проверкой наличия дефектов (поз. %d)", fixBtnAt, guardAt)
+	}
+	// lastDefects обновляется только при содержательной проверке: эхо письмо не
+	// проверяло, поэтому прежние дефекты остаются в силе.
+	if !strings.Contains(IndexHTML, "if (defects.length > 0) lastDefects = defects;") {
+		t.Error("lastDefects должен обновляться только при непустом наборе дефектов")
 	}
 	// Счётчик «N замечаний» обязан считать дефекты, а не эхо-диагностику.
 	if !strings.Contains(IndexHTML, `"⚠ проверка письма: " + defects.length`) {
 		t.Error("заголовок панели должен считать только дефекты письма")
+	}
+}
+
+// TestFitFixButtonSurvivesRejectedEcho — при отклонённом эхо data.fit пуст, и
+// панель вердикта скрывается вместе с кнопкой fit-fix. Раньше пользователь
+// терял оба способа продолжить правку, хотя текст предлагал один.
+func TestFitFixButtonSurvivesRejectedEcho(t *testing.T) {
+	for _, want := range []string{
+		"function fitFixFallbackBox()", // видимый контейнер вне скрытой панели
+		`els.fitVerdict.parentNode.insertBefore(el, els.fitVerdict.nextSibling)`,
+		"const host = box.hidden ? fitFixFallbackBox() : box;", // кнопка идёт в host
+		"if (lastFitObjects.length > 0) showFitFixButton({ caveats: lastFitObjects });",
+	} {
+		if !strings.Contains(IndexHTML, want) {
+			t.Errorf("в UI нет %q — кнопка fit-fix должна выживать при отклонённом эхо", want)
+		}
+	}
+	// Кнопка обязана попадать в host, а не в скрытую панель: иначе элемент
+	// создан, но пользователю не виден — молчаливая потеря автоправки.
+	hostAt := strings.Index(IndexHTML, "const host = box.hidden")
+	appendAt := strings.Index(IndexHTML, "host.appendChild(btn);")
+	if hostAt < 0 || appendAt < 0 || hostAt > appendAt {
+		t.Errorf("host (поз. %d) должен определяться до host.appendChild (поз. %d)", hostAt, appendAt)
+	}
+	// Сохранять нужно ОБЪЕКТЫ caveat, а не готовые строки: hasFixableCaveats
+	// читает c.note, и строки прошли бы как {note: ""} → кнопка не рисуется.
+	if !strings.Contains(IndexHTML, "lastFitObjects = [...(fit.caveats || []), ...(fit.covered || [])];") {
+		t.Error("lastFitObjects должен хранить объекты caveat с полем note")
+	}
+	if !strings.Contains(IndexHTML, "lastFitCaveats = buildFitCaveatsList(fit);") {
+		t.Error("lastFitCaveats должен продолжать обновляться — fitFix берёт из него старт")
 	}
 }

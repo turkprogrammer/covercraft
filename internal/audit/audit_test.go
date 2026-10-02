@@ -457,3 +457,213 @@ func TestStdlibCallNotFabrication(t *testing.T) {
 		}
 	}
 }
+
+// TestWordLimitFollowsPrompt — аудит обязан считать лимит по тому же
+// правилу, что и промпт (v4 §2.3): до 200 слов, но при 6+ обязательных
+// требованиях допустимо до 250. Живой баг (октябрь 2026): жёсткие 200
+// ругали на письмо на 238/246 слов, которое промпт разрешает, автоправка
+// его не могла исправить, и цикл «1 замечание» повторялся бесконечно.
+func TestWordLimitFollowsPrompt(t *testing.T) {
+	// Письмо на 246 слов тела: между 200 и 250, то есть легально при 6+
+	// требованиях и нелегально при 5 и меньше.
+	letter := makeLetterOfWords(246)
+	if n := bodyWordCount(letter); n != 246 {
+		t.Fatalf("тестовая фикстура должна быть на 246 слов, получили %d", n)
+	}
+	if ws := CheckWithMust(letter, "", 5).Warnings; !hasVolumeWarning(ws) {
+		t.Error("при 5 требованиях письмо на 246 слов должно давать замечание по объёму")
+	}
+	if ws := CheckWithMust(letter, "", 6).Warnings; hasVolumeWarning(ws) {
+		t.Errorf("при 6 требованиях 246 слов разрешены промптом, замечание недопустимо: %v", ws)
+	}
+	if ws := CheckWithMust(letter, "", 7).Warnings; hasVolumeWarning(ws) {
+		t.Errorf("при 7 требованиях 246 слов разрешены промптом, замечание недопустимо: %v", ws)
+	}
+	// Проверка без числа требований (разбор вакансии не удался) — самое
+	// строгое поведение, а не молчаливый пропуск проверки.
+	if ws := CheckWithMust(letter, "", 0).Warnings; !hasVolumeWarning(ws) {
+		t.Error("без числа требований действует базовый лимит 200")
+	}
+	// Обратная совместимость: Check — это то же, что nMust = 0.
+	before, after := Check(letter, "").Warnings, CheckWithMust(letter, "", 0).Warnings
+	if len(before) != len(after) {
+		t.Errorf("Check и CheckWithMust(nMust=0) обязаны совпадать: %v vs %v", before, after)
+	}
+}
+
+// TestVolumeWarningNamesWideLimit — при расширенном лимите сообщение
+// обязано называть его явно, иначе пользователь видит «при лимите 200»
+// рядом с вакансией, где шесть требований, и не понимает расхождения.
+func TestVolumeWarningNamesWideLimit(t *testing.T) {
+	letter := makeLetterOfWords(320)
+	ws := CheckWithMust(letter, "", 7).Warnings
+	var vol string
+	for _, w := range ws {
+		if hasVolumeWarning([]string{w}) {
+			vol = w
+		}
+	}
+	if vol == "" {
+		t.Fatalf("ожидалось замечание по объёму при 320 словах и лимите 300: %v", ws)
+	}
+	if !strings.Contains(vol, "лимите 300") {
+		t.Errorf("в сообщении должен быть назван расширенный лимит: %q", vol)
+	}
+	if !strings.Contains(vol, "7 обязательных требований") {
+		t.Errorf("в сообщении должно быть указано число требований: %q", vol)
+	}
+	// Базовый лимит не упоминает 300.
+	ws = CheckWithMust(letter, "", 2).Warnings
+	for _, w := range ws {
+		if hasVolumeWarning([]string{w}) && strings.Contains(w, "300") {
+			t.Errorf("при базовом лимите 300 упоминаться не должно: %q", w)
+		}
+	}
+}
+
+// TestWordLimitFor — само правило выбора лимита, отдельно от писем.
+func TestWordLimitFor(t *testing.T) {
+	cases := []struct {
+		nMust int
+		want  int
+	}{
+		{0, 200}, {1, 200}, {5, 200}, // ниже порога — узкий лимит
+		{6, 300}, {7, 300}, {12, 300},
+		{-1, 200}, // отрицательное — как при неудачном разборе
+	}
+	for _, c := range cases {
+		if got := wordLimitFor(c.nMust); got != c.want {
+			t.Errorf("wordLimitFor(%d) = %d, ожидали %d", c.nMust, got, c.want)
+		}
+	}
+}
+
+// hasVolumeWarning — есть ли среди замечаний жалоба на объём письма.
+func hasVolumeWarning(ws []string) bool {
+	for _, w := range ws {
+		if strings.Contains(w, "слов при лимите") {
+			return true
+		}
+	}
+	return false
+}
+
+// makeLetterOfWords — письмо ровно на n слов тела. Слова бессодержательные,
+// чтобы другие правила аудита не срабатывали: тест проверяет только объём.
+func makeLetterOfWords(n int) string {
+	words := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		words = append(words, "факт")
+	}
+	return strings.Join(words, " ")
+}
+
+// TestContactLineNotMatchedInsideBullet — регресс живого кейса (октябрь 2026).
+// contactLineRe искал маркеры контактов ГДЕ УГОДНО в строке, и «снижение
+// стоимости API на +150%» матчилось как телефон по «+1». bodyWordCount
+// обрезал письмо с шестой строки: аудит насчитал 36 слов вместо 303, и
+// лимит объёма не срабатывал никогда. closingCount при этом считал
+// призывы к диалогу начиная с середины письма.
+func TestContactLineNotMatchedInsideBullet(t *testing.T) {
+	bullet := "- Geo-mapping Service: успешность маппингов +150%, снижение стоимости API на 70%, 3.1M+ записей"
+	if contactLineRe.MatchString(bullet) {
+		t.Error("«+150%» внутри буллета не должно считаться строкой контактов")
+	}
+	// Настоящая строка контактов обязана распознаваться: в начале, после
+	// маркера списка или с телефона/telegram/http. Контакты — плейсхолдеры:
+	// реальные телефон и Telegram в репозиторий не попадают.
+	for _, ok := range []string{
+		"+7 (000) 000-00-00 | Telegram: @example | https://example.com/",
+		"- Telegram: @example",
+		"t.me/example",
+		"@example",
+		"**+7 (000) 000-00-00**",
+	} {
+		if !contactLineRe.MatchString(ok) {
+			t.Errorf("строка контактов не распознана: %q", ok)
+		}
+	}
+	// Метрика в буллете не должна обрезать тело письма.
+	letter := strings.Join([]string{
+		"Здравствуйте! Меня заинтересовала ваша вакансия.",
+		bullet,
+		"Стек: Go, Kafka",
+		"+7 (000) 000-00-00 | Telegram: @example",
+		"Буду рад обсудить ваши задачи. Спасибо за внимание!",
+	}, "\n")
+	if n := bodyWordCount(letter); n < 20 {
+		t.Errorf("тело письма обрезано буллетом с «+150%%»: насчитано %d слов", n)
+	}
+	// Призыв к диалогу один и считается в хвосте, после контактов.
+	if c := closingCount(letter); c != 1 {
+		t.Errorf("призывов к диалогу в хвосте ожидался 1, получено %d", c)
+	}
+}
+
+// TestWideLimitFitsDenseFactLetter — широкий лимит 300 (решение владельца) на
+// живых данных: письмо с плотным перечнем фактов по 5 направлениям. При
+// 250 слов такие письма ругались, и автоправка не могла исправить их, не
+// выкинув требования. Граница проверяется с обеих сторон: 295 проходит,
+// 305 — уже нет.
+func TestWideLimitFitsDenseFactLetter(t *testing.T) {
+	if ws := CheckWithMust(makeLetterOfWords(295), "", 7).Warnings; hasVolumeWarning(ws) {
+		t.Errorf("295 слов при 7 требованиях должны проходить при лимите 300: %v", ws)
+	}
+	if ws := CheckWithMust(makeLetterOfWords(300), "", 7).Warnings; hasVolumeWarning(ws) {
+		t.Errorf("ровно 300 слов должны проходить при лимите 300: %v", ws)
+	}
+	if ws := CheckWithMust(makeLetterOfWords(305), "", 7).Warnings; !hasVolumeWarning(ws) {
+		t.Error("305 слов при 7 требованиях обязано давать замечание по объёму")
+	}
+	// Узкий лимит не сдвинулся вместе с широким.
+	if ws := CheckWithMust(makeLetterOfWords(295), "", 5).Warnings; !hasVolumeWarning(ws) {
+		t.Error("при 5 требованиях действует базовый лимит 200, 295 слов — превышение")
+	}
+}
+
+// TestPluralWordsInVolumeMessage — числительные в сообщении об объёме.
+// «письмо на 303 слов» бросается в глаза и подрывает доверие к проверке:
+// пользователь думает, что счёт написан небрежно, и не доверяет самому
+// замечанию. Русские правила не сводятся к последней цифре — 11–14 берут
+// форму множественного, хотя 12 кончается на «двойку».
+func TestPluralWordsInVolumeMessage(t *testing.T) {
+	cases := []struct {
+		n    int
+		want string
+	}{
+		{0, "0 слов"}, {1, "слово"}, {2, "слова"}, {4, "слова"},
+		{5, "слов"}, {11, "слов"}, {12, "слов"}, {13, "слов"},
+		{14, "слов"}, {21, "слово"}, {22, "слова"}, {24, "слова"},
+		{25, "слов"}, {101, "слово"}, {102, "слова"}, {111, "слов"},
+		{303, "слова"}, {305, "слов"},
+	}
+	for _, c := range cases {
+		if got := pluralWords(c.n); got != c.want {
+			t.Errorf("pluralWords(%d) = %q, ожидали %q", c.n, got, c.want)
+		}
+	}
+	// Форма требований в широком сообщении.
+	if got := pluralNum(7, "обязательное требование", "обязательных требования", "обязательных требований"); got != "обязательных требований" {
+		t.Errorf("pluralNum(7) = %q", got)
+	}
+	if got := pluralNum(1, "обязательное требование", "обязательных требования", "обязательных требований"); got != "обязательное требование" {
+		t.Errorf("pluralNum(1) = %q", got)
+	}
+	// Склейка в сообщении: без дублей и без «303 слов».
+	letter := makeLetterOfWords(305)
+	for _, w := range CheckWithMust(letter, "", 7).Warnings {
+		if !hasVolumeWarning([]string{w}) {
+			continue
+		}
+		// 305 → «305 слов» (последняя цифра 5 → plural), НЕ «305 слова».
+		if strings.Contains(w, "305 слова") {
+			t.Errorf("неверная форма числительного: %q", w)
+		}
+		if !strings.Contains(w, "305 слов при лимите 300 (7 обязательных требований)") {
+			t.Errorf("сообщение должно называть 305 слов и 7 требований: %q", w)
+		}
+		if strings.Contains(w, "требований обязательных") {
+			t.Errorf("дубль слова «требований»: %q", w)
+		}
+	}
+}
