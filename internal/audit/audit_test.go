@@ -458,6 +458,24 @@ func TestStdlibCallNotFabrication(t *testing.T) {
 	}
 }
 
+// TestHonestGapWithDottedTokenNotFabrication — регресс живого кейса
+// VoIP-вакансии (октябрь 2026): пункт «с WebRTC, sip.js и Asterisk не
+// работал; … готов освоить SIP-стек» раньше помечался фабрикацией, потому
+// что точка в «sip.js» рвала клаузу на две, отрицание «не работал» уезжало
+// во вторую, и честный пробел выглядел как утвердительная заявка. Теперь
+// точка считается концом предложения только при пробеле/конце после неё.
+func TestHonestGapWithDottedTokenNotFabrication(t *testing.T) {
+	letter := "Адаптация: SIP / WebRTC / FreeSWITCH — с WebRTC, sip.js и Asterisk не работал; реальный опыт WebSocket — Laravel + Ratchet, готов освоить SIP-стек колл-центра."
+	profile := "Go: 3 года, PHP: 2005+, PostgreSQL. VoIP/SIP/WebRTC — нет."
+	for _, w := range CheckProfile(letter, profile).Warnings {
+		for _, bad := range []string{"SIP", "WebRTC", "FreeSWITCH", "фабрикац"} {
+			if strings.Contains(w, bad) {
+				t.Errorf("честное отрицание не должно быть фабрикацией: %s", w)
+			}
+		}
+	}
+}
+
 // TestWordLimitFollowsPrompt — аудит обязан считать лимит по тому же
 // правилу, что и промпт (v4 §2.3): до 200 слов, но при 6+ обязательных
 // требованиях допустимо до 250. Живой баг (октябрь 2026): жёсткие 200

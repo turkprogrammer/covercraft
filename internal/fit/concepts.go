@@ -336,7 +336,7 @@ func DefaultConcepts() []Concept {
 			//
 			// Сигналы — по продукту и полному циклу, а не по слову «fullstack».
 			Name:    "продуктовая разработка полного цикла",
-			Trigger: regexp.MustCompile(`(?i)fullstack|full.?stack|b2c|b2b|продукт.{0,15}разработ|разработ.{0,15}продукт|полн.{0,10}цикл|доведен.{0,15}до продакшна|от анализа до`),
+			Trigger: regexp.MustCompile(`(?i)fullstack|full.?stack|b2c|b2b|продукт.{0,15}разработ|разработ.{0,15}продукт|полн.{0,10}цикл|доведен.{0,15}до продакшна|от анализа до|вывод.{0,20}прод|выкат|деплой`),
 			Signals: []Signal{
 				{Label: "продукт с метриками", Re: regexp.MustCompile(`(?i)fraud engine|stable id|bundle id|domain id|geo.?mapping|processmanager|task flow|sql-top`)},
 				{Label: "production-нагрузка", Re: regexp.MustCompile(`(?i)production|продакшен|RPS|10 000|1M\+|3\.1M|416K|F1 92|P99|P95`)},
@@ -398,7 +398,7 @@ func DefaultConcepts() []Concept {
 		},
 		{
 			Name:    "реляционные БД и SQL",
-			Trigger: regexp.MustCompile(`(?i)реляционн|база данных|баз данных|\bбд\b|\bsql\b|sql-запрос|sql запрос|эффективн.{0,15}запрос`),
+			Trigger: regexp.MustCompile(`(?i)реляционн|база данных|баз данных|\bбд\b|\bsql\b|sql-запрос|sql запрос|эффективн.{0,15}запрос|оптимизац.{0,20}запрос|план.{0,20}запрос|профилирован|медленн.{0,15}запрос`),
 			Signals: []Signal{
 				{Label: "СУБД", Re: regexp.MustCompile(`(?i)postgres|postgresql|mysql|mariadb|oracle|sqlite`)},
 				{Label: "оптимизация SQL", Re: regexp.MustCompile(`(?i)pg_stat|stat.?statements|explain|execution plan|индекс|b-tree|gin|covering|shared_buffers|work_mem|autovacuum|sql.?top|профайлер sql`)},

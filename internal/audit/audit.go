@@ -697,8 +697,17 @@ func claimPositively(letter, term string) bool {
 		// адаптации с перечислением чужого стека давал пачку ложных warning'ов.
 		`готов[а-яё]*\s+(?:оперативно\s+|быстро\s+|легко\s+)?(?:освоить|осваивать|перенести|переносить|изучать|изучить|разобраться|углубиться)`)
 	positive := false
-	for _, c := range strings.FieldsFunc(letter, func(r rune) bool {
-		return r == '.' || r == '\n' || r == '!' || r == '?'
+	// Точка = конец клаузы только когда после неё пробел/конец/перенос
+	// (\s включает 	 и \n): точка внутри токена («sip.js», «go.mod»,
+	// адреса) НЕ разрывает предложение. Иначе «с WebRTC, sip.js и Asterisk
+	// не работал» резалось бы на «[с WebRTC, sip]» + «[js и Asterisk не
+	// работал]», отрицание уезжало во вторую клаузу, и честный пробел
+	// проходил как утвердительная заявка (живой кейс VoIP-вакансии,
+	// октябрь 2026).
+	sentenceDot := regexp.MustCompile(`\.(?:\s+|$)`)
+	dotted := sentenceDot.ReplaceAllString(letter, "\n")
+	for _, c := range strings.FieldsFunc(dotted, func(r rune) bool {
+		return r == '\n' || r == '!' || r == '?'
 	}) {
 		if !reTerm.MatchString(c) {
 			continue

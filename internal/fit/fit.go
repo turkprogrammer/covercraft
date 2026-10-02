@@ -1350,6 +1350,15 @@ func coverage(concepts []Concept, req Requirement, letter, profile string) (sour
 				return SrcLetter, "закрыто по признакам («" + name + "»: " + strings.Join(hits, ", ") + ")"
 			}
 		}
+		// Мост для кириллического требования: пустой tokens отбрасывает
+		// bridgeHit ниже по функции (он идёт по токенам), а полностью
+		// русское требование про мостовую технологию («опыт с очередями
+		// сообщений» = RabbitMQ, «опыт мониторинга метрик» = VictoriaMetrics/
+		// observability) без этого фоллбэка уходило бы в unknown, хотя мост
+		// закрывает его по реальному опыту в письме/профиле.
+		if note, ok := bridgeHitFallback(req.Text, letter, profile); ok {
+			return SrcBridge, note
+		}
 		return SrcUnknown, "в письме и профиле нет достаточных признаков по этому требованию — проверь вручную"
 	}
 	for _, src := range []struct {
@@ -1504,6 +1513,34 @@ func honestGapNote(tokens []string, letter, profile string) (string, bool) {
 func bridgeHit(tokens []string, letter, profile string) (string, bool) {
 	for _, t := range tokens {
 		if b, ok := bridges[t]; ok && b.re.MatchString(letter+profile) {
+			return b.note, true
+		}
+	}
+	return "", false
+}
+
+// bridgeHitFallback — мост для кириллического требования, у которого
+// reqTokens не дал ни одного токена (полностью русский текст). Обычный
+// bridgeHit идёт по латинским токенам моста («rabbitmq»), а здесь их нет —
+// зато тема требования выражена ключевыми словами, которые своей подстрокой
+// совпадают с регэкспом моста («опыт с очередями сообщений» ловит «очеред»
+// в rabbitmq). Закрывается мост только при подтверждении опыта в письме или
+// профиле тем же регэкспом — иначе это был бы голый unknown-пробел.
+func bridgeHitFallback(reqText, letter, profile string) (string, bool) {
+	reqLower := strings.ToLower(reqText)
+	evidence := strings.ToLower(letter + profile)
+	// Итерация по отсортированным ключам, а не по карте: map в Go обходится
+	// в случайном порядке, и при совпадении нескольких мостов («мониторинг
+	// метрик» → victoriametrics И observability) вердикт и совет не должны
+	// флип-флопать между прогонами.
+	names := make([]string, 0, len(bridges))
+	for name := range bridges {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		b := bridges[name]
+		if b.re.MatchString(reqLower) && b.re.MatchString(evidence) {
 			return b.note, true
 		}
 	}
@@ -1677,7 +1714,19 @@ func (b *fitBuilder) finish(reqs Requirements, profile, letter string) Fit {
 			hardMiss++
 		}
 	}
+	// dutyCaveats — оговорки по обязанностям (мост/unknown). Как и в missing,
+	// обязанность не должна тянуть вердикт до Caveats: пробел по ней виден
+	// отдельной строкой совета, но вердикт определяют только требования.
+	// Без этого duty, закрытая мостом (SrcBridge) или ушедшая в unknown,
+	// при полностью закрытых must-have давала бы «откликаться с оговоркой».
+	var dutyCaveats []Req
+	nondutyCaveatN := 0
 	for _, c := range f.Caveats {
+		if c.Kind == "duty" {
+			dutyCaveats = append(dutyCaveats, c)
+			continue
+		}
+		nondutyCaveatN++
 		switch c.Source {
 		case SrcBridge:
 			brN++
@@ -1693,10 +1742,14 @@ func (b *fitBuilder) finish(reqs Requirements, profile, letter string) Fit {
 			unkN++
 		}
 	}
+	// reqCaveatN — оговорки по ТРЕБОВАНИЯМ (без обязанностей): вердикт
+	// Caveats дают только они. duty-оговорки в f.Caveats остаются и
+	// учитываются в dutyCaveats, но не должны тянуть вердикт до Caveats.
+	reqCaveatN := nondutyCaveatN
 	switch {
 	case hardMiss >= 2 || (hardMiss == 1 && unkN >= 2) || roleMismatch(reqs, profile):
 		f.Verdict = Skip
-	case hardMiss == 1 || brN >= 1 || unkN >= 1 || len(f.Caveats) > 0:
+	case hardMiss == 1 || reqCaveatN > 0:
 		f.Verdict = Caveats // оговорка обязана назвать слабое место — Advice уже заполнен
 	default:
 		f.Verdict = Apply
@@ -1727,15 +1780,30 @@ func (b *fitBuilder) finish(reqs Requirements, profile, letter string) Fit {
 		f.Advice = append(f.Advice, "не закрыты обязанности (не требования): "+
 			strings.Join(dutyGaps(f.Missing), ", ")+" — оцени, критичны ли они")
 	}
+	// Оговорки по обязанностям (мост/unknown) — отдельной строкой, как и
+	// в missing: обязанность видна, но не тянет вердикт до Caveats.
+	if len(dutyCaveats) > 0 {
+		var dtexts []string
+		for _, c := range dutyCaveats {
+			dtexts = append(dtexts, "«"+c.Text+"»")
+		}
+		f.Advice = append(f.Advice, "обязанности, закрытые с оговоркой или без данных: "+
+			strings.Join(dtexts, ", ")+" — оцени, критичны ли они")
+	}
 	if !(f.Verdict == Caveats && hardMiss == 1) {
 		f.Advice = append(f.Advice, b.missingAdvice...)
 	}
 	// unknown — одним сводным советом, а не построчно: шесть одинаковых
 	// строк «проверь вручную» — шум, а не помощь. Честные пробелы письма
 	// в свод не входят: кандидат их сам раскрыл, «проверь вручную» не нужно.
+	// Обязанности исключены (учтены в dutyCaveats выше) — иначе они
+	// задвоились бы и в этом своде, и в строке про обязанности.
 	if unkN > 0 {
 		var texts []string
 		for _, c := range f.Caveats {
+			if c.Kind == "duty" {
+				continue
+			}
 			if c.Source == SrcUnknown && !isHonestGap(c.Note) {
 				texts = append(texts, "«"+c.Text+"»")
 			}

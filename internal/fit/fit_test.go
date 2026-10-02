@@ -1490,6 +1490,140 @@ func TestMustGapStillForcesSkip(t *testing.T) {
 	}
 }
 
+// TestSQLOptimizationRequirementTriggered — ложное срабатывание плана: чисто
+// кириллическое требование про оптимизацию запросов раньше не задевало
+// триггер «реляционные БД и SQL» (там был только «эффективн...запрос»),
+// уходило в unknown, хотя письмо/профиль прямо писали «EXPLAIN», «индексы».
+// Добавленные формы «оптимизац...запрос|план...запрос|профилирован|
+// медленн...запрос» обязаны заводить концепт и закрывать требование по
+// сигналам, а не тащить его в «проверь вручную».
+func TestSQLOptimizationRequirementTriggered(t *testing.T) {
+	reqs := Requirements{MustHave: []Requirement{
+		{Text: "Оптимизация медленных запросов в БД", Kind: "must", Category: "domain"},
+	}}
+	letter := "PostgreSQL: профилирование pg_stat_statements, EXPLAIN, тюнинг индексов B-tree; оптимизация запросов под нагрузкой."
+	f := Evaluate(DefaultConcepts(), reqs, letter, "", "Бэкенд-разработчик")
+	if f.Verdict == Skip {
+		t.Fatalf("не должно быть skip: %+v", f)
+	}
+	if len(f.Covered) == 0 {
+		t.Errorf("требование про оптимизацию запросов должно закрыться по признакам концепта; got %+v", f)
+	}
+	for _, c := range append(append([]Req{}, f.Caveats...), f.Missing...) {
+		if c.Kind == "must" {
+			t.Errorf("требование про оптимизацию запросов не должно быть пробелом: %+v", c)
+		}
+	}
+}
+
+// TestSQLPlanProfilingTriggered — вторая форма триггера «план...запрос» и
+// слово «профилирован» должны заводить концепт «реляционные БД и SQL»,
+// даже когда само требование сформулировано через «план выполнения запроса».
+func TestSQLPlanProfilingTriggered(t *testing.T) {
+	reqs := Requirements{MustHave: []Requirement{
+		{Text: "Анализ плана выполнения медленных запросов", Kind: "must", Category: "domain"},
+	}}
+	profile := "PostgreSQL: индексы B-tree, EXPLAIN, autovacuum, pg_stat_statements; мониторинг планов."
+	f := Evaluate(DefaultConcepts(), reqs, profile, "", "SRE, PostgreSQL")
+	if f.Verdict == Skip {
+		t.Fatalf("не должно быть skip: %+v", f)
+	}
+	if len(f.Covered) == 0 {
+		t.Errorf("требование про план запросов должно закрыться по признакам концепта; got %+v", f)
+	}
+}
+
+// TestProductReleaseRequirementTriggered — второе ложное срабатывание плана:
+// кириллическое требование «выкат в прод/деплой» раньше не задевало триггер
+// «продуктовая разработка полного цикла» и уходило в unknown. Добавленные
+// формы «вывод...прод|выкат|деплой» обязаны заводить концепт и закрывать по
+// сигналам «полный цикл до пользователя» + «production-нагрузка».
+func TestProductReleaseRequirementTriggered(t *testing.T) {
+	reqs := Requirements{MustHave: []Requirement{
+		{Text: "Выкат и деплой продукта в прод", Kind: "must", Category: "domain"},
+	}}
+	letter := "Вывожу релизы в production, интеграция с мониторингом, авто-деплой через GitLab CI."
+	f := Evaluate(DefaultConcepts(), reqs, letter, "", "backend-разработчик")
+	if f.Verdict == Skip {
+		t.Fatalf("не должно быть skip: %+v", f)
+	}
+	if len(f.Covered) == 0 {
+		t.Errorf("требование про выкат в прод должно закрыться по признакам концепта; got %+v", f)
+	}
+}
+
+// TestCyrillicRequirementBridgeFallback — кириллическое требование без
+// латинских токенов («опыт с очередями сообщений») раньше уходило в unknown:
+// bridgeHit идёт по токенам, а их нет. Фоллбэк bridgeHitFallback по ключевым
+// словам обязан закрывать его мостом RabbitMQ, если письмо/профиль
+// подтверждают тот же регэксп (Kafka/broker/очеред).
+func TestCyrillicRequirementBridgeFallback(t *testing.T) {
+	reqs := Requirements{MustHave: []Requirement{
+		{Text: "Опыт работы с очередями сообщений", Kind: "must", Category: "stack"},
+	}}
+	letter := "Проектировал интеграции на Kafka: продюсеры, консюмеры, обработка очередей."
+	f := Evaluate(DefaultConcepts(), reqs, "", letter, "backend-разработчик")
+	if f.Verdict == Skip {
+		t.Fatalf("не должно быть skip: %+v", f)
+	}
+	// Мосты попадают в Caveats (вес 0.5), а не Covered: закрытие слабое,
+	// честное, но перечисленное. Главное — требование НЕ в Missing и НЕ
+	// ушло в unknown без моста.
+	closed := false
+	for _, c := range f.Caveats {
+		if c.Source == SrcBridge && strings.Contains(c.Text, "очередями") {
+			closed = true
+		}
+	}
+	if !closed {
+		t.Errorf("кириллическое требование про очереди должно закрыться мостом (Caveats/SrcBridge); got %+v", f)
+	}
+	for _, c := range f.Missing {
+		if strings.Contains(c.Text, "очередями") {
+			t.Errorf("требование про очереди не должно быть missing: %+v", c)
+		}
+	}
+}
+
+// TestCyrillicBridgeNotClosedWithoutEvidence — стоп-тест к фоллбэку: мост
+// не должен закрываться только потому, что требование кириллическое. Если тема
+// моста в письме/профиле НЕ подтверждена регэкспом, требование остаётся
+// пробелом (честным unknown), а не «закрыто мостом».
+func TestCyrillicBridgeNotClosedWithoutEvidence(t *testing.T) {
+	reqs := Requirements{MustHave: []Requirement{
+		{Text: "Опыт работы с очередями сообщений", Kind: "must", Category: "stack"},
+	}}
+	letter := "Писал API на Go, кэширование через Redis, но с брокерами сообщений не работал."
+	f := Evaluate(DefaultConcepts(), reqs, "", letter, "backend-разработчик")
+	for _, c := range f.Covered {
+		if c.Source == SrcBridge {
+			t.Errorf("нет подтверждения брокера — мост не должен закрывать: %+v", c)
+		}
+	}
+}
+
+// TestDutyCaveatDoesNotForceVerdict — обязанность, закрытая с оговоркой
+// (мост) или ушедшая в unknown, НЕ должна тянуть вердикт до Caveats, когда
+// все must-требования закрыты. Как в missing (dutyGaps), обязанность видна
+// отдельной строкой совета, но вердикт определяют только требования.
+func TestDutyCaveatDoesNotForceVerdict(t *testing.T) {
+	reqs := Requirements{MustHave: []Requirement{
+		{Text: "Настройка и сопровождение очередей сообщений", Kind: "duty", Category: "stack"},
+	}}
+	// Мост: требование-обязанность про очереди, опыт Kafka в профиле закрывает
+	// его мостом RabbitMQ — но это обязанность, вердикт не Caveats.
+	profile := "Kafka: продюсеры, консьюмеры, retry, идемпотентная обработка очередей."
+	letter := "Все must-требования закрыты."
+	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "backend-разработчик")
+	if f.Verdict == Caveats {
+		// допустимо только если есть именно НЕ-обязательственная причина;
+		// здесь единственная оговорка — обязанность → вердикт не Caveats
+		if len(f.Missing) == 0 {
+			t.Errorf("обязанность с оговоркой не должна давать вердикт Caveats: %+v", f)
+		}
+	}
+}
+
 // TestWebAPIServicesNotMissing — регресс живого прогона АФЛТ (сентябрь
 // 2026). Требование «Разработка производительных сервисов: API для
 // web-приложений…» давало tokens=[api, web]: «web» — существительное о типе
