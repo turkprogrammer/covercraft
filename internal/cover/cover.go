@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/turkprogrammer/covercraft/internal/prompt"
 )
@@ -22,6 +23,9 @@ import (
 // файлу отдельно до записи в буфер, поэтому синтетический разделитель
 // «### имя-файла» и преамбулы соседних файлов недостижимы для вырезания.
 // Отсутствующая папка не ошибка — промпт состоит из одной вакансии.
+//
+// Профиль без ограничения объёма даёт только базовую генерацию. Оба режима
+// автоправки идут через buildFixUserPrompt — с отбором релевантных секций.
 func BuildUserPrompt(contextDir, vacancy string, musts []string, drops []prompt.Drop) string {
 	var b strings.Builder
 	for _, name := range mdNames(contextDir) {
@@ -75,11 +79,32 @@ const fitFixProfileMaxBytes = 24 << 10
 // (вложенные ### уходят с родителем); текст до первого ## — преамбула файла,
 // она включается только вместе с отобранной секцией (контекст заголовка).
 func BuildFitFixUserPrompt(contextDir, vacancy string, musts []string, caveats []string, drops []prompt.Drop) string {
+	return buildFixUserPrompt(contextDir, vacancy, musts, caveatKeywords(caveats), drops)
+}
+
+// BuildAuditFixUserPrompt — user-промпт режима автоправки по замечаниям
+// аудита. Тот же отбор секций, что и в fit-fix: полный профиль модель не
+// переваривает. Живой баг (октябрь 2026): audit-fix шёл через BuildUserPrompt
+// и отправлял все 85 КБ context/*.md на каждую итерацию — модель тонула и
+// отвечала эхом, поэтому «повтори автоправку» не помогало.
+//
+// Ключевые слова берутся из названий фактов в «ёлочках»: аудит пишет
+// «Потерян факт: Symfony 6.4» и «Redis » одновременно в буллетах и в
+// пробелах» — имя технологии там единственное, что указывает на нужную
+// секцию профиля. Структурные замечания («нет обязательной секции…») имени
+// не содержат и ключей не дают: для них отбор пуст и срабатывает фоллбэк
+// на полный профиль — так же, как раньше.
+func BuildAuditFixUserPrompt(contextDir, vacancy string, musts []string, warnings []string, drops []prompt.Drop) string {
+	return buildFixUserPrompt(contextDir, vacancy, musts, auditWarningKeywords(warnings), drops)
+}
+
+// buildFixUserPrompt — общий путь обоих режимов автоправки: keywords —
+// уже нормализованные ключевые слова отбора секций.
+func buildFixUserPrompt(contextDir, vacancy string, musts, keywords []string, drops []prompt.Drop) string {
 	profile := collectProfile(contextDir, drops)
 	if len(profile) == 0 {
 		return BuildUserPrompt(contextDir, vacancy, musts, drops)
 	}
-	keywords := caveatKeywords(caveats)
 	selected, _ := selectSections(profile, keywords)
 	if len(selected) == 0 {
 		// Отбор пуст — фоллбэк на полный профиль (с прежним потолком дропов).
@@ -162,6 +187,16 @@ func splitSections(raw string) (preamble string, sections []string) {
 	return strings.TrimRight(strings.Join(pre, "\n"), "\n"), sections
 }
 
+// minKeywordRunes — минимальная длина ключевого слова в СИМВОЛАХ (не в
+// байтах). Порог считается по рунам намеренно: len() на кириллице даёт
+// вдвое больше символов, и слово «стек» (4 буквы, 8 байт) проходило бы
+// фильтр как «достаточно длинное», хотя для отбора секции это шум.
+// Латинские имена (Symfony, RabbitMQ) от правила не меняются.
+const minKeywordRunes = 5
+
+// longEnough — достаточно ли символов в слове для ключа отбора секций.
+func longEnough(w string) bool { return utf8.RuneCountInString(w) >= minKeywordRunes }
+
 // caveatKeywords — содержательные слова из строк caveat: нормализация
 // (регистр, пунктуация) и отсечение служебных слов фита («впиши», «письмо»,
 // «профиль»), которые есть в каждой строке и не отбирают ничего.
@@ -181,11 +216,65 @@ func caveatKeywords(caveats []string) []string {
 		for _, w := range strings.FieldsFunc(strings.ToLower(c), func(r rune) bool {
 			return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 		}) {
-			if len(w) < 5 || stop[w] || seen[w] {
+			if !longEnough(w) || stop[w] || seen[w] {
 				continue
 			}
 			seen[w] = true
 			words = append(words, w)
+		}
+	}
+	return words
+}
+
+// auditWarningKeywords — ключевые слова отбора для замечаний аудита.
+// Берём содержимое «ёлочек»: аудит ставит в кавычки ровно то, о чём
+// замечание — «Потерян факт: Symfony 6.4», «Redis » одновременно в буллетах
+// и в пробелах», «нет обязательной секции «Адаптация под ваш стек»».
+//
+// Почему только кавычки, а не все слова строки: служебные слова замечания
+// («потерян», «обязательной», «пробелах») встречаются в каждом замечании и
+// отбирали бы случайные секции. Кавычки — единственный надёжный признак
+// имени факта. Порог 5 символов общий с caveatKeywords: короткие «PHP»,
+// «CDN», «REST» отсекаются, «Redis» и «Symfony» проходят.
+//
+// Замечание без кавычек («потерян факт») ключей не даёт — отбор пуст,
+// срабатывает фоллбэк на полный профиль.
+func auditWarningKeywords(warnings []string) []string {
+	var words []string
+	seen := map[string]bool{}
+	add := func(s string) {
+		for _, w := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+			return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+		}) {
+			if !longEnough(w) || seen[w] {
+				continue
+			}
+			seen[w] = true
+			words = append(words, w)
+		}
+	}
+	for _, w := range warnings {
+		inside := false
+		var buf strings.Builder
+		for _, r := range w {
+			if r == '«' {
+				inside, buf = true, strings.Builder{}
+				continue
+			}
+			if r == '»' {
+				if inside {
+					add(buf.String())
+				}
+				inside = false
+				continue
+			}
+			if inside {
+				buf.WriteRune(r)
+			}
+		}
+		// Незакрытая кавычка (сбой разбора замечания) — берём остаток строки.
+		if inside {
+			add(buf.String())
 		}
 	}
 	return words

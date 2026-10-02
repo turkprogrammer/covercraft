@@ -343,3 +343,111 @@ func TestAppliedDropsAgreesWithDropSections(t *testing.T) {
 		t.Error("в пустом каталоге применённых дропов быть не может")
 	}
 }
+
+// TestAuditFixPromptSelectsRelevantSections — автоправка по замечаниям аудита
+// отправляет модели только релевантные секции профиля, а не весь context/.
+// Живой баг (октябрь 2026): audit-fix шёл через BuildUserPrompt и гнал модели
+// все 85 КБ на каждую итерацию — модель тонула и отвечала эхом, поэтому
+// «повтори автоправку» не помогало (воспроизведено на двух провайдерах).
+func TestAuditFixPromptSelectsRelevantSections(t *testing.T) {
+	dir := writeContext(t, map[string]string{
+		"01-profile.md": "# Профиль\n\n## Очереди\n" +
+			"Spring Cloud Stream на RabbitMQ, подтверждение и ретраи, DLQ.\n\n" +
+			"## Маркетинг\nСобрал воронку, настроил таргетированную рекламу.\n",
+	})
+	warns := []string{"«RabbitMQ» одновременно в буллетах и в пробелах — оставь только одно"}
+
+	got := BuildAuditFixUserPrompt(dir, "PHP/Symfony", nil, warns, nil)
+
+	if !strings.Contains(got, "RabbitMQ") {
+		t.Errorf("релевантная секция профиля не попала в промпт автоправки:\n%s", got)
+	}
+	if strings.Contains(got, "воронку") {
+		t.Errorf("нерелевантная секция (маркетинг) не должна попадать в автоправку:\n%s", got)
+	}
+	if !strings.Contains(got, "PHP/Symfony") {
+		t.Errorf("вакансия должна остаться в промпте:\n%s", got)
+	}
+}
+
+// TestAuditFixPromptShrinksVsFullProfile — главный эффект правки: объём
+// промпта автоправки должен быть кратно меньше полного профиля. На живом
+// профиле это 86 607 → 6 406 байт (92.6%).
+func TestAuditFixPromptShrinksVsFullProfile(t *testing.T) {
+	// Одна релевантная секция среди многих: именно этот случай и есть на живом
+	// профиле (86 607 → 6 406 байт). Если ключевое слово встречается в каждой
+	// секции, отбирается всё и сокращения не будет — такому профилю тест не
+	// подходит.
+	big := "# Профиль\n\n## Очереди\nRabbitMQ, подтверждение, ретраи, DLQ.\n"
+	for i := 0; i < 60; i++ {
+		big += fmt.Sprintf("\n## Раздел %d\nДетали реализации №%d: воронка, таргет, контент-план.\n", i, i)
+	}
+	dir := writeContext(t, map[string]string{"01-profile.md": big})
+	warns := []string{"«RabbitMQ» одновременно в буллетах и в пробелах"}
+
+	full := BuildUserPrompt(dir, "Go engineer", nil, nil)
+	got := BuildAuditFixUserPrompt(dir, "Go engineer", nil, warns, nil)
+
+	if len(got) >= len(full)/2 {
+		t.Errorf("промпт автоправки %d байт не сокращён относительно полного профиля %d", len(got), len(full))
+	}
+	if len(got) > fitFixProfileMaxBytes {
+		t.Errorf("промпт автоправки %d байт превышает лимит %d", len(got), fitFixProfileMaxBytes)
+	}
+	if !strings.Contains(got, "RabbitMQ") {
+		t.Errorf("релевантная секция потерялась:\n%.400s", got)
+	}
+	if strings.Contains(got, "воронка") {
+		t.Errorf("нерелевантные секции попали в промпт автоправки:\n%.400s", got)
+	}
+}
+
+// TestAuditFixPromptFallsBackOnStructuralWarning — структурные замечания
+// («нет обязательной секции…») имени факта не содержат, ключей не дают. Отбор
+// пуст — обязан сработать фоллбэк на полный профиль, иначе модель получит
+// промпт без профиля и начнёт выдумывать факты.
+func TestAuditFixPromptFallsBackOnStructuralWarning(t *testing.T) {
+	dir := writeContext(t, map[string]string{
+		"01-profile.md": "# Профиль\n## Разное\nУмею чинить принтеры и варить кофе.\n",
+	})
+	warns := []string{"нет обязательной секции «Честно о пробелах» — v4 §2.4"}
+
+	got := BuildAuditFixUserPrompt(dir, "Go engineer", nil, warns, nil)
+
+	if !strings.Contains(got, "чинить принтеры") {
+		t.Errorf("при нулевом отборе нужен фоллбэк на полный профиль:\n%s", got)
+	}
+}
+
+// TestAuditWarningKeywords — ключи отбора берутся только из содержимого
+// «ёлочек»: служебные слова замечания встречаются в каждом и отбирали бы
+// случайные секции.
+func TestAuditWarningKeywords(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{"факт без кавычек не даёт ключа", []string{"Потерян факт: Symfony 6.4"}, nil},
+		{"имя в кавычках", []string{"«Redis» одновременно в буллетах"}, []string{"redis"}},
+		// «под» (3), «ваш» (3) и «стек» (4) короче порога в символах.
+		{"несколько слов в кавычках", []string{"«Адаптация под ваш стек»"}, []string{"адаптация"}},
+		{"короткое имя отсекается", []string{"«PHP» в строке стека"}, nil},
+		{"дедуп между замечаниями", []string{"«Symfony» потерян", "«Symfony» в пробелах"}, []string{"symfony"}},
+		{"незакрытая кавычка", []string{"«Redis в пробелах"}, []string{"redis", "пробелах"}},
+		{"пусто", nil, nil},
+	}
+	for _, c := range cases {
+		got := auditWarningKeywords(c.in)
+		if len(got) != len(c.want) {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+				break
+			}
+		}
+	}
+}

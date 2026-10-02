@@ -342,8 +342,12 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
 	var user string
 	switch {
 	case req.AuditFix:
+		// Тот же отбор секций профиля, что и в fit-fix. Раньше здесь был
+		// BuildUserPrompt — модель получала все 85 КБ context/*.md и тонула,
+		// отвечая эхом (живой баг, октябрь 2026: «повтори автоправку» не
+		// помогало, воспроизведено на двух провайдерах).
 		user = fixPrompt(req.Letter, req.Warnings) + "\n\n" +
-			cover.BuildUserPrompt(h.cfg.ContextDir, req.Vacancy, musts, req.DropSections)
+			cover.BuildAuditFixUserPrompt(h.cfg.ContextDir, req.Vacancy, musts, req.Warnings, req.DropSections)
 	case req.FitFix:
 		// Только релевантные caveat секции профиля, не все 85 КБ: на полном
 		// профиле модель тонет и отвечает эхом (живой баг, октябрь 2026).
