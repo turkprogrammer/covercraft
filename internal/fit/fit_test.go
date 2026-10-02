@@ -1227,7 +1227,7 @@ func TestEnglishReqCyrillicLetter(t *testing.T) {
 // conflict/resolution) — стоп-слова: не раздувают majority-порог.
 // Факты «Git», «GitHub», «PR» в письме закрывают требование.
 func TestGitReqNarrativeStopwords(t *testing.T) {
-	profile := "GitHub PR workflows, Git (17 лет), ADR (10)."
+	profile := "GitHub PR workflows, Git (17 лет), ADR."
 	letter := "GitHub Pull Requests - уверенно владею Git (17 лет)."
 	reqs := mustReqs([]string{"Git & GitHub - branching strategies, PR workflows, conflict resolution"}, nil, "go-primary")
 	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
@@ -1365,7 +1365,7 @@ func TestNegatedVerbsCloseNothing(t *testing.T) {
 // письмо получало «не закрыто» при фактически подтверждённом требовании.
 func TestRFCClosedByADRBridge(t *testing.T) {
 	reqs := mustReqs([]string{"Навыки написания RFC и дизайн-документов, которые действительно читают"}, nil, "go-primary")
-	profile := "Code review и менторство в командах (Go и PHP). Тесты: 155+ (Fraud Engine); ADR: 10. " +
+	profile := "Code review и менторство в командах (Go и PHP). Тесты: 155+ (Fraud Engine); ADR. " +
 		"Документация в репозиториях: ProcessManager, multi-level caching, retry strategies."
 	// Живое письмо: буллета про RFC нет, вместо него ADR/архитектурные решения.
 	letter := "- **System Design:** ADR (10), Hexagonal Architecture, DDD; code review, архитектурные решения.\n" +

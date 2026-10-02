@@ -278,6 +278,26 @@ input:focus-visible, textarea:focus-visible {
   font-weight: 600;
 }
 
+/* Compose-область не должна расти за пределы панели: когда compose
+   наполнил блоки prompt-dropinfo/sentinfo крупным текстом (и кастомный
+   промпт большой), панель может выйти за висоту окна, а main/body на
+   десктопе overflow:hidden — кнопки (compose/вернуть/reset) оказываются
+   ниже видимой области без прокрутки. Ограничиваем тело панели и
+   прокручиваем его; строка кнопок липнет к низу панели и не уходит. */
+#prompt-details .panel-body {
+  max-height: 46vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+#prompt-details .btn-row {
+  position: sticky;
+  bottom: -12px; /* компенсирует padding .panel-body */
+  background: var(--bg-elev);
+  padding: 6px 0;
+  margin-top: auto;
+  flex: none;
+}
+
 
 /* ---------- Рекомендация отклика (internal/fit) ---------- */
 #fit-verdict {
