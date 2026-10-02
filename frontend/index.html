@@ -935,6 +935,22 @@ let lastFit = null;
 // lastFitCaveats — строки caveat вида «текст — примечание», передаваемые в fitFix.
 let lastFitCaveats = [];
 
+// isEchoWarning — замечание-диагностика про отклонённый ответ модели, а не
+// дефект письма. Такое замечание нельзя отдавать модели на исправление:
+// текст просит «исправить то, что ты и так вернул», любой провайдер в ответ
+// повторяет эхо (живой кейс, октябрь 2026, воспроизведён на двух моделях).
+// Строка сервера начинается с «модель вернула эхо промпта» либо «модель
+// вернула ответ неприемлемого размера» — обе формы приходят в warnings.
+function isEchoWarning(w) {
+  return /эхо промпта/.test(w) || /неприемлемого размера/.test(w);
+}
+
+// letterDefects — только настоящие дефекты письма. То, что остаётся после
+// отсечения isEchoWarning, и есть материал для автоправки.
+function letterDefects(warnings) {
+  return (Array.isArray(warnings) ? warnings : []).filter(w => !isEchoWarning(w));
+}
+
 function hasFixableCaveats(fit) {
   if (!fit) return false;
   const checks = (arr) => Array.isArray(arr) && arr.some(c => {
@@ -987,6 +1003,12 @@ function showFitFixButton(fit) {
 
 function showAuditWarnings(warnings) {
   lastWarnings = Array.isArray(warnings) ? warnings : [];
+  // Эхо-предупреждение показываем (пользователь должен знать, что письмо не
+  // проверено), но в счётчик дефектов и в материал для автоправки оно не
+  // идёт. Иначе UI писал «1 замечание — правь перед отправкой» про письмо,
+  // которое проверяли и не нашли (живой кейс: эхо отклонено, письмо целое).
+  const defects = letterDefects(lastWarnings);
+  const echoMsgs = lastWarnings.filter(isEchoWarning);
   const box = els.auditWarns;
   if (lastWarnings.length === 0) {
     box.hidden = true;
@@ -996,24 +1018,37 @@ function showAuditWarnings(warnings) {
   box.textContent = "";
   const title = document.createElement("span");
   title.className = "warn-title";
-  title.textContent = "⚠ проверка письма: " + lastWarnings.length +
-    (lastWarnings.length === 1 ? " замечание" : " замечаний") + " — правь перед отправкой";
+  if (defects.length === 0) {
+    // Письмо не проверялось вовсе — формулировка про «правь перед отправкой»
+    // здесь ложная, показываем честную причину.
+    title.textContent = echoMsgs[0];
+  } else {
+    title.textContent = "⚠ проверка письма: " + defects.length +
+      (defects.length === 1 ? " замечание" : " замечаний") + " — правь перед отправкой";
+  }
   box.appendChild(title);
   const ul = document.createElement("ul");
-  for (const w of lastWarnings) {
+  // Дубликат заголовка-эхо в списке не нужен: при defects.length === 0 он
+  // был бы единственной строкой и совпал бы с заголовком.
+  const listed = defects.length === 0 ? [] : lastWarnings;
+  for (const w of listed) {
     const li = document.createElement("li");
     li.textContent = w;
     ul.appendChild(li);
   }
-  box.appendChild(ul);
-  const fixBtn = document.createElement("button");
-  fixBtn.className = "btn term";
-  fixBtn.id = "auditFix";
-  fixBtn.type = "button";
-  fixBtn.style.marginTop = "8px";
-  fixBtn.innerHTML = "<span>auto-fix</span>";
-  fixBtn.addEventListener("click", auditFix);
-  box.appendChild(fixBtn);
+  if (listed.length) box.appendChild(ul);
+  // Кнопку рисуем только когда есть что чинить. Отправлять пустой список
+  // нельзя: сервер отвечает 400 «auditFix требует letter и warnings».
+  if (defects.length > 0) {
+    const fixBtn = document.createElement("button");
+    fixBtn.className = "btn term";
+    fixBtn.id = "auditFix";
+    fixBtn.type = "button";
+    fixBtn.style.marginTop = "8px";
+    fixBtn.innerHTML = "<span>auto-fix</span>";
+    fixBtn.addEventListener("click", auditFix);
+    box.appendChild(fixBtn);
+  }
   box.hidden = false;
 }
 
@@ -1099,6 +1134,16 @@ function showFitVerdict(fit) {
 async function auditFix() {
   const btn = document.getElementById("auditFix");
   if (!btn || btn.disabled || busy()) return;
+  // Модели уходят только дефекты письма. Эхо-предупреждение в список не идёт:
+  // это диагностика про прошлый ответ, и инструкция «исправь это» приводила
+  // к повтору эха у любого провайдера (живой кейс, октябрь 2026).
+  // Проверка ДО setBusy/try: ранний return внутри try не дошёл бы до finally
+  // и оставил бы интерфейс заблокированным.
+  const defects = letterDefects(lastWarnings);
+  if (defects.length === 0) {
+    setStatus("err: отклонённое эхо — исправлять нечего, письмо не проверялось. Правь вручную или смени модель", "err");
+    return;
+  }
   btn.disabled = true;
   setBusy(true);
   const t0 = performance.now();
@@ -1114,7 +1159,7 @@ async function auditFix() {
         systemPrompt: els.systemPrompt.value,
         auditFix: true,
         letter: letter,
-        warnings: lastWarnings,
+        warnings: defects,
         dropSections: promptDrops,
       },
       delta => {
@@ -1213,7 +1258,7 @@ async function fitFix(maxIter) {
         // проверка выше прошла), но вердикт фита по эху НЕ считается — data.fit
         // пуст. Без этой ветки UI сообщил бы «fit-разбор вакансии не удался»,
         // хотя разбор как раз удался: письмо не было проверено вовсе.
-        const echoHit = (data.warnings || []).some(w => /эхо промпта/.test(w));
+        const echoHit = (data.warnings || []).some(isEchoWarning);
         if (echoHit) {
           setStatus("err: модель вернула эхо промпта вместо письма — исходное письмо сохранено, автоправка остановлена. Правь вручную или смени модель", "err");
           break;

@@ -286,7 +286,7 @@ func TestSentInfoWarnsOnOversizedSystemPrompt(t *testing.T) {
 // удался» — то есть обвинил бы не тот этап.
 func TestFitFixStopsOnRejectedEcho(t *testing.T) {
 	for _, want := range []string{
-		"const echoHit = (data.warnings || []).some(w => /эхо промпта/.test(w));",
+		"const echoHit = (data.warnings || []).some(isEchoWarning);",
 		"автоправка остановлена",
 	} {
 		if !strings.Contains(IndexHTML, want) {
@@ -299,5 +299,35 @@ func TestFitFixStopsOnRejectedEcho(t *testing.T) {
 	fitAt := strings.Index(IndexHTML, "if (!data.fit)")
 	if echoAt < 0 || fitAt < 0 || echoAt > fitAt {
 		t.Errorf("ветка отклонённого эха (поз. %d) должна идти раньше проверки data.fit (поз. %d)", echoAt, fitAt)
+	}
+}
+
+func TestEchoWarningNotSentBackToModel(t *testing.T) {
+	// Живой баг (октябрь 2026): при отклонённом эхо сервер кладёт диагностику
+	// в warnings, UI отправлял её модели наравне с дефектами письма. Модель
+	// получала инструкцию «исправь то, что ты и так вернул» и повторяла эхо —
+	// на двух разных провайдерах. Поэтому аудиторное замечание-эхо обязано
+	// отсекаться до формирования запроса автоправки.
+	for _, want := range []string{
+		"function isEchoWarning(w)", // одно место распознавания
+		"function letterDefects(warnings)",
+		"warnings: defects,", // не lastWarnings
+		"исправлять нечего, письмо не проверялось",
+	} {
+		if !strings.Contains(IndexHTML, want) {
+			t.Errorf("в UI нет %q — эхо-замечание не должно уходить модели как дефект", want)
+		}
+	}
+	// Кнопка auto-fix не должна рисоваться, когда чинить нечего: сервер
+	// отвечает 400 на пустой warnings (server.go: AuditFix требует letter и
+	// warnings), то есть кнопка привела бы к ошибке вместо тишины.
+	fixBtnAt := strings.Index(IndexHTML, `fixBtn.id = "auditFix"`)
+	guardAt := strings.Index(IndexHTML, "if (defects.length > 0) {")
+	if fixBtnAt < 0 || guardAt < 0 || guardAt > fixBtnAt {
+		t.Errorf("создание кнопки auto-fix (поз. %d) должно идти под проверкой defects.length > 0 (поз. %d)", fixBtnAt, guardAt)
+	}
+	// Счётчик «N замечаний» обязан считать дефекты, а не эхо-диагностику.
+	if !strings.Contains(IndexHTML, `"⚠ проверка письма: " + defects.length`) {
+		t.Error("заголовок панели должен считать только дефекты письма")
 	}
 }
