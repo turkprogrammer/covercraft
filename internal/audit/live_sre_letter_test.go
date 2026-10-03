@@ -272,3 +272,23 @@ func TestAuditIgnoresReadyToLearnListing(t *testing.T) {
 // adaptationLine — строка-адаптация из живого письма (дублируется из fit для
 // независимости пакетов).
 const adaptationLine = "- TypeScript/React Native/Expo/Convex/Remotion/E2B: имею опыт fullstack-разработки (PHP/Go + React в CMS Blog); готова оперативно освоить ваш медиа/видео-стек"
+
+// TestAuditIgnoresAIClaimWithAnonFact — анонимизированный outward-факт в
+// профиле («ИИ-инструменты в разработке — постоянное использование»),
+// без vendor-имён, должен признаваться подтверждением факта. До фикса
+// checkAIClaim требовал конкретные имена (aiToolNames), анон-факт не
+// распознавал → письмо уходило в противоположную крайность «не использую
+// ИИ-инструменты», дисквалифицируя кандидата по must-have «опыт работы с
+// AI-инструментами». Фикс: aiToolAnonFactRe принимает outward-факт.
+func TestAuditIgnoresAIClaimWithAnonFact(t *testing.T) {
+	letter := "Здравствуйте!\n\n- ИИ-инструменты в разработке — постоянное использование: генерация кода, ревью, отладка.\n\nБуду рад обсудить."
+	profile := "ИИ-инструменты в разработке — активное использование: для написания кода Go и PHP (рефакторинг, тесты, диагностика), проектирования и анализа. Формулировка для письма: «ИИ-инструменты в разработке — постоянное использование»."
+	r := CheckProfile(letter, profile)
+	for _, w := range r.Warnings {
+		if strings.Contains(w, "ИИ-инструмент") {
+			t.Errorf("анонимизированный outward-факт снят предупреждением: %s", w)
+		}
+	}
+}
+
+

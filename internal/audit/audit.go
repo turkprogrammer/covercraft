@@ -984,6 +984,14 @@ var (
 	// aiToolNames — подтверждение факта: конкретное имя инструмента в профиле
 	// (вне запретных строк).
 	aiToolNames = regexp.MustCompile(`(?i)\b(cursor|claude|copilot|windsurf|aider|codeium|cline|continue|chatgpt|gemini|grok)\b`)
+	// aiToolAnonFactRe — анонимизированное подтверждение факта: без vendor-имён.
+	// Пользователь заявляет «ИИ-инструменты в разработке — постоянное
+	// использование» (outward-факт по правилу анонимности). До него check
+	// требовал конкретные имена (aiToolNames), анонимизированный факт не
+	// распознавался → генератор письма уходил в крайность «не использую ИИ-
+	// инструменты» и дисквалифицировал себя по must-have «опыт работы с
+	// AI-инструментами». Факт = анон-форма в профиле (вне запретных строк).
+	aiToolAnonFactRe = regexp.MustCompile(`(?i)ии[- ]?инструмент\w*.{0,80}(постоянн|активн|ежедневн|регулярн|применя|использую)`)
 	// profileForbiddenMarkers — маркеры строки-запрета. Такой блок профиля
 	// запрещает заявку, а не подтверждает её: его надо вырезать перед сверкой.
 	profileForbiddenMarkers = regexp.MustCompile(`0 вхождений|НЕ заявлять|дописывает|ловится на интервью`)
@@ -1020,13 +1028,17 @@ func stripForbiddenProfile(profile string) string {
 }
 
 // checkAIClaim — заявка «ИИ-инструменты — ежедневная практика» без факта
-// в профиле (после вырезания запретных блоков).
+// в профиле (после вырезания запретных блоков). Подтверждением считаются и
+// конкретные имена (aiToolNames), и анонимизированный outward-факт
+// (aiToolAnonFactRe): правило анонимности требует писать «ИИ-инструменты в
+// разработке — постоянное использование» без vendor-имён.
 func checkAIClaim(letter, profile string) []string {
 	if !aiToolClaimRe.MatchString(letter) || !aiToolDailyRe.MatchString(letter) {
 		return nil
 	}
-	if aiToolNames.MatchString(stripForbiddenProfile(profile)) {
+	clean := stripForbiddenProfile(profile)
+	if aiToolNames.MatchString(clean) || aiToolAnonFactRe.MatchString(clean) {
 		return nil
 	}
-	return []string{"«ИИ-инструменты — ежедневная практика» заявлены без факта в профиле (ни одного названия инструмента там нет) — либо зафиксируй факт в профиле, либо убери утверждение"}
+	return []string{"«ИИ-инструменты — ежедневная практика» заявлены без факта в профиле (ни одного названия инструмента или анонимизированного outward-факта там нет) — либо зафиксируй факт в профиле, либо убери утверждение"}
 }
