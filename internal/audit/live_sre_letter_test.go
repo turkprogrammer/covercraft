@@ -290,5 +290,3 @@ func TestAuditIgnoresAIClaimWithAnonFact(t *testing.T) {
 		}
 	}
 }
-
-
