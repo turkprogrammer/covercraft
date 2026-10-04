@@ -8,9 +8,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/turkprogrammer/covercraft/frontend"
 )
 
 // Скриншот живого бага: модель вернула профиль с ПЕРЕФОРМАТИРОВАНИЕМ —
@@ -399,6 +402,104 @@ func TestEchoSourceDistinguishedInMessage(t *testing.T) {
 		t.Error("ветка без исходного письма должна предлагать повторить генерацию")
 	}
 }
+
+// indexHTMLCode — index.html без строк-комментариев и полосных литералов
+// «//». Нужна для подсчёта повторов литерала: цитата призыва в комментарии
+// не должна выглядеть как «призыв продублирован в коде».
+func indexHTMLCode() string {
+	var b strings.Builder
+	for _, line := range strings.Split(frontend.IndexHTML, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "//") {
+			continue
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// TestEchoCallToActionLiteralMatchesServer — призыв в UI подставляется ПОИСКОМ
+// по исходной форме серверного текста (CTA_AUDIT в index.html). Рассинхрон тихо
+// превращает фикс в no-op: подстановка перестаёт находиться, призыв снова зовёт к
+// несуществующей кнопке, а фронтенд-тесты остаются зелёными — файла ответа они
+// не читают.
+//
+// Проверка поведенческая (живой запрос к /api/generate), а не по исходнику:
+// сверяем ФАКТИЧЕСКИЙ текст эхо-предупреждения в SSE с тем, что ищет UI.
+func TestEchoCallToActionLiteralMatchesServer(t *testing.T) {
+	m := ctaAuditRe.FindStringSubmatch(frontend.IndexHTML)
+	if m == nil {
+		t.Fatal("в index.html нет объявления CTA_AUDIT — призыв ищется по нему")
+	}
+	cta := m[1]
+
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dir := t.TempDir()
+	profile := "# КАРТА МЕТРИК\n- 10 000 RPS — Stable ID (Kafka, 20+ воркеров)\n" +
+		"## 2. PHP — PRODUCTION\n- **Symfony:** E-commerce-Lite (7.2, Hexagonal)\n"
+	if err := os.WriteFile(filepath.Join(dir, "01-профиль.md"), []byte(profile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	orig := "Здравствуйте! Меня заинтересовала ваша вакансия PHP/Symfony разработчика.\n\n" +
+		"**Symfony:** E-commerce-Lite (7.2, Hexagonal), PHPUnit 13, production.\n\n" +
+		"**Адаптация под ваш стек:** Symfony для меня основной фреймворк.\n\n" +
+		"Стек: PHP, Symfony, PostgreSQL\n\n" +
+		"+7 (000) 000-00-00 | Telegram: @example\n" +
+		"Буду рад обсудить ваши задачи. Спасибо за внимание!\n"
+	h := New(Config{
+		ContextDir: dir,
+		LLMStream: func(ctx context.Context, system, user string, onDelta func(string)) (string, error) {
+			// Эхо профиля: сервер обязан откатиться на исходное письмо.
+			onDelta(profile)
+			return profile, nil
+		},
+		FitLLM: func(ctx context.Context, system, user string) (string, error) {
+			return `{"role":"php-primary","mustHave":[{"text":"Symfony","kind":"must","category":"stack"}]}`, nil
+		},
+	})
+	body, _ := json.Marshal(map[string]any{
+		"vacancy":  "PHP/Symfony backend, требуется Symfony",
+		"auditFix": true,
+		"letter":   orig,
+		"warnings": []string{"«Symfony» потерян из буллетов"},
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+
+	ev := parseSSE(t, rec.Body.String())
+	if ev.Done == nil {
+		t.Fatal("нет done-события")
+	}
+	var echoWarning string
+	for _, w := range ev.Done.Warnings {
+		if strings.Contains(w, "эхо промпта") {
+			echoWarning = w
+			break
+		}
+	}
+	if echoWarning == "" {
+		t.Fatalf("в ответе нет эхо-предупреждения, warnings = %q", ev.Done.Warnings)
+	}
+	// Призыв обязан ЗАКАНЧИВАТЬ текст предупреждения, а не просто встречаться в
+	// нём: подстановка ищет подстроку, и любое расширение на сервере
+	// («…повтори автоправку!») прошло бы проверку на вхождение, хотя искать
+	// будет уже нечего.
+	if !strings.HasSuffix(echoWarning, cta) {
+		t.Errorf("эхо-предупреждение должно заканчиваться призывом из index.html = %q:\n got: %q", cta, echoWarning)
+	}
+	// Обратная сторона: UI обязан использовать константу, а не её копию —
+	// иначе правка константы снова разъедется с местом подстановки. Считаем
+	// вхождения в КОДЕ, а не в сыром IndexHTML: цитата призыва в комментарии
+	// не считается «продублированным литералом».
+	if got := strings.Count(indexHTMLCode(), cta); got != 1 {
+		t.Errorf("CTA_AUDIT встречается в коде index.html %d раз(а), хочу 1 — литерал расползся", got)
+	}
+}
+
+// ctaAuditRe — объявление призыва во фронтенде.
+var ctaAuditRe = regexp.MustCompile(`const CTA_AUDIT = "([^"]+)"`)
 
 // TestAuditRunsOnEchoWithLetterKept — подавление аудита при отклонённом эхо
 // оправдано ТОЛЬКО когда письма нет: тогда Check даёт замечания-мусор по

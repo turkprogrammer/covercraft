@@ -319,6 +319,92 @@ func TestFitFixEchoMessageReflectsVerdict(t *testing.T) {
 	}
 }
 
+// skipCommentLines — пропускает пробелы и строки-комментарии (// до конца
+// строки) в начале фрагмента. Нужна проверкам порядка вызовов: объясняющий
+// комментарий между двумя вызовами не нарушает инвариант, но и не должен
+// его валить.
+func skipCommentLines(s string) string {
+	for {
+		line := s
+		if i := strings.IndexByte(s, '\n'); i >= 0 {
+			line, s = s[:i], s[i+1:]
+		} else {
+			s = ""
+		}
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "//") {
+			if line == "" && s == "" {
+				return ""
+			}
+			continue
+		}
+		return line
+	}
+}
+
+// TestEchoCallToActionMatchesRenderedButtons — живой баг (октябрь 2026):
+// сервер пишет «правь вручную или повтори автоправку», но кнопок может не
+// оказаться НИ ОДНОЙ. auto-fix рисуется только при defects>0 || lastDefects>0,
+// fit-fix — только при fixable-кавеатах. Письмо без дефектов и вердикт без
+// маркеров «впиши» → сообщение зовёт к кнопке, которой на экране нет.
+//
+// Инвариант проверяем статически (как остальные тесты фронтенда): призыв должен
+// вычисляться по фактически ВИДИМЫМ кнопкам, а не быть константой.
+func TestEchoCallToActionMatchesRenderedButtons(t *testing.T) {
+	for _, want := range []string{
+		// Призыв выбирается по видимым кнопкам; скрытый контейнер с
+		// оставшейся внутри кнопкой (fitFixFallback) — это «кнопки нет».
+		`if (visibleButton("auditFix")) return CTA_AUDIT;`,
+		`if (visibleButton("fitFix")) return "правь вручную или повтори fit-fix"`,
+		`return "правь вручную или запусти gen заново"`,
+		`const el = document.getElementById(id);`,
+		`return !!el && !el.closest("[hidden]");`,
+		// …и подставляется в уже нарисованный текст вместо константы.
+		"function echoCallToAction()",
+		"function reconcileEchoCallToAction()",
+		"n.textContent = n.textContent.replace(CTA_AUDIT, cta)",
+	} {
+		if !strings.Contains(IndexHTML, want) {
+			t.Errorf("в UI нет %q — призыв должен соответствовать нарисованным кнопкам", want)
+		}
+	}
+	// Контейнер кнопки fit-fix чистится при снятии вердикта, а не просто
+	// прячется: иначе getElementById находит кнопку, которой не видно.
+	const clean = `if (fb) { fb.hidden = true; fb.textContent = ""; }`
+	if got := strings.Count(IndexHTML, clean); got != 2 {
+		t.Errorf("очисток fallback-контейнера %d, хочу 2 — кнопка может остаться в скрытом блоке", got)
+	}
+	// Призыв обязан доезжать и до статуса цикла fitFix: там он тоже стоял
+	// константой и звал к возможно отсутствующей кнопке.
+	if !strings.Contains(IndexHTML, `вердикт выше актуален. " + echoCallToAction()`) {
+		t.Error("статус fitFix об эхо должен брать призыв из echoCallToAction()")
+	}
+	// reconcile обязана вызываться сразу после КАЖДОГО места, где рисуется
+	// панель вердикта: fit-fix появляется именно там, и раньше мы ещё не знаем,
+	// появится ли кнопка. Порядок в файле значения не имеет (объявления функций
+	// хойстятся), важен порядок ВЫЗОВОВ — он и проверяется. Перебор идёт по всем
+	// вхождениям, поэтому счётчик отдельно не нужен: забытый вызов поймает
+	// проверка порядка.
+	for rest := IndexHTML; ; {
+		i := strings.Index(rest, "showFitVerdict(data.fit")
+		if i < 0 {
+			break
+		}
+		rest = rest[i:]
+		eol := strings.IndexByte(rest, '\n')
+		if eol < 0 {
+			t.Fatalf("вызов showFitVerdict без следующей строки: %q", rest)
+		}
+		next := skipCommentLines(rest[eol+1:])
+		if !strings.HasPrefix(next, "reconcileEchoCallToAction();") {
+			t.Errorf("после showFitVerdict должен идти reconcileEchoCallToAction(), а идёт: %q", next)
+			break
+		}
+		rest = rest[eol+1:]
+	}
+
+}
+
 func TestEchoWarningNotSentBackToModel(t *testing.T) {
 	// Живой баг (октябрь 2026): при отклонённом эхо сервер кладёт диагностику
 	// в warnings, UI отправлял её модели наравне с дефектами письма. Модель

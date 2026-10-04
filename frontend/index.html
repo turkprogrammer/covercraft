@@ -926,6 +926,7 @@ async function generate() {
     );
     showAuditWarnings(data.warnings);
     showFitVerdict(data.fit, data.fitNote);
+    reconcileEchoCallToAction(); // после отрисовки кнопок — см. echoCallToAction
     setProfileWarning(data.profileWarning);
     renderSentInfo(data);
     // Поле показывает поток дельт, а источник истины — data.letter. Если
@@ -1055,6 +1056,48 @@ function fitFixFallbackBox() {
   return el;
 }
 
+// CTA_AUDIT — призыв, которым сервер заканчивает эхо-предупреждение при откате
+// на исходное письмо (internal/server/server.go). Призыв выбирается динамически,
+// но распознать его в тексте можно только по этой исходной форме — поэтому она
+// живёт здесь константой, а не литералом в трёх местах.
+const CTA_AUDIT = "правь вручную или повтори автоправку";
+
+// visibleButton — кнопка, которую пользователь действительно видит. Проверки
+// «узел есть» мало: контейнер может быть скрыт (fitFixFallback), а узел внутри
+// продолжает находиться по getElementById.
+function visibleButton(id) {
+  const el = document.getElementById(id);
+  return !!el && !el.closest("[hidden]");
+}
+
+// echoCallToAction — призыв после отклонённого эхо по ТЕМ кнопкам, что реально
+// нарисованы. Серверный текст (CTA_AUDIT) безусловен, а кнопок может не
+// оказаться ни одной: auto-fix рисуется только при defects>0 || lastDefects>0,
+// fit-fix — только при fixable-кавеатах. Живой баг (октябрь 2026): сообщение
+// звало к кнопке, которой на экране не было.
+function echoCallToAction() {
+  if (visibleButton("auditFix")) return CTA_AUDIT;
+  if (visibleButton("fitFix")) return "правь вручную или повтори fit-fix";
+  return "правь вручную или запусти gen заново";
+}
+
+// reconcileEchoCallToAction — подставляет достижимый призыв в уже нарисованные
+// тексты эхо-предупреждения (заголовок и пункты списка в панели замечаний).
+// Вызывается ПОСЛЕ showFitVerdict: fit-fix рисуется именно там, и раньше мы ещё
+// не знаем, появится ли кнопка. Безопасна при повторном вызове: showAuditWarnings
+// каждый раз пересобирает панель с нуля, поэтому текст для подстановки берётся
+// свежим, уже с исходным призывом от сервера.
+function reconcileEchoCallToAction() {
+  const box = els.auditWarns;
+  if (!box || box.hidden) return;
+  const cta = echoCallToAction();
+  const nodes = box.querySelectorAll(".warn-title, li");
+  for (const n of nodes) {
+    if (!n.textContent.includes(CTA_AUDIT)) continue;
+    n.textContent = n.textContent.replace(CTA_AUDIT, cta);
+  }
+}
+
 function showAuditWarnings(warnings) {
   lastWarnings = Array.isArray(warnings) ? warnings : [];
   // Эхо-предупреждение показываем (пользователь должен знать, что письмо не
@@ -1153,8 +1196,11 @@ function showFitVerdict(fit, fitNote) {
     // сохранённых caveat, только если они реально есть.
     if (lastFitObjects.length > 0) showFitFixButton({ caveats: lastFitObjects });
     else {
+      // Контейнер чистим, а не просто прячем: оставленная в нём кнопка
+      // продолжает находиться по getElementById, и призыв «повтори fit-fix»
+      // указывал бы на кнопку, которой на экране нет (живой баг, октябрь 2026).
       const fb = document.getElementById("fitFixFallback");
-      if (fb) fb.hidden = true;
+      if (fb) { fb.hidden = true; fb.textContent = ""; }
     }
     return;
   }
@@ -1269,6 +1315,7 @@ async function auditFix() {
     );
     showAuditWarnings(data.warnings);
     showFitVerdict(data.fit, data.fitNote);
+    reconcileEchoCallToAction(); // после отрисовки кнопок — см. echoCallToAction
     setProfileWarning(data.profileWarning);
     renderSentInfo(data);
     // Как и в generate: ответ сервера важнее дельт — при отклонённом эхо
@@ -1335,6 +1382,7 @@ async function fitFix(maxIter) {
       );
         showAuditWarnings(data.warnings);
         showFitVerdict(data.fit, data.fitNote);
+        reconcileEchoCallToAction(); // после отрисовки кнопок — см. echoCallToAction
         setProfileWarning(data.profileWarning);
         renderSentInfo(data);
         // Показанный текст — это поток дельт, а НЕ то, что сервер вернул в
@@ -1361,7 +1409,7 @@ async function fitFix(maxIter) {
           // выше уже показана. Различаем два случая: с вердиктом сообщаем, что
           // он актуален; без него — что оценки нет.
           setStatus(data.fit
-            ? "автоправка вернула эхо — исходное письмо сохранено, вердикт выше актуален. Правь вручную или повтори автоправку"
+            ? "автоправка вернула эхо — исходное письмо сохранено, вердикт выше актуален. " + echoCallToAction()
             : "err: автоправка вернула эхо — исходное письмо сохранено, вердикт фита недоступен. Правь вручную или смени модель",
             data.fit ? "" : "err");
           break;
