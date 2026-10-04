@@ -501,10 +501,10 @@ func DefaultConcepts() []Concept {
 			// и «AI-агентов» даёт единственный generic-токен «ai», который
 			// находится в «AI-системы». Понятие стоит ДО GenAI/LLM.
 			Name:    "агентские системы и Tool Use",
-			Trigger: regexp.MustCompile(`(?i)агент|agent|tool[. _-]?use|function[. _-]?call|многошагов|цепочк.{0,25}рассужд|reasoning chain|планировщик`),
+			Trigger: regexp.MustCompile(`(?i)агент|agent|tool[. _-]?use|function[. _-]?call|многошагов|цепочк.{0,25}рассужд|reasoning chain|планировщик|ии-инструмент|ии инструмент|ai-инструмент`),
 			Signals: []Signal{
-				{Label: "агентская логика / Tool Use", Re: regexp.MustCompile(`(?i)агент|agent|tool[. _-]?use|function[. _-]?call|вызов инструмент`)},
-				{Label: "цепочки рассуждений / контекст диалога", Re: regexp.MustCompile(`(?i)многошагов|цепочк.{0,25}рассужд|распознаван.{0,20}намерен|диалог|планировщик|planner`)},
+				{Label: "агентская логика / делегирование", Re: regexp.MustCompile(`(?i)агент|agent|tool[. _-]?use|function[. _-]?call|вызов инструмент|постановка задач|делегиров|ежедневн.{0,20}практик|ии-инструмент|ии инструмент|ai-инструмент`)},
+				{Label: "контроль агентного кода / процесс", Re: regexp.MustCompile(`(?i)контроль.{0,15}инженер|архитектурн.{0,12}контроль|проходит.{0,20}(code )?review|поток работ|workflow|рабочий процесс|process|многошагов|цепочк.{0,25}рассужд|распознаван.{0,20}намерен|диалог|планировщик|planner`)},
 			},
 		},
 		{
