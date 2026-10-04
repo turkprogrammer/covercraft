@@ -1,6 +1,6 @@
 // Package prompt собирает запрос композера: по тексту вакансии и заголовкам
-// профиля выбирает разделы профиля, которые в неё не попадают; их вырезает
-// internal/cover.DropSections.
+// профиля (с краткой выжимкой фактов) выбирает разделы профиля, которые в неё
+// не попадают; их вырезает internal/cover.DropSections.
 //
 // Системный промпт композер НЕ пишет: промпт — рукописный актив пользователя
 // (settings.DefaultSystemPrompt). Переписывание его моделью давало регресс —
@@ -23,6 +23,11 @@ import (
 type Section struct {
 	File    string // например "01-профиль-карта-фактов.md"
 	Heading string // например "## 3. ML / AI — ИНТЕГРАЦИЯ"
+	// Excerpt — краткая выжимка фактов раздела (первые непустые строки текста
+	// без строк-заголовков). Даёт композеру судить о содержимом по факту, а не
+	// по широкому заголовку. Защищённые разделы (ФАКТЫ-ОГРАНИЧИТЕЛИ, КОНТАКТЫ)
+	// excerpt не получают — см. IsProtected.
+	Excerpt string
 }
 
 // Drop — раздел профиля, который модель решила вырезать из user-промпта.
@@ -60,9 +65,11 @@ var roleHints = map[string]string{
 //
 // system = инструкция отбора: вернуть JSON с dropSections и reason.
 // user = текст вакансии + must-have + список квалифицированных заголовков
-// профиля (File + Heading), а не весь профиль: композеру нужны только
-// заголовки, чтобы выбрать, что вырезать. Системный промпт письма сюда не
-// попадает — он больше не переписывается моделью.
+// профиля (File + Heading) с краткой выжимкой фактов (Excerpt), а не весь
+// профиль: заголовок может быть широким («## Go и highload»), а must-have
+// узким («ISO-8583») — excerpt даёт модели судить о содержимом по факту.
+// Системный промпт письма сюда не попадает — он больше не переписывается
+// моделью.
 func Compose(vacancy, role string, musts []string, sections []Section) (system, user string) {
 	system = dropInstruction(role)
 
@@ -84,12 +91,17 @@ func Compose(vacancy, role string, musts []string, sections []Section) (system, 
 		}
 	}
 
-	u.WriteString("\n## Разделы профиля (только заголовки; полный текст не даётся)\n\n")
+	u.WriteString("\n## Разделы профиля (заголовки + выжимка фактов)\n\n")
 	for _, s := range sections {
 		u.WriteString(s.File)
 		u.WriteString(" :: ")
 		u.WriteString(s.Heading)
 		u.WriteString("\n")
+		if s.Excerpt != "" {
+			u.WriteString("   Excerpt: ")
+			u.WriteString(s.Excerpt)
+			u.WriteString("\n")
+		}
 	}
 
 	return system, u.String()
@@ -112,6 +124,7 @@ func dropInstruction(role string) string {
 	}
 	b.WriteString("\nВерни ТОЛЬКО JSON {\"dropSections\":[{\"file\":\"…\",\"heading\":\"## …\"}],\"reason\":\"…\"} без markdown-обёртки и пояснений.\n")
 	b.WriteString("- dropSections: только пары (file, heading) из предъявленного списка, дословно; пустой список — если резать нечего;\n")
+	b.WriteString("- строки «File :: Heading» — элементы списка для dropSections; строки «Excerpt:» — только контекст для суждения о содержимом раздела, в ответ их дословно копировать не нужно;\n")
 	b.WriteString("- reason: одна строка, почему разделы вырезаны.")
 	return b.String()
 }
@@ -162,7 +175,7 @@ func Parse(raw string, sections []Section) (Result, error) {
 // заголовок с чужим файлом не вырежет ничего. Регистр имени файла не важен
 // (EqualFold): модель вправе вернуть другое его написание.
 func dropAllowed(d Drop, sections []Section) bool {
-	if isProtected(d.Heading) {
+	if IsProtected(d.Heading) {
 		return false
 	}
 	for _, s := range sections {
@@ -176,8 +189,11 @@ func dropAllowed(d Drop, sections []Section) bool {
 	return false
 }
 
-// isProtected — заголовок содержит защищённую подстроку (регистр не важен).
-func isProtected(heading string) bool {
+// IsProtected — заголовок содержит защищённую подстроку (регистр не важен):
+// «ФАКТЫ-ОГРАНИЧИТЕЛИ» или «КОНТАКТЫ». Такие разделы нельзя вырезать ни при
+// каких условиях (хард-защита в Parse), поэтому и excerpt для них не нарезается
+// — отбора по ним нет, а контакты не должны утекать в вызов композера.
+func IsProtected(heading string) bool {
 	up := strings.ToUpper(normalize(heading))
 	for _, p := range protectedHeadings {
 		if strings.Contains(up, strings.ToUpper(p)) {

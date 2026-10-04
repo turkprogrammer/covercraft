@@ -364,23 +364,84 @@ func AppliedDrops(contextDir string, drops []prompt.Drop) []prompt.Drop {
 	return out
 }
 
-// ProfileSections — квалифицированные заголовки всех *.md из contextDir:
-// "file.md :: ## Заголовок". Композер видит только эти строки вместо 67 КБ
-// профиля. Сортировка по именам файлов — как в BuildUserPrompt.
-func ProfileSections(contextDir string) []string {
-	var out []string
+// ProfileSections — квалифицированные разделы всех *.md из contextDir:
+// {File, Heading, Excerpt}. Композер видит заголовки и краткую выжимку фактов
+// вместо 67 КБ профиля. Excerpt нарезается из фактического текста секции
+// (sectionExcerpt); защищённые разделы (prompt.IsProtected) его не получают.
+// Сортировка по именам файлов — как в BuildUserPrompt.
+func ProfileSections(contextDir string) []prompt.Section {
+	var out []prompt.Section
 	for _, name := range mdNames(contextDir) {
 		raw, err := os.ReadFile(filepath.Join(contextDir, name))
 		if err != nil {
 			continue // гонка с пользователем, редактирующим файлы
 		}
-		for _, line := range strings.Split(string(raw), "\n") {
-			if strings.HasPrefix(strings.TrimSpace(line), "## ") {
-				out = append(out, name+" :: "+strings.TrimSpace(line))
+		_, sections := splitSections(string(raw))
+		for _, sec := range sections {
+			heading := strings.TrimSpace(strings.Split(sec, "\n")[0])
+			if !strings.HasPrefix(heading, "## ") {
+				continue
 			}
+			out = append(out, prompt.Section{
+				File:    name,
+				Heading: heading,
+				Excerpt: sectionExcerpt(sec, heading),
+			})
 		}
 	}
 	return out
+}
+
+// Границы выжимки фактов: первые N непустых строк текста, не длиннее L байт.
+const (
+	sectionExcerptMaxLines = 3
+	sectionExcerptMaxBytes = 240
+)
+
+// sectionExcerpt — краткая выжимка фактов секции для композера: первые N
+// непустых строк фактического текста (пустые строки и строки-заголовки
+// пропускаются — иначе первые строки окажутся одними ### без фактов),
+// конкатенированные через "; ", усечённые до L байт по границе руны с
+// маркером «…». Защищённые разделы (prompt.IsProtected) выжимки не получают:
+// они невырезаемы, отбор по ним не нужен, а контакты не должны утекать в
+// дополнительный вызов композера.
+func sectionExcerpt(section, heading string) string {
+	if prompt.IsProtected(heading) {
+		return ""
+	}
+	var facts []string
+	for _, line := range strings.Split(section, "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" || strings.HasPrefix(t, "#") {
+			continue // пустая строка или заголовок (сам ## и вложенные ###)
+		}
+		facts = append(facts, t)
+		if len(facts) >= sectionExcerptMaxLines {
+			break
+		}
+	}
+	if len(facts) == 0 {
+		return ""
+	}
+	return truncateRunes(strings.Join(facts, "; "), sectionExcerptMaxBytes)
+}
+
+// truncateRunes усекает s до maxBytes байт, не разрезая руну: остаток режется
+// до ближайшей границы UTF-8, при обрезке добавляется маркер «…». Усечение по
+// байтам без отката дало бы битую руну (профиль на русском).
+func truncateRunes(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	cut := s[:maxBytes]
+	for len(cut) > 0 {
+		r, size := utf8.DecodeLastRuneInString(cut)
+		if r != utf8.RuneError || size > 1 {
+			break
+		}
+		cut = cut[:len(cut)-1]
+	}
+	return cut + "…"
 }
 
 // DropSections вырезает из raw блоки по заголовкам drops, не трогая остальное.

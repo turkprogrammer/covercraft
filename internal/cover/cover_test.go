@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/turkprogrammer/covercraft/internal/prompt"
 )
@@ -164,24 +165,66 @@ func TestProfileSectionsListsHeadingsQualified(t *testing.T) {
 		"notes.txt": "## Не считается\n",
 	})
 	got := ProfileSections(dir)
-	want := []string{
-		"01-a.md :: ## A1",
-		"02-b.md :: ## B1",
-		"02-b.md :: ## B2",
+	want := []prompt.Section{
+		{File: "01-a.md", Heading: "## A1", Excerpt: "текст"},
+		{File: "02-b.md", Heading: "## B1", Excerpt: "текст"},
+		{File: "02-b.md", Heading: "## B2"},
 	}
 	if len(got) != len(want) {
-		t.Fatalf("секций = %d, хочу %d: %v", len(got), len(want), got)
+		t.Fatalf("секций = %d, хочу %d: %+v", len(got), len(want), got)
 	}
 	for i := range want {
 		if got[i] != want[i] {
-			t.Errorf("секция[%d] = %q, хочу %q", i, got[i], want[i])
+			t.Errorf("секция[%d] = %+v, хочу %+v", i, got[i], want[i])
 		}
 	}
 	// Уровень ## отбирается, ### внутри секции — нет (это не ##-заголовок).
 	for _, s := range got {
-		if strings.Contains(s, "B1.1") {
-			t.Errorf("### не должен попадать в список секций: %q", s)
+		if strings.Contains(s.Heading, "B1.1") || strings.Contains(s.Excerpt, "B1.1") {
+			t.Errorf("### не должен попадать ни в заголовок, ни в excerpt: %+v", s)
 		}
+	}
+}
+
+// TestProfileSectionsExcerptSlicing — выжимка фактов секции: первые 3 непустые
+// строки текста (строки-заголовки пропускаются), конкатенация через "; ",
+// ≤240 байт по границе руны с «…»; защищённые и пустые секции — без excerpt.
+func TestProfileSectionsExcerptSlicing(t *testing.T) {
+	// "A" сдвигает байтовую границу: срез 240 попадает в середину кириллической
+	// руны — проверяем, что откат до границы руны сработал (utf8.ValidString).
+	long := "A" + strings.Repeat("ы", 200) // 401 байт
+	dir := writeContext(t, map[string]string{
+		"01.md": "## Много\nстрока1\n### вложенный\nстрока2\n\nстрока3\nстрока4\n",
+		"02.md": "## Длинный\n" + long + "\n",
+		"03.md": "## КОНТАКТЫ\ntelegram: @secret\n",
+		"04.md": "## Пустой\n",
+	})
+
+	byHeading := map[string]prompt.Section{}
+	for _, s := range ProfileSections(dir) {
+		byHeading[s.Heading] = s
+	}
+
+	if got, want := byHeading["## Много"].Excerpt, "строка1; строка2; строка3"; got != want {
+		t.Errorf("excerpt = %q, хочу %q", got, want)
+	}
+
+	longExcerpt := byHeading["## Длинный"].Excerpt
+	if !strings.HasSuffix(longExcerpt, "…") {
+		t.Errorf("длинный excerpt обязан обрезаться с «…»: %q", longExcerpt)
+	}
+	if !utf8.ValidString(longExcerpt) {
+		t.Errorf("обрезка разрезала руну: %q", longExcerpt)
+	}
+	if len(longExcerpt) > sectionExcerptMaxBytes+len("…") {
+		t.Errorf("excerpt %d байт превышает лимит %d", len(longExcerpt), sectionExcerptMaxBytes)
+	}
+
+	if got := byHeading["## КОНТАКТЫ"].Excerpt; got != "" {
+		t.Errorf("защищённый раздел не должен получать excerpt: %q", got)
+	}
+	if got := byHeading["## Пустой"].Excerpt; got != "" {
+		t.Errorf("пустая секция не должна получать excerpt: %q", got)
 	}
 }
 

@@ -45,6 +45,25 @@ func TestComposeSystemForbidsProtectedSections(t *testing.T) {
 	}
 }
 
+// TestComposeSectionExcerptInUserPart — композер видит выжимку фактов раздела
+// рядом с заголовком: между широким «## Go» и узким must-have он судит по
+// содержимому, а не по формулировке заголовка. Пустой excerpt строки не
+// рендерит.
+func TestComposeSectionExcerptInUserPart(t *testing.T) {
+	sections := []Section{
+		{File: "01.md", Heading: "## Go", Excerpt: "Stable ID 10 000 RPS, Kafka"},
+		{File: "02.md", Heading: "## Пустой"},
+	}
+	_, user := Compose("Go-вакансия, highload", "", []string{"highload"}, sections)
+	if !strings.Contains(user, "01.md :: ## Go\n   Excerpt: Stable ID 10 000 RPS") {
+		t.Errorf("excerpt не попал в user-часть сразу после заголовка:\n%s", user)
+	}
+	// Пустой excerpt не рендерит строку Excerpt:.
+	if strings.Contains(user, "02.md :: ## Пустой\n   Excerpt:") {
+		t.Errorf("пустой excerpt не должен рендерить строку Excerpt:\n%s", user)
+	}
+}
+
 func TestComposeRoleHintOnlyForKnownRole(t *testing.T) {
 	ml, _ := Compose("Вакансия", "ml-research", nil, nil)
 	if !strings.Contains(ml, "ML-вакансия") {

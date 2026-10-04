@@ -708,13 +708,8 @@ func (h *Handler) composePrompt(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	start := time.Now()
 
-	// Заголовки профиля вместо 67 КБ контента.
-	var sections []prompt.Section
-	for _, s := range cover.ProfileSections(h.cfg.ContextDir) {
-		if file, heading, ok := strings.Cut(s, " :: "); ok {
-			sections = append(sections, prompt.Section{File: file, Heading: heading})
-		}
-	}
+	// Заголовки + выжимка фактов профиля вместо 67 КБ контента.
+	sections := cover.ProfileSections(h.cfg.ContextDir)
 
 	// must-have для промпта композера; отказ разбора не фатален — роль "",
 	// musts nil (прецедент generate).
