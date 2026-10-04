@@ -2,7 +2,6 @@
 
 [![Go Version](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go)](https://go.dev)
 [![License: MIT](https://img.shields.io/badge/License-MIT-2fe08b.svg)](LICENSE)
-[![Go Report Card](https://goreportcard.com/badge/github.com/turkprogrammer/covercraft)](https://goreportcard.com/report/github.com/turkprogrammer/covercraft)
 [![CI](https://github.com/turkprogrammer/covercraft/actions/workflows/ci.yml/badge.svg)](https://github.com/turkprogrammer/covercraft/actions/workflows/ci.yml)
 
 Генератор сопроводительных писем с **fit-оценкой на коде** (не LLM),
@@ -93,16 +92,6 @@
   в конце — событие с полным текстом, `elapsedMs` и предупреждениями аудита.
 - **Счётчик времени**: `/api/generate` возвращает `elapsedMs` — UI показывает
   `N chars · X.Xs` рядом с письмом (сколько отвечала модель).
-
-## Сравнение с решениями на рынке
-
-| Инструмент | Fit-оценка | Гиперперсонализация | Open-source | Локальный деплой |
-|---|---|---|---|---|
-| **CoverCraft** | ✅ код | ✅ профиль | ✅ MIT | ✅ да |
-| Rezi.ai | ❌ нет | ⚠ шаблон | ❌ нет | ❌ cloud |
-| Jobscan | ✅ эвристика | ❌ низкая | ❌ нет | ❌ cloud |
-| TealHQ | ❌ нет | ⚠ средняя | ❌ нет | ❌ cloud |
-| ChatGPT/Cursor | ❌ нет | ✅ generic | ❌ нет | ⚠ self-host |
 
 ## Reasoning-модели (glm и другие)
 

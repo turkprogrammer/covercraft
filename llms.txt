@@ -40,7 +40,6 @@ internal/server/            HTTP на 127.0.0.1:случайный порт,
                             appliedDropSections, usedUserPromptBytes,
                             usedProfileBytes)
 internal/window/            CGO: GTK3-окно + WebKit2GTK 4.1 (~70 строк)
-assets/icons/hicolor/       иконки: SVG-исходник + PNG 48–512
 ```
 
 Ключевые решения:
@@ -73,15 +72,8 @@ assets/icons/hicolor/       иконки: SVG-исходник + PNG 48–512
 | POST  | `/api/generate` | `{vacancy, systemPrompt, dropSections, letter}` → SSE: `delta`…, `done {letter, elapsedMs, warnings, fit, usedSystemPrompt, appliedDropSections, usedUserPromptBytes, usedProfileBytes}` |
 | POST  | `/api/prompt/compose` | `{vacancy}` → `{dropSections, reason, sections, droppedBytes, elapsedMs}` — отбор разделов, системный промпт не возвращается |
 
-## Сборка и тесты
-
-```bash
-sudo apt install build-essential pkg-config libwebkit2gtk-4.1-dev
-go build -o covercraft .
-go test ./...
-```
-
 ## Стек
 
 Go 1.26 (только stdlib), GTK3, WebKit2GTK 4.1 (CGO), go:embed.
-188 unit-тест. ~6500 строк Go. MIT.
+349 unit-тестов. ~6500 строк Go. MIT.
+Сборка и запуск — см. README, разделы «Сборка» и «Тесты».
