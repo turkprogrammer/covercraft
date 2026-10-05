@@ -283,7 +283,7 @@ func DefaultConcepts() []Concept {
 		},
 		{
 			Name:    "архитектурное управление",
-			Trigger: regexp.MustCompile(`(?i)архитектурн|архитектор|техническое ревью|code review|прототип`),
+			Trigger: regexp.MustCompile(`(?i)архитектурн|архитектор|техническое ревью|code review|прототип|рефакторинг|рефакторинга|чист\S* архитектур|чистая архитекту|clean architecture`),
 			Signals: []Signal{
 				{Label: "ADR", Re: regexp.MustCompile(`(?i)\badr\b|архитектурн`)},
 				{Label: "архитектурные стили/ревью", Re: regexp.MustCompile(`(?i)hexagonal|ddd|ревью|review`)},
