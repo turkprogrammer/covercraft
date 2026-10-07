@@ -124,6 +124,58 @@ func TestNoVacancySkipsObligationWarnings(t *testing.T) {
 	}
 }
 
+func TestGoPrimaryAllFiveServicesMandatory(t *testing.T) {
+	// GO-PRIMARY вакансия: пять Go-сервисов обязаны попасть в письмо.
+	// Письмо называет Fraud Engine, но молчит про остальные — аудит обязан
+	// назвать каждый теряемый сервис (закрывает рандомизацию сэмплов).
+	vacancy := "Ищем Go-разработчика (Senior). Высоконагруженные сервисы, latency < 100ms."
+	letter := `Здравствуйте! Меня заинтересовала ваша вакансия Go-разработчика.
+
+Чем могу быть полезен:
+• Fraud Engine (Random Forest на Go, 92% F1, P95 < 4.2ms).
+
+Адаптация под ваш стек: пробелов нет — всё закрыто фактами.
+
+Стек: Go, ML, PostgreSQL, Redis, Kafka, Docker.
+
++7 (000) 000-00-00 | Telegram: @example
+Буду рад обсудить ваши задачи. Спасибо за внимание!`
+	got := strings.Join(Check(letter, vacancy).Warnings, "\n")
+	for _, service := range []string{"Stable ID", "Bundle ID", "Domain ID", "Geo-mapping"} {
+		if !strings.Contains(got, "GO-PRIMARY обязан быть в письме") || !strings.Contains(got, service) {
+			t.Errorf("GO-PRIMARY: потеря сервиса %q не помечена:\n%s", service, got)
+		}
+	}
+	// Fraud Engine есть в письме — обязательство по нему закрыто, warning нет.
+	if strings.Contains(got, "Fraud Engine") && strings.Contains(got, "Потерян факт") {
+		t.Errorf("Fraud Engine есть в письме, а обязательство сработало:\n%s", got)
+	}
+}
+
+func TestGoPrimaryMandatoryNotAppliedToPhpHightload(t *testing.T) {
+	// PHP-primary highload-вакансия: чужие Go-сервисы не навязываются,
+	// даже если в вакансии есть сигналы highload (см. TestCleanLetterPasses).
+	vacancy := "Ищем PHP-разработчика (Senior). Высоконагруженные модули, A/B тесты."
+	letter := `Здравствуйте! Меня заинтересовала ваша вакансия PHP-разработчика.
+
+Чем могу быть полезен:
+• Fraud Engine (Random Forest на Go, 92% F1, P95 < 4.2ms), Stable ID (10 000 RPS).
+
+Адаптация под ваш стек: пробелов нет — всё закрыто фактами.
+
+Стек: Go, PHP, ML, PostgreSQL, Kafka, Docker.
+
++7 (000) 000-00-00 | Telegram: @example
+Буду рад обсудить ваши задачи. Спасибо за внимание!`
+	got := strings.Join(Check(letter, vacancy).Warnings, "\n")
+	for _, service := range []string{"Stable ID", "Bundle ID", "Domain ID", "Geo-mapping"} {
+		// Bundle/Domain/Geo — Go-сервисы, для PHP-письма навязывать нельзя.
+		if service != "Stable ID" && strings.Contains(got, service) && strings.Contains(got, "GO-PRIMARY обязан") {
+			t.Errorf("PHP-primary: сервис %q не должен требовать GO-PRIMARY:\n%s", service, got)
+		}
+	}
+}
+
 func TestStackLineVariants(t *testing.T) {
 	// Жирный маркер «**Стек:**» тоже должен ловиться.
 	letter := "Что-то выше.\n**Стек:** Go, PHP, ML, Laravel."
@@ -325,7 +377,7 @@ func TestFraudDetectionEngineCountsAsOwner(t *testing.T) {
 // запрет самоуничижительного начала строки пробела.
 func TestV4VerbatimObligations(t *testing.T) {
 	vac := "Ищем Go-разработчика. Требуется Kafka, PostgreSQL, Kubernetes."
-	clean := "Go: Fraud Engine (multi-tenancy), Stable ID (Kafka, 10 000 RPS).\n" +
+	clean := "Go: Fraud Engine (multi-tenancy), Stable ID (Kafka, 10 000 RPS), Bundle ID (760–850 эл/с), Domain ID (329 847), Geo-mapping (гео-кластеризация).\n" +
 		"Адаптация под ваш стек: Kubernetes не эксплуатировал — опыт Docker Compose переносится.\n" +
 		"Стек: Go, PHP, ML, Kafka, PostgreSQL, Docker, Linux\n" +
 		"+7 (000) 000-00-00 | Telegram: @handle | https://example.org/ | github.com/example\n" +
@@ -477,30 +529,30 @@ func TestHonestGapWithDottedTokenNotFabrication(t *testing.T) {
 }
 
 // TestWordLimitFollowsPrompt — аудит обязан считать лимит по тому же
-// правилу, что и промпт (v4 §2.3): до 200 слов, но при 6+ обязательных
-// требованиях допустимо до 250. Живой баг (октябрь 2026): жёсткие 200
+// правилу, что и промпт (v4 §2.3): до 250 слов, но при 6+ обязательных
+// требованиях допустимо до 350. Живой баг (октябрь 2026): жёсткие 200
 // ругали на письмо на 238/246 слов, которое промпт разрешает, автоправка
 // его не могла исправить, и цикл «1 замечание» повторялся бесконечно.
 func TestWordLimitFollowsPrompt(t *testing.T) {
-	// Письмо на 246 слов тела: между 200 и 250, то есть легально при 6+
+	// Письмо на 320 слов тела: между 250 и 350, то есть легально при 6+
 	// требованиях и нелегально при 5 и меньше.
-	letter := makeLetterOfWords(246)
-	if n := bodyWordCount(letter); n != 246 {
-		t.Fatalf("тестовая фикстура должна быть на 246 слов, получили %d", n)
+	letter := makeLetterOfWords(320)
+	if n := bodyWordCount(letter); n != 320 {
+		t.Fatalf("тестовая фикстура должна быть на 320 слов, получили %d", n)
 	}
 	if ws := CheckWithMust(letter, "", 5).Warnings; !hasVolumeWarning(ws) {
-		t.Error("при 5 требованиях письмо на 246 слов должно давать замечание по объёму")
+		t.Error("при 5 требованиях письмо на 320 слов должно давать замечание по объёму")
 	}
 	if ws := CheckWithMust(letter, "", 6).Warnings; hasVolumeWarning(ws) {
-		t.Errorf("при 6 требованиях 246 слов разрешены промптом, замечание недопустимо: %v", ws)
+		t.Errorf("при 6 требованиях 320 слов разрешены промптом, замечание недопустимо: %v", ws)
 	}
 	if ws := CheckWithMust(letter, "", 7).Warnings; hasVolumeWarning(ws) {
-		t.Errorf("при 7 требованиях 246 слов разрешены промптом, замечание недопустимо: %v", ws)
+		t.Errorf("при 7 требованиях 320 слов разрешены промптом, замечание недопустимо: %v", ws)
 	}
 	// Проверка без числа требований (разбор вакансии не удался) — самое
 	// строгое поведение, а не молчаливый пропуск проверки.
 	if ws := CheckWithMust(letter, "", 0).Warnings; !hasVolumeWarning(ws) {
-		t.Error("без числа требований действует базовый лимит 200")
+		t.Error("без числа требований действует базовый лимит 250")
 	}
 	// Обратная совместимость: Check — это то же, что nMust = 0.
 	before, after := Check(letter, "").Warnings, CheckWithMust(letter, "", 0).Warnings
@@ -509,11 +561,27 @@ func TestWordLimitFollowsPrompt(t *testing.T) {
 	}
 }
 
+// TestGoPrimaryVolumeAllows400 — GO-PRIMARY вакансия: пять Go-сервисов с
+// метриками — обязательная дословная строка, письмо физически длиннее 300.
+// Лимит для go-primary — 400, и письмо на 380 слов не должно ругаться.
+func TestGoPrimaryVolumeAllows400(t *testing.T) {
+	vac := "Ищем Go-разработчика (Senior). Высоконагруженные сервисы."
+	if ws := CheckWithMust(makeLetterOfWords(380), vac, 7).Warnings; hasVolumeWarning(ws) {
+		t.Errorf("go-primary: 380 слов должны проходить при лимите 400: %v", ws)
+	}
+	if ws := CheckWithMust(makeLetterOfWords(420), vac, 7).Warnings; !hasVolumeWarning(ws) {
+		t.Error("go-primary: 420 слов обязано давать замечание при лимите 400")
+	}
+	if ws := CheckWithMust(makeLetterOfWords(380), "", 7).Warnings; !hasVolumeWarning(ws) {
+		t.Error("не-go-primary вакансия: 380 слов при 7 требованиях обязано ругаться при лимите 350")
+	}
+}
+
 // TestVolumeWarningNamesWideLimit — при расширенном лимите сообщение
 // обязано называть его явно, иначе пользователь видит «при лимите 200»
 // рядом с вакансией, где шесть требований, и не понимает расхождения.
 func TestVolumeWarningNamesWideLimit(t *testing.T) {
-	letter := makeLetterOfWords(320)
+	letter := makeLetterOfWords(380)
 	ws := CheckWithMust(letter, "", 7).Warnings
 	var vol string
 	for _, w := range ws {
@@ -522,19 +590,19 @@ func TestVolumeWarningNamesWideLimit(t *testing.T) {
 		}
 	}
 	if vol == "" {
-		t.Fatalf("ожидалось замечание по объёму при 320 словах и лимите 300: %v", ws)
+		t.Fatalf("ожидалось замечание по объёму при 380 словах и лимите 350: %v", ws)
 	}
-	if !strings.Contains(vol, "лимите 300") {
+	if !strings.Contains(vol, "лимите 350") {
 		t.Errorf("в сообщении должен быть назван расширенный лимит: %q", vol)
 	}
 	if !strings.Contains(vol, "7 обязательных требований") {
 		t.Errorf("в сообщении должно быть указано число требований: %q", vol)
 	}
-	// Базовый лимит не упоминает 300.
+	// Базовый лимит не упоминает 350.
 	ws = CheckWithMust(letter, "", 2).Warnings
 	for _, w := range ws {
-		if hasVolumeWarning([]string{w}) && strings.Contains(w, "300") {
-			t.Errorf("при базовом лимите 300 упоминаться не должно: %q", w)
+		if hasVolumeWarning([]string{w}) && strings.Contains(w, "350") {
+			t.Errorf("при базовом лимите 350 упоминаться не должно: %q", w)
 		}
 	}
 }
@@ -542,16 +610,21 @@ func TestVolumeWarningNamesWideLimit(t *testing.T) {
 // TestWordLimitFor — само правило выбора лимита, отдельно от писем.
 func TestWordLimitFor(t *testing.T) {
 	cases := []struct {
-		nMust int
-		want  int
+		nMust   int
+		vacancy string
+		want    int
 	}{
-		{0, 200}, {1, 200}, {5, 200}, // ниже порога — узкий лимит
-		{6, 300}, {7, 300}, {12, 300},
-		{-1, 200}, // отрицательное — как при неудачном разборе
+		{0, "", 250}, {1, "", 250}, {5, "", 250}, // ниже порога — узкий лимит
+		{6, "", 350}, {7, "", 350}, {12, "", 350},
+		{-1, "", 250}, // отрицательное — как при неудачном разборе
+		// GO-PRIMARY повышает потолок независимо от числа требований.
+		{0, "Go developer", 400}, {3, "golang backend", 400}, {7, "Go-разработчик", 400},
+		// PHP-primary не получает go-primary потолок.
+		{7, "PHP-разработчик (Senior)", 350},
 	}
 	for _, c := range cases {
-		if got := wordLimitFor(c.nMust); got != c.want {
-			t.Errorf("wordLimitFor(%d) = %d, ожидали %d", c.nMust, got, c.want)
+		if got := wordLimitFor(c.nMust, c.vacancy); got != c.want {
+			t.Errorf("wordLimitFor(%d, %q) = %d, ожидали %d", c.nMust, c.vacancy, got, c.want)
 		}
 	}
 }
@@ -618,24 +691,24 @@ func TestContactLineNotMatchedInsideBullet(t *testing.T) {
 	}
 }
 
-// TestWideLimitFitsDenseFactLetter — широкий лимит 300 (решение владельца) на
+// TestWideLimitFitsDenseFactLetter — широкий лимит 350 (решение владельца) на
 // живых данных: письмо с плотным перечнем фактов по 5 направлениям. При
-// 250 слов такие письма ругались, и автоправка не могла исправить их, не
-// выкинув требования. Граница проверяется с обеих сторон: 295 проходит,
-// 305 — уже нет.
+// 300 слов такие письма ругались, и автоправка не могла исправить их, не
+// выкинув требования. Граница проверяется с обеих сторон: 345 проходит,
+// 355 — уже нет.
 func TestWideLimitFitsDenseFactLetter(t *testing.T) {
-	if ws := CheckWithMust(makeLetterOfWords(295), "", 7).Warnings; hasVolumeWarning(ws) {
-		t.Errorf("295 слов при 7 требованиях должны проходить при лимите 300: %v", ws)
+	if ws := CheckWithMust(makeLetterOfWords(345), "", 7).Warnings; hasVolumeWarning(ws) {
+		t.Errorf("345 слов при 7 требованиях должны проходить при лимите 350: %v", ws)
 	}
-	if ws := CheckWithMust(makeLetterOfWords(300), "", 7).Warnings; hasVolumeWarning(ws) {
-		t.Errorf("ровно 300 слов должны проходить при лимите 300: %v", ws)
+	if ws := CheckWithMust(makeLetterOfWords(350), "", 7).Warnings; hasVolumeWarning(ws) {
+		t.Errorf("ровно 350 слов должны проходить при лимите 350: %v", ws)
 	}
-	if ws := CheckWithMust(makeLetterOfWords(305), "", 7).Warnings; !hasVolumeWarning(ws) {
-		t.Error("305 слов при 7 требованиях обязано давать замечание по объёму")
+	if ws := CheckWithMust(makeLetterOfWords(355), "", 7).Warnings; !hasVolumeWarning(ws) {
+		t.Error("355 слов при 7 требованиях обязано давать замечание по объёму")
 	}
 	// Узкий лимит не сдвинулся вместе с широким.
-	if ws := CheckWithMust(makeLetterOfWords(295), "", 5).Warnings; !hasVolumeWarning(ws) {
-		t.Error("при 5 требованиях действует базовый лимит 200, 295 слов — превышение")
+	if ws := CheckWithMust(makeLetterOfWords(345), "", 5).Warnings; !hasVolumeWarning(ws) {
+		t.Error("при 5 требованиях действует базовый лимит 250, 345 слов — превышение")
 	}
 }
 
@@ -667,18 +740,18 @@ func TestPluralWordsInVolumeMessage(t *testing.T) {
 	if got := pluralNum(1, "обязательное требование", "обязательных требования", "обязательных требований"); got != "обязательное требование" {
 		t.Errorf("pluralNum(1) = %q", got)
 	}
-	// Склейка в сообщении: без дублей и без «303 слов».
-	letter := makeLetterOfWords(305)
+	// Склейка в сообщении: без дублей и без «355 слов».
+	letter := makeLetterOfWords(355)
 	for _, w := range CheckWithMust(letter, "", 7).Warnings {
 		if !hasVolumeWarning([]string{w}) {
 			continue
 		}
-		// 305 → «305 слов» (последняя цифра 5 → plural), НЕ «305 слова».
-		if strings.Contains(w, "305 слова") {
+		// 355 → «355 слов» (последняя цифра 5 → plural), НЕ «355 слова».
+		if strings.Contains(w, "355 слова") {
 			t.Errorf("неверная форма числительного: %q", w)
 		}
-		if !strings.Contains(w, "305 слов при лимите 300 (7 обязательных требований)") {
-			t.Errorf("сообщение должно называть 305 слов и 7 требований: %q", w)
+		if !strings.Contains(w, "355 слов при лимите 350 (7 обязательных требований)") {
+			t.Errorf("сообщение должно называть 355 слов и 7 требований: %q", w)
 		}
 		if strings.Contains(w, "требований обязательных") {
 			t.Errorf("дубль слова «требований»: %q", w)

@@ -50,6 +50,16 @@ type Result struct {
 // фильтр дублируется в Parse.
 var protectedHeadings = []string{"ФАКТЫ-ОГРАНИЧИТЕЛИ", "КОНТАКТЫ"}
 
+// goPrimaryProtected — подстроки заголовков, которые для роли go-primary
+// вырезать нельзя: в них живут обязательные для GO-PRIMARY письма факты —
+// пять ML-сервисов, карта метрик и Go-проекты. Аудит требует их в письме
+// (см. obligations в internal/audit), но композер без этой защиты считает
+// ML/Go-разделы «нерелевантными стеку» IPTV-вакансии без ML-требований и
+// вырезает их — модель физически не может написать факт, которого нет в
+// промпте. Защита роль-зависимая: для php-primary эти же разделы можно резать
+// (чужой стек — шум, письмо их не требует).
+var goPrimaryProtected = []string{"5 ML-ПРОДАКШН-СЕРВИСОВ", "КАРТА МЕТРИК", "1. GO", "2. GO", "GO-ПРОЕКТЫ"}
+
 // roleHints — зачем композеру роль: подсказка, какие области профиля способны
 // подтвердить требования вакансии. Роль приходит из fit.ExtractRequirements
 // (закрытый список go-primary|php-primary|ml-research|fullstack|other);
@@ -115,6 +125,9 @@ func dropInstruction(role string) string {
 	b.WriteString("Правила отбора:\n")
 	b.WriteString("- режь только то, что всерьёз нерелевантно стеку и роли вакансии: «для краткости письма» — не основание;\n")
 	fmt.Fprintf(&b, "- НИКОГДА не вырезай разделы, содержащие %s: на них опирается письмо;\n", quoteList(protectedHeadings))
+	if role == "go-primary" || role == "fullstack" {
+		fmt.Fprintf(&b, "- для %s НИКОГДА не вырезай разделы, содержащие %s: там обязательные факты письма (ML-сервисы, метрики, Go-проекты);\n", role, quoteList(goPrimaryProtected))
+	}
 	b.WriteString("- не вырезай раздел, способный подтвердить must-have или сильные стороны по роли;\n")
 	b.WriteString("- сомневаешься — не режь: лишний раздел стоит токенов, вырезанный факт стоит качества письма.\n")
 	if h, ok := roleHints[role]; ok {
@@ -145,7 +158,7 @@ func quoteList(items []string) string {
 // (хард-защита антигаллюцинации и контактов) и дроп, у которого заголовок есть,
 // а файл — чужой: cover вырезает по паре (file, heading), поэтому «принятый»
 // дроп без своего файла был бы ложью в UI.
-func Parse(raw string, sections []Section) (Result, error) {
+func Parse(raw string, sections []Section, role string) (Result, error) {
 	start := strings.Index(raw, "{")
 	end := strings.LastIndex(raw, "}")
 	if start < 0 || end <= start {
@@ -162,7 +175,7 @@ func Parse(raw string, sections []Section) (Result, error) {
 
 	res := Result{Reason: strings.TrimSpace(payload.Reason)}
 	for _, d := range payload.DropSections {
-		if dropAllowed(d, sections) {
+		if dropAllowed(d, sections, role) {
 			res.Drop = append(res.Drop, d)
 		}
 	}
@@ -170,12 +183,13 @@ func Parse(raw string, sections []Section) (Result, error) {
 }
 
 // dropAllowed — дроп валиден, если пара (файл, заголовок) реально существует
-// в предъявленном списке и заголовок не защищён. Файл сверяется наравне с
-// заголовком: cover ищет дропы по имени файла (cover.dropsFor), поэтому
-// заголовок с чужим файлом не вырежет ничего. Регистр имени файла не важен
-// (EqualFold): модель вправе вернуть другое его написание.
-func dropAllowed(d Drop, sections []Section) bool {
-	if IsProtected(d.Heading) {
+// в предъявленном списке и заголовок не защищён (глобально ИЛИ роль-зависимо).
+// Файл сверяется наравне с заголовком: cover ищет дропы по имени файла
+// (cover.dropsFor), поэтому заголовок с чужим файлом не вырежет ничего.
+// Регистр имени файла не важен (EqualFold): модель вправе вернуть другое его
+// написание.
+func dropAllowed(d Drop, sections []Section, role string) bool {
+	if IsProtected(d.Heading) || roleProtected(role, d.Heading) {
 		return false
 	}
 	for _, s := range sections {
@@ -183,6 +197,22 @@ func dropAllowed(d Drop, sections []Section) bool {
 			continue
 		}
 		if strings.EqualFold(strings.TrimSpace(s.File), strings.TrimSpace(d.File)) {
+			return true
+		}
+	}
+	return false
+}
+
+// roleProtected — для go-primary запрещено вырезать разделы, содержащие
+// goPrimaryProtected-подстроки; остальные роли (и неизвестная) дополнительной
+// защиты не получают — у них нет обязательных фактов вне protectedHeadings.
+func roleProtected(role, heading string) bool {
+	if role != "go-primary" && role != "fullstack" {
+		return false
+	}
+	up := strings.ToUpper(normalize(heading))
+	for _, p := range goPrimaryProtected {
+		if strings.Contains(up, strings.ToUpper(p)) {
 			return true
 		}
 	}

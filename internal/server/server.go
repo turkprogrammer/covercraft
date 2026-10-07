@@ -728,7 +728,7 @@ func (h *Handler) composePrompt(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "композер не ответил: " + err.Error()})
 		return
 	}
-	res, err := prompt.Parse(raw, sections)
+	res, err := prompt.Parse(raw, sections, role)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
@@ -809,6 +809,7 @@ func clientFromSettings() (llm.Client, error) {
 		Model:           s.Model,
 		ReasoningEffort: s.ReasoningEffort,
 		Timeout:         time.Duration(s.TimeoutSec) * time.Second,
+		Temperature:     s.Temperature,
 	}, nil
 }
 

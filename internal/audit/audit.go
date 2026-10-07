@@ -192,9 +192,35 @@ var obligations = []obligation{
 		fact: "Highload-требование: Fraud Engine (92% F1, P95 < 4.2ms) — доказательная база",
 	},
 	{
-		need: mustRE(`(?i)highload|высоконагруж|нагрузк|latency|производительност|p95|p99|rps`),
+		need: mustRE(`(?i)highload|высоконагруж|go-primary|нагрузк|latency|производительност|p95|p99|rps`),
 		has:  mustRE(`(?i)(92\s?%|4\.2\s?ms|10\s?000|10 000)`),
 		fact: "Highload-требование: метрики профиля (92% F1 / P95 < 4.2ms / 10 000 RPS) отсутствуют",
+	},
+	{
+		// GO-PRIMARY/highload: пять Go-сервисов обязаны попасть в письмо.
+		// Каждое имя — отдельная проверка, чтобы аудит называл теряемый факт
+		// точно. Обязательство закрывает рандомизацию: автоправка возвращает
+		// сервис, который модель случайно срезала в текущем сэмпле. Триггер —
+		// роль go-primary в тексте вакансии (а не любой highload): PHP-письму
+		// чужие Go-сервисы не навязываются (см. TestCleanLetterPasses).
+		need: mustRE(`(?i)(\bgo\b|\bgolang\b|go[- ]?primary|go[- ]?(разраб|backend|middle|senior|junior|инжен))`),
+		has:  mustRE(`(?i)Stable ID`),
+		fact: "Stable ID (трафик-сплит 50/50, 10 000 RPS) — GO-PRIMARY обязан быть в письме",
+	},
+	{
+		need: mustRE(`(?i)(\bgo\b|\bgolang\b|go[- ]?primary|go[- ]?(разраб|backend|middle|senior|junior|инжен))`),
+		has:  mustRE(`(?i)Bundle ID`),
+		fact: "Bundle ID (760–850 эл/с) — GO-PRIMARY обязан быть в письме",
+	},
+	{
+		need: mustRE(`(?i)(\bgo\b|\bgolang\b|go[- ]?primary|go[- ]?(разраб|backend|middle|senior|junior|инжен))`),
+		has:  mustRE(`(?i)Domain ID`),
+		fact: "Domain ID (329 847, 416K+ доменов) — GO-PRIMARY обязан быть в письме",
+	},
+	{
+		need: mustRE(`(?i)(\bgo\b|\bgolang\b|go[- ]?primary|go[- ]?(разраб|backend|middle|senior|junior|инжен))`),
+		has:  mustRE(`(?i)Geo-mapping`),
+		fact: "Geo-mapping (гео-кластеризация трафика) — GO-PRIMARY обязан быть в письме",
 	},
 	{
 		// PHPUnit + TDD обязателен ТОЛЬКО для PHP-primary. Слово «тест» в
@@ -324,25 +350,25 @@ func CheckWithMust(letter, vacancy string, nMust int) Result {
 	if !strings.Contains(low, "адаптация под ваш стек") {
 		r.Warnings = append(r.Warnings, "нет обязательной секции «Адаптация под ваш стек» — v4 §2.4")
 	}
-	// Объём письма. Лимит берётся из промпта (v4 §2.3), где сказано: «до 200
+	// Объём письма. Лимит берётся из промпта (v4 §2.3), где сказано: «до 250
 	// слов; если не влезает, сокращай второстепенные факты, а не требования.
-	// При 6 и более must-have допустимо до 300 слов». Аудит обязан проверять
-	// то же правило, а не своё зашитое число: жёсткие 200 против 238 слов
-	// при 7 требованиях ругали на полностью легальное письмо, автоправка его
-	// не могла исправить (модель читала в промпте «250 допустимо»), и цикл
-	// повторялся бесконечно (живой кейс, октябрь 2026).
-	if n := bodyWordCount(letter); n > wordLimitFor(nMust) {
+	// При 6 и более must-have допустимо до 350 слов; GO-PRIMARY — до 400».
+	// Аудит обязан проверять то же правило, а не своё зашитое число: жёсткие
+	// 200 против 238 слов при 7 требованиях ругали на полностью легальное
+	// письмо, автоправка его не могла исправить (модель читала в промпте
+	// «250 допустимо»), и цикл повторялся бесконечно (живой кейс, октябрь 2026).
+	if n := bodyWordCount(letter); n > wordLimitFor(nMust, vacancy) {
 		if nMust >= mustCountForWideLimit {
 			// pluralNum возвращает ФОРМУ со словом, число подставляет Sprintf.
 			r.Warnings = append(r.Warnings, fmt.Sprintf(
 				"письмо на %d %s при лимите %d (%d %s) — "+
 					"сократи второстепенные факты, а не требования (v4 §2.3)",
-				n, pluralWords(n), wordLimitFor(nMust), nMust,
+				n, pluralWords(n), wordLimitFor(nMust, vacancy), nMust,
 				pluralNum(nMust, "обязательное требование", "обязательных требования", "обязательных требований")))
 		} else {
 			r.Warnings = append(r.Warnings, fmt.Sprintf(
 				"письмо на %d %s при лимите %d — сократи второстепенные факты, а не требования (v4 §2.3)",
-				n, pluralWords(n), wordLimitFor(nMust)))
+				n, pluralWords(n), wordLimitFor(nMust, vacancy)))
 		}
 	}
 	// Оправдательный аргумент вместо факта: «стажа достаточно, экспертиза
@@ -810,26 +836,39 @@ func CheckInfraClaims(letter, profile string) Result {
 	return r
 }
 
-// letterWordLimit — базовый лимит объёма из промпта (v4 §2.3): «до 200 слов».
-const letterWordLimit = 200
+// letterWordLimit — базовый лимит объёма из промпта (v4 §2.3): «до 250 слов».
+const letterWordLimit = 250
 
 // letterWordLimitWide — расширенный лимит для вакансий с 6+ обязательными
 // требованиями. Взят из того же промпта: «При 6 и более must-have допустимо
-// до 300 слов: сокращать требования — хуже, чем выйти за лимит».
-//
-// 250 было недостаточно на живых данных (октябрь 2026): письмо на 303 слова
-// при 7 требованиях — плотный перечень фактов по 5 направлениям, каждый буллет
-// с цифрами, — 250 физически не вмещало, и автоправка не могла это исправить
-// без выкидывания требований. Решение владельца продукта: 300.
-const letterWordLimitWide = 300
+// до 350 слов: сокращать требования — хуже, чем выйти за лимит».
+// 300 было достаточно на живых данных (октябрь 2026); переход на 350 —
+// следствие обязательства всех пяти Go-сервисов: письмо GO-PRIMARY с ними
+// физически длиннее 300 слов, и жёсткий 300 ругал бы легальное письмо.
+const letterWordLimitWide = 350
+
+// letterWordLimitGoPrimary — потолок объёма для GO-PRIMARY вакансий. Пять
+// Go-сервисов с метриками — обязательная дословная строка (§ обязательства
+// в этом же пакете), она одна тянет письмо к 400 словам. Лимит отдельный:
+// PHP-primary письма такой длины не требуют и не должны её получать.
+const letterWordLimitGoPrimary = 400
 
 // mustCountForWideLimit — порог числа требований, выше которого лимит шире.
 const mustCountForWideLimit = 6
 
-// wordLimitFor — лимит объёма для числа обязательных требований. Дублирует
-// правило промпта, поэтому живёт рядом с ним и покрыта тестом: расхождение
-// аудита с промптом — это ровно тот баг, который чинится.
-func wordLimitFor(nMust int) int {
+// goPrimaryRe — маркеры go-primary роли в тексте вакансии (язык Go назван
+// ролью/toolchain'ом). Разделяется с need-регэкспами obligations (см. выше),
+// чтобы аудит говорил с промптом на одном языке: GO-PRIMARY письмо длиннее,
+// и лимит объёма обязан это учитывать.
+var goPrimaryRe = regexp.MustCompile(`(?i)(\bgo\b|\bgolang\b|go[- ]?primary|go[- ]?(разраб|backend|middle|senior|junior|инжен))`)
+
+// wordLimitFor — лимит объёма для числа обязательных требований и роли
+// вакансии. Дублирует правило промпта, поэтому живёт рядом с ним и покрыта
+// тестом: расхождение аудита с промптом — это ровно тот баг, который чинится.
+func wordLimitFor(nMust int, vacancy string) int {
+	if goPrimaryRe.MatchString(vacancy) {
+		return letterWordLimitGoPrimary
+	}
 	if nMust >= mustCountForWideLimit {
 		return letterWordLimitWide
 	}

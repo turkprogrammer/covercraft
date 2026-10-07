@@ -18,12 +18,17 @@ import (
 // локальных провайдеров без авторизации (Ollama). ReasoningEffort пустой
 // («»), чтобы не ломать провайдеры без поддержки; «none» отключает
 // многоминутные размышления reasoning-моделей (glm-5.3 и др.).
+//
+// Temperature: дефолт 0.2. Без явного значения провайдер выбирает свой
+// сэмплируемый дефолт (0.7–1.0), и одно и то же промпт даёт разные
+// письма от запуска к запуску — модель «случайно» теряет Go-сервисы.
 type Client struct {
 	BaseURL         string // например http://127.0.0.1:11434/v1 — без хвостового /
 	APIKey          string
 	Model           string
 	ReasoningEffort string // "", "none", "low", "medium", "high"
 	Timeout         time.Duration
+	Temperature     float32 // 0.0–2.0; дефолт 0.2 для детерминизма генераций
 }
 
 // do отправляет chat-запрос на /chat/completions и возвращает ответ.
@@ -78,6 +83,7 @@ func (c Client) Generate(ctx context.Context, system, user string) (string, erro
 		Model:           c.Model,
 		Messages:        prompt(system, user),
 		ReasoningEffort: c.ReasoningEffort,
+		Temperature:     c.Temperature,
 	}
 	resp, err := c.do(ctx, req, "")
 	if err != nil {
@@ -113,6 +119,7 @@ func (c Client) GenerateStream(ctx context.Context, system, user string, onDelta
 		Messages:        prompt(system, user),
 		ReasoningEffort: c.ReasoningEffort,
 		Stream:          true,
+		Temperature:     c.Temperature,
 	}
 	resp, err := c.do(ctx, req, "text/event-stream")
 	if err != nil {
@@ -185,6 +192,7 @@ type chatRequest struct {
 	Messages        []message `json:"messages"`
 	ReasoningEffort string    `json:"reasoning_effort,omitempty"`
 	Stream          bool      `json:"stream,omitempty"`
+	Temperature     float32   `json:"temperature,omitempty"`
 }
 
 type message struct {

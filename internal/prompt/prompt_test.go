@@ -86,7 +86,7 @@ func TestParseStripsFenceAndPreamble(t *testing.T) {
 	raw := "Вот ответ:\n```json\n" +
 		`{"dropSections":[{"file":"03.md","heading":"## ML"}],"reason":"PHP — ML не релевантен"}` +
 		"\n```"
-	res, err := Parse(raw, testSections)
+	res, err := Parse(raw, testSections, "php-primary")
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestParseStripsFenceAndPreamble(t *testing.T) {
 // ошибка: иначе compose падал бы 502 на честном решении модели ничего не
 // вырезать.
 func TestParseEmptyDropListIsValid(t *testing.T) {
-	res, err := Parse(`{"dropSections":[],"reason":"все разделы релевантны"}`, testSections)
+	res, err := Parse(`{"dropSections":[],"reason":"все разделы релевантны"}`, testSections, "php-primary")
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestParseDropsUnknownHeading(t *testing.T) {
 	raw := `{"dropSections":[` +
 		`{"file":"03.md","heading":"## ML"},` +
 		`{"file":"xx.md","heading":"## Выдуманный раздел"}],"reason":"r"}`
-	res, err := Parse(raw, testSections)
+	res, err := Parse(raw, testSections, "php-primary")
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestParseNeverDropsProtectedSections(t *testing.T) {
 		`{"file":"02.md","heading":"## ФАКТЫ-ОГРАНИЧИТЕЛИ ИЗ ДОКОВ (не выдумывать сверх)"},` +
 		`{"file":"00-контакты.md","heading":"## КОНТАКТЫ"},` +
 		`{"file":"03.md","heading":"## ML"}],"reason":"r"}`
-	res, err := Parse(raw, testSections)
+	res, err := Parse(raw, testSections, "php-primary")
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -145,14 +145,14 @@ func TestParseNeverDropsProtectedSections(t *testing.T) {
 // такой дроп не вырежет ничего (cover фильтрует дропы по файлу), поэтому Parse
 // обязан его отбросить, а не отчитаться в UI об успехе, которого нет.
 func TestParseDropsMismatchedFile(t *testing.T) {
-	res, err := Parse(`{"dropSections":[{"file":"03.md","heading":"## ML"},{"file":"99.md","heading":"## ML"}]}`, testSections)
+	res, err := Parse(`{"dropSections":[{"file":"03.md","heading":"## ML"},{"file":"99.md","heading":"## ML"}]}`, testSections, "php-primary")
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
 	if len(res.Drop) != 1 || res.Drop[0].File != "03.md" {
 		t.Errorf("дроп с чужим файлом обязан отброситься, дропы: %+v", res.Drop)
 	}
-	res2, err := Parse(`{"dropSections":[{"file":"03.MD","heading":"## ML"}]}`, testSections)
+	res2, err := Parse(`{"dropSections":[{"file":"03.MD","heading":"## ML"}]}`, testSections, "php-primary")
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -163,8 +163,37 @@ func TestParseDropsMismatchedFile(t *testing.T) {
 
 func TestParseRejectsGarbage(t *testing.T) {
 	for _, raw := range []string{"без мусора и JSON", "{битый JSON}", "```json\n"} {
-		if _, err := Parse(raw, testSections); err == nil {
+		if _, err := Parse(raw, testSections, "php-primary"); err == nil {
 			t.Errorf("ответ %q → ожидал ошибку", raw)
 		}
+	}
+}
+
+// TestParseGoPrimaryNeverDropsMLSections — для go-primary раздел с флагманскими
+// ML-сервисами (обязательными фактами письма) вырезать нельзя: композер без
+// этого считал «## 5 ML-ПРОДАКШН-СЕРВИСОВ» нерелевантным IPTV-вакансии без
+// ML-требований, и модель физически не видела факты. Для php-primary тот же
+// раздел режется легально (чужой стек — шум).
+func TestParseGoPrimaryNeverDropsMLSections(t *testing.T) {
+	ml := Section{File: "03.md", Heading: "## 5 ML-ПРОДАКШН-СЕРВИСОВ (интеграция LLM/ML)"}
+	sections := append(append([]Section{}, testSections...), ml)
+	raw := `{"dropSections":[{"file":"03.md","heading":"## 5 ML-ПРОДАКШН-СЕРВИСОВ (интеграция LLM/ML)"}],"reason":"ML нерелевантен стеку IPTV"}`
+
+	// Для go-primary дроп обязан отброситься: раздел нужен для обязательных фактов.
+	res, err := Parse(raw, sections, "go-primary")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(res.Drop) != 0 {
+		t.Errorf("go-primary: ML-раздел вырезан (факты потеряны), дропы: %+v", res.Drop)
+	}
+
+	// Для php-primary тот же дроп легален — ML чужой стек, письмо его не требует.
+	res2, err := Parse(raw, sections, "php-primary")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(res2.Drop) != 1 {
+		t.Errorf("php-primary: ML-раздел обязан резаться, дропы: %+v", res2.Drop)
 	}
 }

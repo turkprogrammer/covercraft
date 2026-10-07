@@ -90,18 +90,18 @@ func TestLiveSREResumHiddenInGapBullet(t *testing.T) {
 // в тексте промпта, и модель его перевыполнила без последствий.
 func TestLiveSRETooLongLetter(t *testing.T) {
 	words := len(strings.Fields(sreLiveLetter2))
-	if words <= 200 {
+	if words <= letterWordLimit {
 		t.Skipf("живое письмо короче лимита (%d слов) — тест устарел", words)
 	}
 	r := Check(sreLiveLetter2, "SRE: observability, Kubernetes, PostgreSQL")
 	found := false
 	for _, w := range r.Warnings {
-		if strings.Contains(w, "200") || strings.Contains(w, "слов") {
+		if strings.Contains(w, "200") || strings.Contains(w, "250") || strings.Contains(w, "слов") {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("письмо на %d слов при лимите 200 должно давать warning; имеем: %v", words, r.Warnings)
+		t.Errorf("письмо на %d слов при лимите %d должно давать warning; имеем: %v", words, letterWordLimit, r.Warnings)
 	}
 }
 
