@@ -135,7 +135,7 @@ go build -o covercraft .
 Основной путь — готовый бинарник из [Releases](https://github.com/turkprogrammer/covercraft/releases):
 
 ```bash
-tar xzf covercraft_0.3.4_linux_amd64.tar.gz
+tar xzf covercraft_0.3.5_linux_amd64.tar.gz
 ./covercraft
 ```
 
@@ -305,7 +305,7 @@ reasoning effort), постпроверка писем (запрещённые �
 репозитория, и пример не устаревает при следующем релизе:
 
 ```bash
-V=0.3.4   # версия релиза
+V=0.3.5   # версия релиза
 mkdir -p dist
 go build -o covercraft .
 tar czf dist/covercraft_${V}_linux_amd64.tar.gz covercraft README.md LICENSE
