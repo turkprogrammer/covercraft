@@ -164,6 +164,16 @@ go install github.com/turkprogrammer/covercraft@latest
    `[ compose ]` уберёт нерелевантные вакансии разделы профиля, поле при этом
    не трогает: `[ вернуть прежний ]` откатывает отбор, `reset default`
    возвращает дефолт и чистит вырезанные разделы.
+   Селектор `presets` над полем переключает заготовки промптов под разные
+   цели (письмо, ответы рекрутеру, свои): `[ new preset ]` открывает окно
+   с именем и текстом — видно, что именно сохранится; `[ save preset ]`
+   обновляет активный текстом поля; `[ edit preset ]` правит имя и текст
+   активного пресета; `[ del preset ]` удаляет выбранный. Пресеты лежат в
+   `~/.config/covercraft/presets.json` и переживают перезапуск; выбор
+   копирует текст в поле, а правки в поле сессионные — в шаблон они уходят
+   только по save/edit. После генерации строка «в модель ушло» называет
+   источник системного промпта (пресет / ваш / дефолтный) и его первую
+   строку — какой промпт реально ушёл, видно сразу.
 4. Вставьте вакансию в `vacancy.in`, нажмите `[ gen ]` или Ctrl+Enter.
 5. Письмо появится в `letter.out` — счётчик покажет размер и время
    генерации (`N chars · X.Xs`); можно отредактировать и нажать `[ copy ]`.
@@ -244,6 +254,11 @@ context/                 user's context: *.md (gitignored, private)
 | POST  | `/api/settings`| сохранить настройки |
 | POST  | `/api/generate`| `{vacancy, systemPrompt, dropSections, letter}` → SSE: `delta`…, `done {letter, elapsedMs, warnings, fit, profileWarning, usedSystemPrompt, appliedDropSections, usedUserPromptBytes, usedProfileBytes}` |
 | POST  | `/api/prompt/compose` | `{vacancy}` → `{dropSections, reason, sections, droppedBytes, elapsedMs}` — отбор разделов, системный промпт не возвращается |
+| GET   | `/api/presets` | список пресетов и `activePresetId` |
+| POST  | `/api/presets` | `{name, systemPrompt}` → создать пресет (имя ≤80 символов; длина промпта не ограничена — как у поля `#systemPrompt`) |
+| PUT   | `/api/presets` | `{id, name?, systemPrompt?}` → обновить пресет (пустые поля = не менять) |
+| DELETE | `/api/presets` | `{id}` → удалить пресет; удаление активного снимает `activePresetId` |
+| POST  | `/api/presets/active` | `{id}` → активировать пресет; `{id: ""}` — снять привязку (кастомный промпт) |
 
 ### Поля события `done`
 
@@ -305,7 +320,7 @@ reasoning effort), постпроверка писем (запрещённые �
 репозитория, и пример не устаревает при следующем релизе:
 
 ```bash
-V=0.3.5   # версия релиза
+V=0.4.0   # версия релиза
 mkdir -p dist
 go build -o covercraft .
 tar czf dist/covercraft_${V}_linux_amd64.tar.gz covercraft README.md LICENSE

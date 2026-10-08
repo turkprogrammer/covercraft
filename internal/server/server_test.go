@@ -684,6 +684,103 @@ func TestGenerateDeterministicFitEngineDefault(t *testing.T) {
 	}
 }
 
+// TestGenerateQAModeSkipsLetterPipeline — режим "qa" (пресет «Ответы рекрутеру»):
+// разбор вакансии не выполняется, fit-вердикт не считается, письменный аудит
+// (CheckWithMust, CheckProfile) не гоняется, fitNote не выставляется. Ответ
+// рекрутеру должен приходить как молчание режима qa: только текст модели.
+// Контр-риск: с режимом cover_letter (дефолт) или без mode ничего не ломается.
+func TestGenerateQAModeSkipsLetterPipeline(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	ctxDir := t.TempDir()
+	// Профиль НЕ пуст: письменная сверка фактов применилась бы, если бы гейт
+	// не работал, — и выдала бы замечания (панель «⚠ проверка письма»).
+	os.WriteFile(filepath.Join(ctxDir, "01-profile.md"), []byte("Stable ID Service, Kafka, ClickHouse."), 0o600)
+
+	extractCalls := 0
+	var gotUser string
+	h := New(Config{
+		ContextDir: ctxDir,
+		LLM: func(ctx context.Context, system, user string) (string, error) {
+			gotUser = user
+			return "Stable ID — идентификация через event-driven ML.", nil
+		},
+		FitEngine: "llm", // форсируем гибрид: в qa он не должен вызываться
+		FitLLM: func(ctx context.Context, system, user string) (string, error) {
+			extractCalls++
+			return `{"role":"go-primary","mustHave":[{"text":"Go","kind":"must","category":"stack"}]}`, nil
+		},
+	})
+
+	body, _ := json.Marshal(map[string]any{"vacancy": "Самый сложный проект?", "mode": "qa"})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("код = %d, тело: %s", rec.Code, rec.Body.String())
+	}
+	ev := parseSSE(t, rec.Body.String())
+	if ev.Done == nil {
+		t.Fatalf("нет done-события: err=%q", ev.Err)
+	}
+	if extractCalls != 0 {
+		t.Errorf("в режиме qa разбор вакансии не должен вызываться (extractCalls=%d)", extractCalls)
+	}
+	if ev.Done.Fit != nil {
+		t.Errorf("в режиме qa fit-вердикт не должен приходить: %+v", ev.Done.Fit)
+	}
+	// Тишина режима: ни письменных замечаний, ни причины отсутствия вердикта.
+	if len(ev.Done.Warnings) != 0 {
+		t.Errorf("в режиме qa warnings не должны приходить: %v", ev.Done.Warnings)
+	}
+	if ev.Done.FitNote != "" {
+		t.Errorf("в режиме qa fitNote не должен приходить: %q", ev.Done.FitNote)
+	}
+	if !strings.Contains(ev.Done.Letter, "Stable ID") {
+		t.Errorf("letter qa-ответа не должен теряться: %q", ev.Done.Letter)
+	}
+	if !strings.Contains(gotUser, "Самый сложный проект?") {
+		t.Errorf("в user-промпт qa не попал вопрос рекрутера: %q", gotUser)
+	}
+}
+
+// TestGenerateModeCoverLetterStillWorks — контроль, что режим по умолчанию
+// (cover_letter или отсутствие mode) сохраняет полный пайплайн: разбор,
+// чек-лист, fit-вердикт. Нужен, чтобы гейт qa случайно не задел дефолт.
+func TestGenerateModeCoverLetterStillWorks(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	extracts := 0
+	h := New(Config{
+		ContextDir: t.TempDir(),
+		LLM: func(ctx context.Context, system, user string) (string, error) {
+			return "Письмо.", nil
+		},
+		FitLLM: func(ctx context.Context, system, user string) (string, error) {
+			extracts++
+			return `{"role":"go-primary","mustHave":[{"text":"Go","kind":"must","category":"stack"}]}`, nil
+		},
+	})
+
+	for _, modeField := range []map[string]any{
+		{"vacancy": "Нужен Go.", "mode": "cover_letter"},
+		{"vacancy": "Нужен Go."},
+	} {
+		body, _ := json.Marshal(modeField)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		h.ServeHTTP(rec, req)
+		ev := parseSSE(t, rec.Body.String())
+		if ev.Done == nil || ev.Done.Fit == nil {
+			t.Errorf("режим должен давать fit-вердикт; body=%s err=%q", modeField, ev.Err)
+		}
+	}
+	if extracts != 2 {
+		t.Errorf("разбор вакансии = %d вызовов, хочу 2 (по одному на каждый вызов)", extracts)
+	}
+}
+
 // TestGenerateEndpointFitFix — режим fitFix: сервер отдаёт письмо с
 // fit-caveats обратно модели и возвращает исправленный результат с повторной
 // проверкой. Проверяет, что fitFixable считается верно.
@@ -1484,5 +1581,220 @@ func TestDoneByteFieldsAlwaysSerialized(t *testing.T) {
 		if !strings.Contains(rec.Body.String(), field) {
 			t.Errorf("в SSE нет %s — поле обязано сериализоваться всегда", field)
 		}
+	}
+}
+
+// presetJSON — один пресет-запрос в тесте.
+func presetJSON(t *testing.T, h *Handler, method, path string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	var rdr *strings.Reader
+	if body == nil {
+		rdr = strings.NewReader("")
+	} else {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		rdr = strings.NewReader(string(raw))
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(method, path, rdr)
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestPresetsCRUD — жизненный цикл пресета: пусто → создать → список →
+// правка → активация → удаление активного (привязка снимается). Ответы
+// мутаций несут полный view — UI обновляет селектор одним сообщением.
+func TestPresetsCRUD(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	h := New(Config{ContextDir: t.TempDir()})
+
+	// Пустое хранилище.
+	rec := presetJSON(t, h, http.MethodGet, "/api/presets", nil)
+	if rec.Code != 200 {
+		t.Fatalf("GET: код %d, хочу 200", rec.Code)
+	}
+	var view struct {
+		Presets []struct {
+			ID           string    `json:"id"`
+			Name         string    `json:"name"`
+			SystemPrompt string    `json:"systemPrompt"`
+			Mode         string    `json:"mode"`
+			CreatedAt    time.Time `json:"createdAt"`
+			UpdatedAt    time.Time `json:"updatedAt"`
+		} `json:"presets"`
+		ActivePresetID string `json:"activePresetId"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &view); err != nil {
+		t.Fatalf("разбор GET: %v", err)
+	}
+	if len(view.Presets) != 0 || view.ActivePresetID != "" {
+		t.Fatalf("хочу пусто, получено %+v", view)
+	}
+
+	// Создание.
+	rec = presetJSON(t, h, http.MethodPost, "/api/presets", map[string]string{
+		"name":         "Ответ рекрутеру",
+		"systemPrompt": "Ты отвечаешь на вопросы рекрутера.",
+		"mode":         "qa",
+	})
+	if rec.Code != 200 {
+		t.Fatalf("POST: код %d, тело %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &view); err != nil {
+		t.Fatalf("разбор POST: %v", err)
+	}
+	if len(view.Presets) != 1 {
+		t.Fatalf("после создания пресетов %d, хочу 1", len(view.Presets))
+	}
+	id := view.Presets[0].ID
+	if len(id) != 32 {
+		t.Errorf("id = %q, хочу 32 hex-символа", id)
+	}
+	if view.Presets[0].CreatedAt.IsZero() || view.Presets[0].UpdatedAt.IsZero() {
+		t.Error("timestamps обязаны быть заполнены")
+	}
+	if view.Presets[0].Mode != "qa" {
+		t.Errorf("mode = %q, хочу qa (POST его передаёт)", view.Presets[0].Mode)
+	}
+
+	// Неизвестный режим — 400, а не тихий cover_letter.
+	rec = presetJSON(t, h, http.MethodPost, "/api/presets", map[string]string{
+		"name": "битый", "systemPrompt": "текст", "mode": "факс",
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("POST mode=факс: код %d, хочу 400", rec.Code)
+	}
+
+	// Правка текста, имя не трогаем (пустое поле = «не менять»).
+	rec = presetJSON(t, h, http.MethodPut, "/api/presets", map[string]string{
+		"id":           id,
+		"systemPrompt": "Новый текст.",
+	})
+	if rec.Code != 200 {
+		t.Fatalf("PUT: код %d, тело %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &view); err != nil {
+		t.Fatalf("разбор PUT: %v", err)
+	}
+	if view.Presets[0].Name != "Ответ рекрутеру" || view.Presets[0].SystemPrompt != "Новый текст." {
+		t.Errorf("после PUT: %+v", view.Presets[0])
+	}
+	if view.Presets[0].Mode != "qa" {
+		t.Errorf("после PUT без mode: %q, хочу qa (пустое поле = не менять)", view.Presets[0].Mode)
+	}
+
+	// Смена режима через PUT.
+	rec = presetJSON(t, h, http.MethodPut, "/api/presets", map[string]string{
+		"id": id, "mode": "cover_letter",
+	})
+	if rec.Code != 200 {
+		t.Fatalf("PUT mode: код %d, тело %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &view); err != nil {
+		t.Fatalf("разбор PUT mode: %v", err)
+	}
+	if view.Presets[0].Mode != "cover_letter" {
+		t.Errorf("после PUT mode=cover_letter: %q", view.Presets[0].Mode)
+	}
+
+	// Активация и чтение активного.
+	rec = presetJSON(t, h, http.MethodPost, "/api/presets/active", map[string]string{"id": id})
+	if rec.Code != 200 {
+		t.Fatalf("active: код %d", rec.Code)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &view); err != nil {
+		t.Fatalf("разбор active: %v", err)
+	}
+	if view.ActivePresetID != id {
+		t.Errorf("activePresetId = %q, хочу %q", view.ActivePresetID, id)
+	}
+
+	// Удаление активного снимает привязку.
+	rec = presetJSON(t, h, http.MethodDelete, "/api/presets", map[string]string{"id": id})
+	if rec.Code != 200 {
+		t.Fatalf("DELETE: код %d", rec.Code)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &view); err != nil {
+		t.Fatalf("разбор DELETE: %v", err)
+	}
+	if len(view.Presets) != 0 || view.ActivePresetID != "" {
+		t.Errorf("после удаления: %+v, хочу пусто", view)
+	}
+}
+
+// TestPresetsErrors — ошибки контракта: валидация 400, чужой id 404.
+func TestPresetsErrors(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	h := New(Config{ContextDir: t.TempDir()})
+
+	for _, tc := range []struct {
+		what string
+		body map[string]string
+		want int
+	}{
+		{"пустое имя", map[string]string{"name": " ", "systemPrompt": "x"}, http.StatusBadRequest},
+		{"пустой промпт", map[string]string{"name": "A", "systemPrompt": ""}, http.StatusBadRequest},
+	} {
+		rec := presetJSON(t, h, http.MethodPost, "/api/presets", tc.body)
+		if rec.Code != tc.want {
+			t.Errorf("%s: код %d, хочу %d", tc.what, rec.Code, tc.want)
+		}
+	}
+
+	// Правка и удаление несуществующего id — 404, а не тихое создание.
+	rec := presetJSON(t, h, http.MethodPut, "/api/presets", map[string]string{"id": "нет"})
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("PUT чужой id: код %d, хочу 404", rec.Code)
+	}
+	rec = presetJSON(t, h, http.MethodDelete, "/api/presets", map[string]string{"id": "нет"})
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("DELETE чужой id: код %d, хочу 404", rec.Code)
+	}
+	rec = presetJSON(t, h, http.MethodPost, "/api/presets/active", map[string]string{"id": "нет"})
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("active чужой id: код %d, хочу 404", rec.Code)
+	}
+	// Активный id пустой — снятие привязки, это валидный запрос.
+	rec = presetJSON(t, h, http.MethodPost, "/api/presets/active", map[string]string{"id": ""})
+	if rec.Code != 200 {
+		t.Errorf("active пустой id: код %d, хочу 200", rec.Code)
+	}
+}
+
+// TestPresetsAcceptHugePrompt — длина промпта не ограничена: поле
+// #systemPrompt не ограничено, и рабочий v4 (98 КБ) обязан сохраняться.
+// Живой баг: лимит 4000/8000 байт блокировал создание пресета с v4.
+func TestPresetsAcceptHugePrompt(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	h := New(Config{ContextDir: t.TempDir()})
+	huge := strings.Repeat("ы", 60000) // ~120 КБ
+	rec := presetJSON(t, h, http.MethodPost, "/api/presets", map[string]string{
+		"name":         "v4",
+		"systemPrompt": huge,
+	})
+	if rec.Code != 200 {
+		t.Fatalf("гигантский промпт: код %d, тело %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPresetsSurviveRestart — пресеты живут на диске: следующий хендлер
+// (как следующий запуск приложения) видит те же данные.
+func TestPresetsSurviveRestart(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	h1 := New(Config{ContextDir: t.TempDir()})
+	rec := presetJSON(t, h1, http.MethodPost, "/api/presets", map[string]string{
+		"name":         "Q&A",
+		"systemPrompt": "Отвечай кратко.",
+	})
+	if rec.Code != 200 {
+		t.Fatalf("POST: код %d", rec.Code)
+	}
+	h2 := New(Config{ContextDir: t.TempDir()})
+	rec = presetJSON(t, h2, http.MethodGet, "/api/presets", nil)
+	if !strings.Contains(rec.Body.String(), "Отвечай кратко") {
+		t.Errorf("второй хендлер не видит пресет: %s", rec.Body.String())
 	}
 }

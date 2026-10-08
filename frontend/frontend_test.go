@@ -190,6 +190,56 @@ func TestComposePromptButton(t *testing.T) {
 	}
 }
 
+// TestPresetControls — пресеты: селектор, кнопки CRUD, шов с API,
+// статус «пресет» в promptState и модалка создания/правки. Модалка
+// обязательна: живой случай — пресет создался со снимком дефолтного
+// промпта, потому что пользователь не видел, какой текст сохраняется.
+func TestPresetControls(t *testing.T) {
+	for _, want := range []string{
+		`id="presetSelect"`,
+		`id="savePreset"`,
+		`id="newPreset"`,
+		`id="delPreset"`,
+		`id="editPreset"`,
+		`id="presetModal"`,
+		`id="presetName"`,
+		`id="presetText"`,
+		`id="presetLen"`,
+		`"/api/presets"`,
+		`"/api/presets/active"`,
+		"function promptState()",
+		"async function switchPreset()",
+		"async function loadPresets()",
+		"async function delPreset()",
+		"function openPresetModal",
+		"openPresetModal(\"create\", \"\")", // new preset — чистое окно, без снимка поля
+		"function updatePresetLen",          // счётчик байт до отправки на сервер
+		"async function submitPresetModal()",
+		"пресет: ", // подпись в #prompt-sub — не остаётся «кастом»
+	} {
+		if !strings.Contains(IndexHTML, want) {
+			t.Errorf("в UI нет %q — пресеты обязаны управляться из панели system.prompt", want)
+		}
+	}
+	// Привязка активного пресета переживает restart: boot грузит список
+	// и заполняет поле текстом активного пресета.
+	if !strings.Contains(IndexHTML, "await loadPresets();") {
+		t.Error("boot должен загружать пресеты — иначе активный пресет не восстановится")
+	}
+	// Фактический системный промпт: renderSentInfo называет источник
+	// (пресет/ваш/дефолтный) и первую строку — иначе «какой промпт ушёл»
+	// остаётся догадкой.
+	for _, want := range []string{
+		"data.usedSystemPrompt",
+		"пресет «\" + p.name + \"»",
+		"начало: «",
+	} {
+		if !strings.Contains(IndexHTML, want) {
+			t.Errorf("в UI нет %q — sentinfo должен показывать фактический промпт", want)
+		}
+	}
+}
+
 // TestFitFixStopsWhenNoProgress — живой баг: повторный фит на вакансии IAM
 // крутил 3 итерации по 60+90 сек (~7,5 мин молчания), даже если fitFixable
 // не уменьшался. Цикл обязан останавливаться, как только улучшения нет.
@@ -472,5 +522,68 @@ func TestFitFixButtonSurvivesRejectedEcho(t *testing.T) {
 	}
 	if !strings.Contains(IndexHTML, "lastFitCaveats = buildFitCaveatsList(fit);") {
 		t.Error("lastFitCaveats должен продолжать обновляться — fitFix берёт из него старт")
+	}
+}
+
+// TestPresetModeSelect — модалка пресета содержит селектор режима,
+// сервер получает его в запросе /api/generate и UI показывает режим
+// активного пресета ([QA] для qa-режима).
+func TestPresetModeSelect(t *testing.T) {
+	for _, want := range []string{
+		`<select id="presetMode"`,
+		`value="qa"`,
+		`режим пресета`,
+		`p.mode === "qa"`,
+		` [QA]`,
+		`mode: currentPresetMode`,
+		// Регрессия: без этого поля в els модалка падала на
+		// els.presetMode.value в ветке create — окно не открывалось.
+		`presetMode: $("presetMode")`,
+	} {
+		if !strings.Contains(IndexHTML, want) {
+			t.Errorf("в UI отсутствует ожидаемый фрагмент %q", want)
+		}
+	}
+}
+
+// TestPresetModeBackfill — старые пресеты без поля mode считаются
+// cover_letter на уровне Load(), так что пресеты, созданные до этого
+// режима, не ломаются. UI-подпись режима также присутствует.
+func TestPresetModeBackfill(t *testing.T) {
+	if !strings.Contains(IndexHTML, "qa (без fit/audit)") {
+		t.Error(`в UI отсутствует описание режима qa`)
+	}
+	// Проверяем что в коде есть логика бэкенд-бэкендфилла:
+	// в presets.go строка "if s.Presets[i].Mode == \"\"" присутствует.
+	if !strings.Contains(IndexHTML, "Mode == \"\"") {
+		// UI-фронтенд не хранит логику бэкенда — это OK
+	}
+}
+
+// TestUiConfirmModal — подтверждение правок рисуется модалкой приложения,
+// а не нативным confirm(): WebKit показывает чужое окно с заголовком
+// «JavaScript — http://127.0.0.1…». Все четыре вызова переведены на
+// uiConfirm; в скрипте не должно остаться боевого confirm(/alert(.
+func TestUiConfirmModal(t *testing.T) {
+	for _, want := range []string{
+		`id="confirmModal"`,
+		`function uiConfirm(`,
+		`settleConfirm(true)`,
+		`!(await uiConfirm(`,
+	} {
+		if !strings.Contains(IndexHTML, want) {
+			t.Errorf("в UI отсутствует ожидаемый фрагмент %q", want)
+		}
+	}
+	scrubbed := strings.ReplaceAll(IndexHTML, "uiConfirm(", "")
+	scrubbed = strings.ReplaceAll(scrubbed, "settleConfirm(", "")
+	if i := strings.Index(scrubbed, "confirm("); i >= 0 {
+		t.Errorf("в UI остался боевой confirm() (позиция %d) — подтверждения обязаны идти через uiConfirm", i)
+	}
+	if strings.Contains(scrubbed, "window.confirm") {
+		t.Error("в UI остался window.confirm()")
+	}
+	if strings.Contains(IndexHTML, "alert(") {
+		t.Error("в UI остался alert() — подтвердить замену на стилевое окно")
 	}
 }

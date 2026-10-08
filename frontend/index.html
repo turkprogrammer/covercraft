@@ -262,6 +262,10 @@ input:focus-visible, textarea:focus-visible {
   color: var(--ink-faint);
   line-height: 1.5;
 }
+.prompt-dropinfo.mismatch {
+  color: var(--warn);
+  font-weight: 600;
+}
 
 /* Факт, подтверждённый генерацией: что реально ушло в модель. Отличается от
    .prompt-dropinfo (там намерение композера) — расхождение между ними и есть
@@ -277,6 +281,52 @@ input:focus-visible, textarea:focus-visible {
   color: var(--warn);
   font-weight: 600;
 }
+
+/* ---------- Модалка создания/правки пресета ---------- */
+/* Поле имени одного prompt() мало: пользователь не видит, КАКОЙ текст
+   уйдёт в пресет (живой случай: пресет создался со снимком дефолта,
+   а не с KISS-текстом). Модалка показывает оба поля и правит их. */
+.preset-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, .55);
+}
+.preset-modal[hidden] { display: none; }
+.preset-modal-box {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  width: min(560px, 100%);
+  max-height: 86vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.preset-modal-box textarea { min-height: 220px; }
+
+/* ---------- uiConfirm — стилевое подтверждение ---------- */
+/* Нативный confirm рисует WebKit, CSS его не достает: окно выглядит
+   чужим приложением (заголовок «JavaScript — http://127.0.0.1…» ).
+   Эта модалка переиспользует классы пресет-модалки; вызывается через
+   uiConfirm(text) → Promise<boolean>. При открытом confirm body имеет
+   класс .confirm-open, который блокирует ТОЛЬКО кнопки панели пресетов
+   (savePreset, editPreset, newPreset, delPreset, presetSelect). Кнопки
+   самой модалки подтверждения (confirmOk, confirmCancel) этим не затрагиваются. */
+.confirm-modal-box { width: min(440px, 100%); }
+.confirm-modal-box p { margin: 0; line-height: 1.45; }
+/* Блокируем кнопки панели пресетов когда confirm открыт */
+body.confirm-open .btn#savePreset,
+body.confirm-open .btn#editPreset,
+body.confirm-open .btn#newPreset,
+body.confirm-open .btn#delPreset,
+body.confirm-open #presetSelect { opacity: 0.4; pointer-events: none; }
 
 /* Compose-область не должна расти за пределы панели: когда compose
    наполнил блоки prompt-dropinfo/sentinfo крупным текстом (и кастомный
@@ -495,6 +545,12 @@ body.busy #scan {
       </summary>
       <div class="panel-body">
         <div class="field">
+          <label for="presetSelect">presets — заготовки промптов под разные цели</label>
+          <select id="presetSelect" title="выбранный пресет копируется в поле ниже; правки сессионные, в пресет уходят только по кнопке save preset">
+            <option value="">— без пресета —</option>
+          </select>
+        </div>
+        <div class="field">
           <label for="systemPrompt">инструкция модели — кастом до перезапуска</label>
           <textarea id="systemPrompt" rows="6" spellcheck="false" placeholder="Ты помощник по сопроводительным письмам…"></textarea>
         </div>
@@ -507,9 +563,71 @@ body.busy #scan {
           </button>
           <button class="btn term" id="undoPrompt" type="button" hidden><span>вернуть прежний</span></button>
           <button class="btn term" id="resetPrompt" type="button"><span>reset default</span></button>
+          <button class="btn term" id="savePreset" type="button"
+                  title="сохранить текущее поле в активный пресет; если пресет не выбран — создать новый">
+            <span>save preset</span>
+          </button>
+          <button class="btn term" id="editPreset" type="button"
+                  title="править имя и текст активного пресета">
+            <span>edit preset</span>
+          </button>
+          <button class="btn term" id="newPreset" type="button"
+                  title="создать новый пресет: имя и текст задаются в окне">
+            <span>new preset</span>
+          </button>
+          <button class="btn term" id="delPreset" type="button"
+                  title="удалить выбранный пресет — поле не трогается">
+            <span>del preset</span>
+          </button>
         </div>
       </div>
     </details>
+
+    <!-- Модалка пресета: имя + текст. Отдельно от панели, fixed-overlay:
+         кнопки панели остаются кликабельными после закрытия, модалка их
+         не «залипает». -->
+    <div class="preset-modal" id="presetModal" hidden role="dialog"
+         aria-modal="true" aria-labelledby="presetModalTitle">
+      <div class="preset-modal-box">
+        <span class="panel-title" id="presetModalTitle">новый пресет</span>
+        <div class="field">
+          <label for="presetName">имя — появится в селекторе presets</label>
+          <input type="text" id="presetName" maxlength="80" spellcheck="false">
+        </div>
+        <div class="field">
+          <label for="presetText">текст — именно он уйдёт в модель как системный промпт
+            <span class="prompt-dropinfo" id="presetLen"></span>
+          </label>
+          <textarea id="presetText" rows="8" spellcheck="false"
+                    placeholder="Ты — ведущий backend-архитектор… Отвечай кратко по существу."></textarea>
+        </div>
+        <div class="field">
+          <label for="presetMode">режим пресета — «qa» без fit/audit (на сервере)</label>
+          <select id="presetMode">
+            <option value="cover_letter">письмо (compose + fit + audit)</option>
+            <option value="qa">qa (без fit/audit)</option>
+          </select>
+        </div>
+        <div class="btn-row">
+          <button class="btn term" id="presetOk" type="button"><span>ok</span></button>
+          <button class="btn term" id="presetCancel" type="button"><span>отмена</span></button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Модалка подтверждения вместо нативного confirm: тот же оверлей,
+         те же классы. Одна на всё приложение — резолвит uiConfirm(). -->
+    <div class="preset-modal" id="confirmModal" hidden role="dialog"
+         aria-modal="true" aria-labelledby="confirmText">
+      <div class="preset-modal-box confirm-modal-box">
+        <span class="panel-title">подтверждение</span>
+        <p id="confirmText"></p>
+        <div class="btn-row">
+          <button class="btn term primary" id="confirmOk" type="button"><span>ok</span></button>
+          <button class="btn term" id="confirmCancel" type="button"><span>отмена</span></button>
+        </div>
+      </div>
+    </div>
 
     <div id="vacancy-wrap">
       <div class="field">
@@ -563,6 +681,10 @@ const els = {
   timeoutSec: $("timeoutSec"), fitEngine: $("fitEngine"),
   vacancy: $("vacancy"), apiSub: $("api-sub"), promptSub: $("prompt-sub"),
   composePrompt: $("composePrompt"), undoPrompt: $("undoPrompt"),
+  presetSelect: $("presetSelect"),
+  presetMode: $("presetMode"),
+  savePreset: $("savePreset"), newPreset: $("newPreset"), delPreset: $("delPreset"),
+  editPreset: $("editPreset"),
   promptDropInfo: $("prompt-dropinfo"),
   promptSentInfo: $("prompt-sentinfo"),
   auditWarns: $("audit-warns"),
@@ -612,6 +734,14 @@ let promptUndo = null;      // {drops, stats, vacancy} — снимок до com
 let promptDrops = [];       // dropSections, применяемые в /api/generate
 let promptDropStats = null; // {sections, droppedBytes, reason} из ответа compose
 let promptVacancy = "";     // вакансия, под которую собран promptDrops
+// Пресеты — именованные шаблоны промптов (хранятся в presets.json).
+// Пресет = шаблон: выбор копирует текст в поле, правки сессионные и в
+// пресет уходят только по save preset. presetSnapshot — последний текст,
+// который мы сами положили в поле; отличие от него = «правки».
+let presetList = [];        // последние данные сервера (view.presets)
+let presetActiveId = "";    // активный пресет или "" (кастом)
+let presetSnapshot = "";    // текст в поле без учёта правок
+let currentPresetMode = "cover_letter";    // режим активного пресета или кастом
 function readForm() {
   const t = parseInt(els.timeoutSec.value, 10);
   return {
@@ -632,11 +762,20 @@ function fillForm(s) {
   els.timeoutSec.value = s.timeoutSec || 60;
   defaultPrompt = s.defaultSystemPrompt || "";
   els.systemPrompt.value = defaultPrompt;
+  presetSnapshot = defaultPrompt;
   chip(els.model.value.trim());
   promptState();
 }
 function resetPrompt() {
   els.systemPrompt.value = defaultPrompt;
+  presetSnapshot = defaultPrompt;
+  // Сброс к дефолту снимает привязку к пресету — иначе на старте поле
+  // снова заполнилось бы текстом пресета, несмотря на явный reset.
+  if (presetActiveId) {
+    presetActiveId = "";
+    renderPresetSelect();
+    setPresetActive("").catch(e => setStatus("err: пресеты: " + e.message, "err"));
+  }
   promptDrops = [];
   promptDropStats = null;
   promptVacancy = "";
@@ -647,20 +786,289 @@ function resetPrompt() {
   els.systemPrompt.focus();
 }
 
-// promptState — единый источник статуса #prompt-sub: custom (непустое поле —
-// промпт пользователя) / default (пустое — на бэке дефолт). Статус «авто»
-// удалён вместе с переписыванием промпта композером: поле больше не
+// promptState — единый источник статуса #prompt-sub: preset (выбран
+// пресет, правки видны как «· правки») / custom (непустое поле без
+// пресета) / default (пустое — на бэке дефолт). Статус «авто» удалён
+// вместе с переписыванием промпта композером: поле больше не
 // перезаписывается, поэтому подписи нечему врать.
 function promptState() {
-  const src = els.systemPrompt.value.trim() === "" ? "default" : "custom";
-  els.promptSub.textContent = src === "custom" ? "кастом (сброс при перезапуске)" : "default";
+  let src = els.systemPrompt.value.trim() === "" ? "default" : "custom";
+  let label = src === "custom" ? "кастом (сброс при перезапуске)" : "default";
+  if (presetActiveId) {
+    const p = presetList.find(x => x.id === presetActiveId);
+    const dirty = els.systemPrompt.value !== presetSnapshot;
+    const qa = p && p.mode === "qa";
+    label = "пресет: " + (p ? p.name : "?") + (qa ? " [QA]" : "") + (dirty ? " · правки" : "");
+    src = "preset";
+  }
+  els.promptSub.textContent = label;
   return src;
+}
+
+// uiConfirm — подтверждение в стиле приложения вместо нативного
+// confirm: WebKit рисует своё окно с заголовком «JavaScript —
+// http://127.0.0.1…», чужое теме. Резолвит Promise<boolean>: ok → true,
+// отмена/Esc/клик по подложке → false. Пока окно открыто, кнопки панели
+// блокируются (класс .confirm-open на body), чтобы избежать реентерабельных
+// вызовов, которые перезатёрли бы резолвер и повисили бы await.
+let confirmResolve = null;
+function uiConfirm(text) {
+  document.body.classList.add("confirm-open");
+  $("confirmText").textContent = text;
+  $("confirmModal").hidden = false;
+  $("confirmOk").focus();
+  return new Promise(res => { confirmResolve = res; });
+}
+function settleConfirm(val) {
+  if (!confirmResolve) return;
+  const r = confirmResolve;
+  confirmResolve = null;
+  document.body.classList.remove("confirm-open");
+  $("confirmModal").hidden = true;
+  r(val);
 }
 
 // syncPromptButtons — compose доступен только когда не идёт генерация и
 // вакансия заполнена (пустая вакансия не должна стоить LLM-вызова).
 function syncPromptButtons() {
   els.composePrompt.disabled = busy() || !els.vacancy.value.trim();
+}
+
+/* ---------- presets: шаблоны промптов ---------- */
+// applyPresetView — состояние с сервера (список + активный) → память и
+// селектор. Все мутации возвращают полный view, поэтому один хелпер.
+function applyPresetView(view) {
+  presetList = (view && view.presets) || [];
+  presetActiveId = (view && view.activePresetId) || "";
+  renderPresetSelect();
+}
+// renderPresetSelect — пересобрать селектор из presetList, значение =
+// активный пресет. Без внутреннего состояния список протухает после
+// удаления, а селектор продолжал бы показывать удалённый пункт.
+function renderPresetSelect() {
+  const sel = els.presetSelect;
+  if (!sel) return;
+  sel.innerHTML = "<option value=\"\">— без пресета —</option>";
+  for (const p of presetList) {
+    const o = document.createElement("option");
+    o.value = p.id;
+    o.textContent = p.name;
+    sel.appendChild(o);
+  }
+  sel.value = presetActiveId;
+}
+// setPresetActive — активация/снятие привязки на сервере.
+async function setPresetActive(id) {
+  const r = await fetch("/api/presets/active", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+  if (!r.ok) throw new Error((await r.text()) || ("HTTP " + r.status));
+  applyPresetView(await r.json());
+  const p = presetList.find(x => x.id === presetActiveId);
+  currentPresetMode = p ? p.mode : "cover_letter";
+}
+// presetRequest — единый шов пресет-мутаций: метод, тело, текст ошибки
+// сервера (http.Error отдаёт text/plain, не JSON).
+async function presetRequest(method, body) {
+  const r = await fetch("/api/presets", {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error((await r.text()) || ("HTTP " + r.status));
+  return r.json();
+}
+// loadPresets — стартует после fillForm: активный пресет копируется в
+// поле (сессионная копия), без привязки поле остаётся дефолтным.
+async function loadPresets() {
+  try {
+    const r = await fetch("/api/presets");
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const view = await r.json();
+    applyPresetView(view);
+    const active = presetList.find(x => x.id === presetActiveId);
+    currentPresetMode = active ? active.mode : "cover_letter";
+    if (active) {
+      els.systemPrompt.value = active.systemPrompt;
+      presetSnapshot = active.systemPrompt;
+    }
+    promptState();
+  } catch (e) {
+    setStatus("err: пресеты не загрузились: " + e.message, "err");
+  }
+}
+// switchPreset — выбор в селекторе. Пресет = шаблон: текст копируется в
+// поле, правки откатываются только после confirm (правки сессионные, но
+// молча терять их нельзя).
+async function switchPreset() {
+  const id = els.presetSelect.value;
+  if (id === presetActiveId) return;
+  try {
+    if (id === "") {
+      // Без привязки поле возвращается к дефолтному промпту: иначе текст
+      // бывшего пресета остаётся в поле, и состояние «без пресета»
+      // выглядит как «последний пресет». Правки несём через confirm —
+      // тот же контракт, что при выборе пресета.
+      if (els.systemPrompt.value !== presetSnapshot &&
+          !(await uiConfirm("Правки промпта не сохранены. Вернуть дефолтный промпт?"))) {
+        els.presetSelect.value = presetActiveId;
+        return;
+      }
+      await setPresetActive("");
+      els.systemPrompt.value = defaultPrompt;
+      presetSnapshot = defaultPrompt;
+      promptState();
+      return;
+    }
+    // Выбор пресета заменяет поле его шаблоном: несохранённые правки
+    // пропали бы молча — спрашиваем.
+    if (els.systemPrompt.value !== presetSnapshot &&
+        !(await uiConfirm("Правки промпта не сохранены. Заменить их текстом пресета?"))) {
+      els.presetSelect.value = presetActiveId;
+      return;
+    }
+    const p = presetList.find(x => x.id === id);
+    if (!p) return;
+    els.systemPrompt.value = p.systemPrompt;
+    presetSnapshot = p.systemPrompt;
+    await setPresetActive(id);
+    currentPresetMode = p.mode;
+    promptState();
+    setStatus("пресет «" + p.name + "» загружен в поле.");
+  } catch (e) {
+    setStatus("err: пресеты: " + e.message, "err");
+  }
+}
+// savePreset — «save»: активный пресет обновляется текстом поля; без
+// активного — это создание нового через модалку (текст виден до сохранения).
+async function savePreset() {
+  if (!presetActiveId) {
+    openPresetModal("create");
+    return;
+  }
+  try {
+    const view = await presetRequest("PUT", { id: presetActiveId, systemPrompt: els.systemPrompt.value, mode: currentPresetMode });
+    applyPresetView(view);
+    presetSnapshot = els.systemPrompt.value;
+    promptState();
+    setStatus("пресет сохранён.");
+  } catch (e) {
+    setStatus("err: пресет не сохранён: " + e.message, "err");
+  }
+}
+// newPreset — создание с нуля: пустое имя, пустой текст. Предзаполнение
+// полем — сюрприз (пользователь видит текст активного пресета и решает,
+// что окно открылось не для нового), поэтому blank явный.
+function newPreset() {
+  openPresetModal("create", "");
+}
+
+/* ---------- Модалка пресета: имя + текст ---------- */
+let presetModalMode = "create"; // "create" | "edit"
+
+// openPresetModal — заполнить и показать. create: текст = prefill, если
+// задан (save preset без активного — снимок поля), иначе пусто; edit:
+// текст = сохранённый пресет (правится шаблон, а не сессионная копия).
+function openPresetModal(mode, prefill) {
+  const active = presetList.find(x => x.id === presetActiveId);
+  if (mode === "edit") {
+    if (!presetActiveId) {
+      setStatus("правка: сначала выберите пресет в селекторе.");
+      return;
+    }
+    if (!active) return;
+    presetModalMode = "edit";
+    $("presetModalTitle").textContent = "правка пресета";
+    $("presetName").value = active.name;
+    $("presetText").value = active.systemPrompt;
+    els.presetMode.value = active.mode || "cover_letter";
+  } else {
+    presetModalMode = "create";
+    $("presetModalTitle").textContent = "новый пресет";
+    $("presetName").value = "";
+    $("presetText").value = prefill !== undefined ? prefill : els.systemPrompt.value;
+    els.presetMode.value = "cover_letter";
+  }
+  $("presetModal").hidden = false;
+  updatePresetLen();
+  $("presetName").focus();
+}
+function closePresetModal() {
+  $("presetModal").hidden = true;
+}
+// updatePresetLen — счётчик байт текста пресета, информационный: длина
+// не блокирует сохранение (поле #systemPrompt не ограничено), но 98 КБ
+// v4 видно до нажатия ok. Считает TextEncoder — совпадает с len(string)
+// на бэке. Жёлтый при >8192: тот же порог, что в предупреждении
+// renderSentInfo («системный промпт вчетверо больше дефолта»).
+function updatePresetLen() {
+  const el = $("presetLen");
+  if (!el) return;
+  const n = new TextEncoder().encode($("presetText").value).length;
+  el.textContent = n + " байт";
+  el.classList.toggle("mismatch", n > 8192);
+}
+// submitPresetModal — create: POST + активация; edit: PUT по активному.
+// Поле промпта приравнивается к тексту из модалки: активный пресет и поле
+// должны совпасть, иначе подпись «пресет: X» врёт о снимке.
+async function submitPresetModal() {
+  const name = $("presetName").value.trim();
+  const text = $("presetText").value;
+  const mode = els.presetMode.value === "qa" ? "qa" : "cover_letter";
+  if (!name || !text.trim()) {
+    setStatus("err: имя и текст пресета обязательны", "err");
+    return;
+  }
+  // Правка шаблона затирает сессионные правки в поле — спрашиваем.
+  if (els.systemPrompt.value !== presetSnapshot &&
+      !(await uiConfirm("Поле содержит несохранённые правки. Заменить их текстом пресета?"))) {
+    return;
+  }
+  try {
+    if (presetModalMode === "edit") {
+      const view = await presetRequest("PUT", { id: presetActiveId, name, systemPrompt: text, mode });
+      applyPresetView(view);
+      setStatus("пресет «" + name + "» обновлён.");
+    } else {
+      const view = await presetRequest("POST", { name, systemPrompt: text, mode });
+      const id = view.presets[view.presets.length - 1].id;
+      applyPresetView(view);
+      await setPresetActive(id);
+      setStatus("пресет «" + name + "» создан и активирован.");
+    }
+    currentPresetMode = mode;
+    els.systemPrompt.value = text;
+    presetSnapshot = text;
+    closePresetModal();
+    promptState();
+  } catch (e) {
+    setStatus("err: пресет не сохранён: " + e.message, "err");
+  }
+}
+// delPreset — удалить выбранный пункт. Поле не трогаем: текст остаётся
+// кастомным (сервер сам снимает привязку, если удалили активный).
+async function delPreset() {
+  const id = els.presetSelect.value;
+  if (!id) {
+    setStatus("пресет не выбран.");
+    return;
+  }
+  const p = presetList.find(x => x.id === id);
+  if (!await uiConfirm("Удалить пресет «" + (p ? p.name : "") + "»?")) return;
+  try {
+    const view = await presetRequest("DELETE", { id });
+    applyPresetView(view);
+    // При удалении пресета сервер снимает активную привязку (activePresetId = ""),
+    // но сессионный currentPresetMode не трогается — сбрасываем явно, чтобы
+    // последующий generate не ушёл случайно с режимом удалённого пресета.
+    currentPresetMode = "";
+    promptState();
+    setStatus("пресет удалён — поле не изменилось.");
+  } catch (e) {
+    setStatus("err: пресет не удалён: " + e.message, "err");
+  }
 }
 
 // dropStaleDrops — вакансия изменилась после compose: дропы собраны под прежний
@@ -716,13 +1124,24 @@ function renderSentInfo(data) {
   // в заблуждение сильнее, чем помогает.
   const kb = n => (n >= 1024 ? Math.round(n / 1024 * 10) / 10 + " КБ" : n + " Б");
 
-  // Системный промпт: пользователю важно, ушёл его текст или дефолт.
+  // Системный промпт: пользователю важно, ушёл его текст, пресет или дефолт.
+  // Имя пресета показываем, только когда в модель ушёл именно его текст:
+  // совпадение с полем при активном пресете ещё не доказывает источник
+  // (поле могли наполнить вручную тем же текстом).
   const sent = (data.usedSystemPrompt || "").trim();
   const mine = els.systemPrompt.value.trim();
-  const src = sent && sent === mine ? "ваш" : (sent ? "дефолтный" : "пустой");
+  let src = sent && sent === mine ? "ваш" : (sent ? "дефолтный" : "пустой");
+  if (sent && presetActiveId) {
+    const p = presetList.find(x => x.id === presetActiveId);
+    if (p && sent === p.systemPrompt.trim()) src = "пресет «" + p.name + "»";
+  }
+  // Первая строка — самый дешёвый способ убедиться, что в модель ушёл
+  // ожидаемый промпт, не раскрывая весь текст.
+  const firstLine = sent.split("\n")[0].slice(0, 60);
   parts.push("в модель ушло: user-промпт " + kb(data.usedUserPromptBytes || 0) +
     ", профиль для фита " + kb(data.usedProfileBytes || 0) +
-    "; системный промпт — " + src + " (" + kb(sent.length) + ").");
+    "; системный промпт — " + src + " (" + kb(sent.length) + ")" +
+    (firstLine ? ", начало: «" + firstLine + "»" : "") + ".");
 
   // Живой случай (октябрь 2026): в поле системного промпта оказался текст
   // самой вакансии — 63 КБ вместо обычных 1–5 КБ. Модель получила вакансию
@@ -915,7 +1334,7 @@ async function generate() {
   let live = 0;
   try {
     const data = await streamGenerate(
-      { vacancy: els.vacancy.value, systemPrompt: els.systemPrompt.value, dropSections: promptDrops },
+      { vacancy: els.vacancy.value, systemPrompt: els.systemPrompt.value, dropSections: promptDrops, mode: currentPresetMode },
       delta => {
         els.result.textContent += delta;
         // Автоскролл: письмо растёт, конец текста остаётся на виду.
@@ -1505,6 +1924,26 @@ async function boot() {
   $("resetPrompt").addEventListener("click", resetPrompt);
   els.composePrompt.addEventListener("click", composePrompt);
   els.undoPrompt.addEventListener("click", undoPrompt);
+  // Пресеты: загрузка списка после настроек (активный → в поле) + CRUD.
+  await loadPresets();
+  els.presetSelect.addEventListener("change", switchPreset);
+  els.savePreset.addEventListener("click", savePreset);
+  els.editPreset.addEventListener("click", () => openPresetModal("edit"));
+  els.newPreset.addEventListener("click", newPreset);
+  els.delPreset.addEventListener("click", delPreset);
+  $("presetOk").addEventListener("click", submitPresetModal);
+  $("presetCancel").addEventListener("click", closePresetModal);
+  $("presetText").addEventListener("input", updatePresetLen);
+  // Клик по подложке — закрыть, как cancel (Esc обрабатывается ниже).
+  $("presetModal").addEventListener("click", e => {
+    if (e.target === $("presetModal")) closePresetModal();
+  });
+  // Подтверждение: ok/отмена, клик по подложке — отмена (как Esc).
+  $("confirmOk").addEventListener("click", () => settleConfirm(true));
+  $("confirmCancel").addEventListener("click", () => settleConfirm(false));
+  $("confirmModal").addEventListener("click", e => {
+    if (e.target === $("confirmModal")) settleConfirm(false);
+  });
   els.vacancy.addEventListener("input", () => {
     els.generate.disabled = !els.vacancy.value.trim() || document.body.classList.contains("busy");
     dropStaleDrops();
@@ -1523,6 +1962,12 @@ async function boot() {
   document.addEventListener("keydown", e => {
     if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); generate(); }
     if (e.key === "Escape") {
+      // Подтверждение — самое верхнее окно (может висеть над модалкой
+      // пресета): Esc = отмена, резолвит uiConfirm(false).
+      if (!$("confirmModal").hidden) { settleConfirm(false); return; }
+      // Модалка пресета закрывается первой: Esc «на весь документ» не должен
+      // очищать результат, пока пользователь правит имя/текст пресета.
+      if (!$("presetModal").hidden) { closePresetModal(); return; }
       // Останов активной генерации + очистка результата. Письмо очищено —
       // панель замечаний (и список для auto-fix) тоже уходит.
       if (genAbort) genAbort.abort();

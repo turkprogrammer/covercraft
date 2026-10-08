@@ -20,6 +20,9 @@ frontend/index.html         весь UI (embed, vanilla JS, тёмная/све�
 frontend/embed.go           go:embed index.html
 internal/settings/          JSON-настройки в ~/.config/covercraft,
                             права 0600, атомарная запись (tmp + rename)
+internal/presets/           пресеты системного промпта: именованные
+                            шаблоны под разные цели, presets.json рядом
+                            с settings.json (тот же паттерн хранения)
 internal/llm/               OpenAI-совместимый клиент /chat/completions,
                             reasoning_effort (omitempty), таймаут 5–900 с
 internal/cover/             сборка user-промпта: context/*.md + вакансия;
@@ -71,6 +74,11 @@ internal/window/            CGO: GTK3-окно + WebKit2GTK 4.1 (~70 строк)
 | POST  | `/api/settings` | сохранить настройки |
 | POST  | `/api/generate` | `{vacancy, systemPrompt, dropSections, letter}` → SSE: `delta`…, `done {letter, elapsedMs, warnings, fit, usedSystemPrompt, appliedDropSections, usedUserPromptBytes, usedProfileBytes}` |
 | POST  | `/api/prompt/compose` | `{vacancy}` → `{dropSections, reason, sections, droppedBytes, elapsedMs}` — отбор разделов, системный промпт не возвращается |
+| GET   | `/api/presets` | список пресетов + `activePresetId` |
+| POST  | `/api/presets` | `{name, systemPrompt}` → создать пресет |
+| PUT   | `/api/presets` | `{id, name?, systemPrompt?}` → обновить пресет |
+| DELETE | `/api/presets` | `{id}` → удалить пресет (активный снимает привязку) |
+| POST  | `/api/presets/active` | `{id}` → активировать; `{id: ""}` — снять привязку |
 
 ## Стек
 

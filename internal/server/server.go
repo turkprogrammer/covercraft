@@ -33,6 +33,7 @@ import (
 	"github.com/turkprogrammer/covercraft/internal/cover"
 	"github.com/turkprogrammer/covercraft/internal/fit"
 	"github.com/turkprogrammer/covercraft/internal/llm"
+	"github.com/turkprogrammer/covercraft/internal/presets"
 	"github.com/turkprogrammer/covercraft/internal/prompt"
 	"github.com/turkprogrammer/covercraft/internal/settings"
 )
@@ -144,6 +145,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.generate(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/prompt/compose":
 		h.composePrompt(w, r)
+	// Пресеты системного промпта: именованные шаблоны под разные цели.
+	// ID живёт в теле запроса, а не в пути — ServeHTTP работает без
+	// path-параметров (KISS, тот же switch, что у остальных веток).
+	case r.Method == http.MethodGet && r.URL.Path == "/api/presets":
+		h.listPresets(w)
+	case r.Method == http.MethodPost && r.URL.Path == "/api/presets":
+		h.createPreset(w, r)
+	case r.Method == http.MethodPut && r.URL.Path == "/api/presets":
+		h.updatePreset(w, r)
+	case r.Method == http.MethodDelete && r.URL.Path == "/api/presets":
+		h.deletePreset(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/api/presets/active":
+		h.activatePreset(w, r)
 	default:
 		http.Error(w, "не найдено", http.StatusNotFound)
 	}
@@ -179,6 +193,223 @@ func (h *Handler) postSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, settingsView{Settings: s, DefaultSystemPrompt: settings.DefaultSystemPrompt})
 }
 
+// presetsView — ответ всех /api/presets-эндпоинтов: полный список и
+// активный пресет. Мутации возвращают состояние целиком, чтобы UI
+// обновлял селектор одним сообщением, без повторного GET.
+type presetsView struct {
+	Presets        []presets.Preset `json:"presets"`
+	ActivePresetID string           `json:"activePresetId"`
+}
+
+func viewOf(s presets.Store) presetsView {
+	if s.Presets == nil {
+		s.Presets = []presets.Preset{}
+	}
+	return presetsView{Presets: s.Presets, ActivePresetID: s.ActivePresetID}
+}
+
+// presetReq — тело пресет-запроса. Пустое поле в update значит
+// «не менять» (имя и промпт и так валидируются как непустые).
+type presetReq struct {
+	ID           string `json:"id,omitempty"`
+	Name         string `json:"name,omitempty"`
+	SystemPrompt string `json:"systemPrompt,omitempty"`
+	Mode         string `json:"mode,omitempty"`
+}
+
+// modeOf — режим из запроса; пустой — cover_letter (дефолт), неизвестный
+// — ошибка: опечатка в клиенте не должна тихо превращаться в письмо.
+func modeOf(req presetReq) (presets.PresetMode, error) {
+	switch req.Mode {
+	case "", string(presets.ModeCoverLetter):
+		return presets.ModeCoverLetter, nil
+	case string(presets.ModeQA):
+		return presets.ModeQA, nil
+	default:
+		return "", fmt.Errorf("неизвестный режим пресета %q", req.Mode)
+	}
+}
+
+func decodePreset(w http.ResponseWriter, r *http.Request) (presetReq, bool) {
+	var req presetReq
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		http.Error(w, "битый JSON пресета", http.StatusBadRequest)
+		return req, false
+	}
+	return req, true
+}
+
+// listPresets — GET /api/presets: список шаблонов и активный пресет.
+func (h *Handler) listPresets(w http.ResponseWriter) {
+	s, err := presets.Load()
+	if err != nil {
+		http.Error(w, "не удалось прочитать пресеты: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, viewOf(s))
+}
+
+// createPreset — POST /api/presets: новый шаблон из текущего поля промпта.
+// Не активируется автоматически — клиент вызывает /api/presets/active.
+func (h *Handler) createPreset(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodePreset(w, r)
+	if !ok {
+		return
+	}
+	if err := presets.Validate(req.Name, req.SystemPrompt); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	mode, err := modeOf(req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s, err := presets.Load()
+	if err != nil {
+		http.Error(w, "не удалось прочитать пресеты: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	id, err := presets.NewID()
+	if err != nil {
+		http.Error(w, "не удалось сгенерировать id: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	now := time.Now()
+	s.Presets = append(s.Presets, presets.Preset{
+		ID:           id,
+		Name:         strings.TrimSpace(req.Name),
+		SystemPrompt: req.SystemPrompt,
+		Mode:         mode,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	})
+	if err := presets.Save(s); err != nil {
+		http.Error(w, "не удалось сохранить пресеты: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, viewOf(s))
+}
+
+// updatePreset — PUT /api/presets: правка имени и/или текста пресета.
+// Пустые поля в запросе означают «оставить как есть».
+func (h *Handler) updatePreset(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodePreset(w, r)
+	if !ok {
+		return
+	}
+	if req.ID == "" {
+		http.Error(w, "id пуст", http.StatusBadRequest)
+		return
+	}
+	s, err := presets.Load()
+	if err != nil {
+		http.Error(w, "не удалось прочитать пресеты: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	p, found := s.Get(req.ID)
+	if !found {
+		http.Error(w, "пресет не найден", http.StatusNotFound)
+		return
+	}
+	if n := strings.TrimSpace(req.Name); n != "" {
+		p.Name = n
+	}
+	if req.SystemPrompt != "" {
+		p.SystemPrompt = req.SystemPrompt
+	}
+	if req.Mode != "" {
+		mode, err := modeOf(req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		p.Mode = mode
+	}
+	if err := presets.Validate(p.Name, p.SystemPrompt); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	p.UpdatedAt = time.Now()
+	for i := range s.Presets {
+		if s.Presets[i].ID == p.ID {
+			s.Presets[i] = p
+			break
+		}
+	}
+	if err := presets.Save(s); err != nil {
+		http.Error(w, "не удалось сохранить пресеты: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, viewOf(s))
+}
+
+// deletePreset — DELETE /api/presets: удалить по id. Активный пресет
+// при удалении снимается — на старте поле вернётся к дефолту, а не к
+// удалённому шаблону.
+func (h *Handler) deletePreset(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodePreset(w, r)
+	if !ok {
+		return
+	}
+	if req.ID == "" {
+		http.Error(w, "id пуст", http.StatusBadRequest)
+		return
+	}
+	s, err := presets.Load()
+	if err != nil {
+		http.Error(w, "не удалось прочитать пресеты: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	idx := -1
+	for i := range s.Presets {
+		if s.Presets[i].ID == req.ID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		http.Error(w, "пресет не найден", http.StatusNotFound)
+		return
+	}
+	s.Presets = append(s.Presets[:idx], s.Presets[idx+1:]...)
+	if s.ActivePresetID == req.ID {
+		s.ActivePresetID = ""
+	}
+	if err := presets.Save(s); err != nil {
+		http.Error(w, "не удалось сохранить пресеты: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, viewOf(s))
+}
+
+// activatePreset — POST /api/presets/active: выбрать пресет (id) или
+// снять привязку (пустой id — «кастомный промпт»). Текст пресета при
+// этом не отправляется: поле #systemPrompt UI заполняет сам из списка.
+func (h *Handler) activatePreset(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodePreset(w, r)
+	if !ok {
+		return
+	}
+	s, err := presets.Load()
+	if err != nil {
+		http.Error(w, "не удалось прочитать пресеты: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if req.ID != "" {
+		if _, found := s.Get(req.ID); !found {
+			http.Error(w, "пресет не найден", http.StatusNotFound)
+			return
+		}
+	}
+	s.ActivePresetID = req.ID
+	if err := presets.Save(s); err != nil {
+		http.Error(w, "не удалось сохранить пресеты: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, viewOf(s))
+}
+
 type generateRequest struct {
 	Vacancy      string `json:"vacancy"`
 	SystemPrompt string `json:"systemPrompt"` // кастомный из UI; пусто → дефолт
@@ -196,6 +427,10 @@ type generateRequest struct {
 	// проход: каждая итерация стоит генерацию (до 60 сек) плюс fitMapTimeout
 	// (90 сек), и три прохода — это ~7,5 минут молчания (живой кейс, 2026-09).
 	FitMaxIter int `json:"fitMaxIter,omitempty"`
+	// Mode — режим пресета, переданный с UI при генерации. «qa» = ответ рекрутеру
+	// (без разбора вакансии, без fit-вердикта, без письменного аудита).
+	// Пусто / cover_letter — полный пайплайн, как раньше.
+	Mode presets.PresetMode `json:"mode"`
 	// DropSections — разделы профиля, вырезаемые из user-промпта (решил
 	// композер). Пусто — промпт как раньше.
 	DropSections []prompt.Drop `json:"dropSections,omitempty"`
@@ -288,16 +523,25 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Режим генерации: "qa" — без извлечения требований, без fit-вердикта,
+	// без аудита. Пусто/другое — полный пайплайн, как раньше.
+	modeQA := req.Mode == presets.ModeQA
 	// conceptsOnce — единственная точка записи в h.concepts. Fallback на
 	// дефолты живёт внутри initConcepts (см. его конец), поэтому после
 	// Once.Do поле неизменяемо и читается без синхронизации.
 	//
 	// Lazy-инициализация блокирующим LLM-вызовом при первом generate()
 	// вместо New() — иначе тесты server_test.go с fake-LLM висели бы
-	// 30 секунд на старте.
-	h.conceptsOnce.Do(h.initConcepts)
-	if h.conceptsInitErr != nil {
-		log.Printf("init concepts failed: %v — using defaults", h.conceptsInitErr)
+	// 30 секунд на старте. В режиме qa концепты не нужны (fit не считается,
+	// mapFn не задаётся): генерировать их — тратить платный LLM-вызов на
+	// профиль, из которого ответ рекрутеру не берёт требований. Поэтому
+	// инициализация пропускается; первый cover_letter-запрос (тем же
+	// хендлером) поднимет её по Once.Do.
+	if !modeQA {
+		h.conceptsOnce.Do(h.initConcepts)
+		if h.conceptsInitErr != nil {
+			log.Printf("init concepts failed: %v — using defaults, mode=%s", h.conceptsInitErr, req.Mode)
+		}
 	}
 
 	// Таймаут из настроек (UI ограничивает 5–900, дефолт 60): free-tier
@@ -340,30 +584,30 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
 	// панель вердикта исчезала, хотя кнопка fit-fix оставалась (живой баг,
 	// октябрь 2026). ОШИБКА ПРИ ЭТОМ НЕ ТЕРЯЕТСЯ: extractNote уходит в UI.
 	reqs, extractOK, extractNote := fit.Requirements{}, false, ""
-	for attempt := 0; attempt < 2 && !extractOK; attempt++ {
-		r, err := fit.ExtractRequirements(ctx, fit.LLMFunc(h.cfg.FitLLM), req.Vacancy)
-		if err != nil {
-			extractNote = "разбор вакансии не удался (" + err.Error() + ")"
-			continue
+	if !modeQA {
+		for attempt := 0; attempt < 2 && !extractOK; attempt++ {
+			r, err := fit.ExtractRequirements(ctx, fit.LLMFunc(h.cfg.FitLLM), req.Vacancy)
+			if err != nil {
+				extractNote = "разбор вакансии не удался (" + err.Error() + ")"
+				continue
+			}
+			// Пустой разбор (модель ответила JSON без must_have/nice_to_have)
+			// по сути тоже отказ: fit.Evaluate всё равно не даёт вердикта.
+			if len(r.MustHave) == 0 && len(r.NiceToHave) == 0 {
+				extractNote = "разбор вакансии не дал ни одного требования — модель вернула пустой результат"
+				continue
+			}
+			reqs, extractOK = r, true
+			extractNote = ""
 		}
-		// Пустой разбор (модель ответила JSON без must_have/nice_to_have)
-		// по сути тоже отказ: fit.Evaluate всё равно не даёт вердикта.
-		if len(r.MustHave) == 0 && len(r.NiceToHave) == 0 {
-			extractNote = "разбор вакансии не дал ни одного требования — модель вернула пустой результат"
-			continue
+		if !extractOK && extractNote == "" {
+			extractNote = "разбор вакансии не удался"
 		}
-		reqs, extractOK = r, true
-		extractNote = ""
-	}
-	if !extractOK && extractNote == "" {
-		extractNote = "разбор вакансии не удался"
 	}
 	musts := make([]string, 0, len(reqs.MustHave))
 	for _, m := range reqs.MustHave {
 		musts = append(musts, m.Text)
 	}
-
-	// Режим автоправки: письмо + замечания аудита → модель переписывает.
 	var user string
 	switch {
 	case req.AuditFix:
@@ -387,7 +631,7 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
 	// LLM-вызов после письма, всегда с откатом на детерминированный матчер),
 	// иначе — прежний матчер на правилах, без дополнительных вызовов.
 	var mapFn fit.MapFunc
-	if strings.EqualFold(h.cfg.FitEngine, "llm") {
+	if !modeQA && strings.EqualFold(h.cfg.FitEngine, "llm") {
 		mapFn = func(ctx context.Context, concepts []fit.Concept, reqs fit.Requirements, profile, letter, vac string) (fit.Fit, error) {
 			return fit.MapCoverage(ctx, fit.LLMFunc(h.cfg.FitLLM), concepts, reqs, profile, letter, vac)
 		}
@@ -398,7 +642,7 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
 	// sseDone, чтобы UI показывал факт, а не намерение композера.
 	applied := cover.AppliedDrops(h.cfg.ContextDir, req.DropSections)
 
-	streamGenerate(w, ctx, streamParams{
+	streamGenerate(w, ctx, streamParams{Mode: req.Mode,
 		fn:          h.cfg.LLMStream,
 		system:      system,
 		user:        user,
@@ -463,6 +707,7 @@ type streamParams struct {
 	concepts []fit.Concept
 	// timeoutSec — бюджет LLM-вызова.
 	timeoutSec int
+	Mode       presets.PresetMode
 	// origLetter — письмо пользователя для автоправки: при отклонённом эхе
 	// отдаётся назад как есть, не заменяясь выводом модели.
 	origLetter string
@@ -484,6 +729,7 @@ func streamGenerate(w http.ResponseWriter, ctx context.Context, p streamParams) 
 	fn, system, user := p.fn, p.system, p.user
 	vacancy, profile, origLetter := p.vacancy, p.profile, p.origLetter
 	reqs, extractOK, extractNote := p.reqs, p.extractOK, p.extractNote
+	mode := p.Mode
 	mapFn, concepts, applied := p.mapFn, p.concepts, p.applied
 	timeoutSec := p.timeoutSec
 
@@ -593,10 +839,17 @@ func streamGenerate(w http.ResponseWriter, ctx context.Context, p streamParams) 
 		// разрешает до 300 слов при 6+ must-have, и жёсткие 200 ругали бы на
 		// легальное письмо, которое автоправка исправить не может (живой
 		// кейс, октябрь 2026: бесконечный цикл «1 замечание» по объёму).
-		warnings = audit.CheckWithMust(letter, vacancy, len(reqs.MustHave)).Warnings
+		if mode != presets.ModeQA {
+			warnings = audit.CheckWithMust(letter, vacancy, len(reqs.MustHave)).Warnings
+		}
 		// Сверка заявленных фактов с профилем: Check профиль не читает и выдумку
 		// («XSSI sanitization», «basic auth») пропускает — письмо уходило с ложью.
-		warnings = append(warnings, audit.CheckProfile(letter, profile).Warnings...)
+		// В режиме qa эта проверка не работает: ответ рекрутеру — не письмо с
+		// обязательными секциями, а краткий ответ по существу; сверка по нему
+		// выдавала бы те же письменные замечания, что и CheckWithMust.
+		if mode != presets.ModeQA {
+			warnings = append(warnings, audit.CheckProfile(letter, profile).Warnings...)
+		}
 		if echoWarning != "" {
 			warnings = append(warnings, echoWarning)
 		}
@@ -604,8 +857,11 @@ func streamGenerate(w http.ResponseWriter, ctx context.Context, p streamParams) 
 
 	// Пустой профиль — не ошибка запроса, но письмо без единого факта о
 	// кандидате; пользователь должен узнать об этом до отправки письма.
+	// В режиме qa предупреждение не выводится: ответ рекрутеру не обязан
+	// опираться на профиль, и «написано без фактов» звучит как приговор делу,
+	// а не как совет.
 	profileWarning := ""
-	if strings.TrimSpace(profile) == "" {
+	if mode != presets.ModeQA && strings.TrimSpace(profile) == "" {
 		profileWarning = "профиль пуст: не найдено ни одного context/*.md — письмо написано без фактов о вас. Создайте папку context рядом с бинарником (или в текущем каталоге) и повторите."
 	}
 
@@ -636,7 +892,11 @@ func streamGenerate(w http.ResponseWriter, ctx context.Context, p streamParams) 
 	// фита просто исчезала, и пользователь читал это как поломку,
 	// хотя кнопка fit-fix работала по прошлым caveat.
 	fitNote := ""
-	if verdict == nil && strings.TrimSpace(letter) != "" {
+	// В режиме qa вердикт не считается намеренно (см. generate: разбор вакансии
+	// не выполняется), поэтому и объяснять причину отсутствия нечего — иначе на
+	// каждый ответ рекрутеру падало бы «разбор вакансии не удался — вердикт
+	// фита не посчитан», превращая режим в шум вместо молчания.
+	if mode != presets.ModeQA && verdict == nil && strings.TrimSpace(letter) != "" {
 		fitNote = extractNote
 		if fitNote == "" {
 			fitNote = "разбор вакансии не удался — вердикт фита не посчитан"
