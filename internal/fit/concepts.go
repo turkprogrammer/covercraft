@@ -282,8 +282,21 @@ func DefaultConcepts() []Concept {
 			},
 		},
 		{
+			// Живой кейс paste_8 (октябрь 2026): письмо без единого слова
+			// «ревью» закрывало «Участие в код-ревью» концептом
+			// «архитектурное управление» по ADR + Hexagonal/DDD. Ревью —
+			// самостоятельная практика: её закрывают только признаки
+			// ревью-культуры, а не архитектурные стили.
+			Name:    "код-ревью и ревью-культура",
+			Trigger: regexp.MustCompile(`(?i)код-?ревью|ревью.{0,8}кода|code.?review`),
+			Signals: []Signal{
+				{Label: "практика code review", Re: regexp.MustCompile(`(?i)код-?ревью|ревью.{0,8}кода|code.?review`)},
+				{Label: "ревью-процессы в команде", Re: regexp.MustCompile(`(?i)pull request|merge request|ревью|review|ADR|архитектурн`)},
+			},
+		},
+		{
 			Name:    "архитектурное управление",
-			Trigger: regexp.MustCompile(`(?i)архитектурн|архитектор|техническое ревью|code review|прототип|рефакторинг|рефакторинга|чист\S* архитектур|чистая архитекту|clean architecture`),
+			Trigger: regexp.MustCompile(`(?i)архитектурн|архитектор|техническое ревью|прототип|рефакторинг|рефакторинга|чист\S* архитектур|чистая архитекту|clean architecture`),
 			Signals: []Signal{
 				{Label: "ADR", Re: regexp.MustCompile(`(?i)\badr\b|архитектурн`)},
 				{Label: "архитектурные стили/ревью", Re: regexp.MustCompile(`(?i)hexagonal|ddd|ревью|review`)},
@@ -371,11 +384,27 @@ func DefaultConcepts() []Concept {
 		},
 		{
 			Name:    "тестирование и качество кода",
-			Trigger: regexp.MustCompile(`(?i)тестирован|покрытие|модульн.{0,15}тест|\bunit\b|test|тест`),
+			Trigger: regexp.MustCompile(`(?i)тестирован|покрытие|модульн.{0,15}тест|\bunit\b|test|тест|качеств`),
 			Signals: []Signal{
 				{Label: "тесты в проектах", Re: regexp.MustCompile(`(?i)test|тест|unit|e2e|phpunit|покрытие`)},
 				{Label: "TDD/методологии", Re: regexp.MustCompile(`(?i)\btdd\b|red.?green|модульн|интеграц|тестован`)},
 				{Label: "тестовая инфраструктура", Re: regexp.MustCompile(`(?i)dockertest|table.?driven|\bfuzz\b|\brace\b|покрытие`)},
+			},
+		},
+		{
+			// Живой кейс Golang-разработчик (октябрь 2026): требование
+			// «best practices разработка» даёт два латинских токена
+			// (best, practices), которых в русском письме нет дословно, —
+			// ложный missing и вердикт skip, хотя письмо закрывает
+			// требование code review, golangci-lint, table-driven тестами
+			// и SOLID/ADR.
+			Name:    "инженерные best practices",
+			Trigger: regexp.MustCompile(`(?i)best.?practice|лучшие практик|практик.{0,12}разработ|чист.{0,6}код|clean.?code|code.?style|стандарт.{0,10}код|статическ.{0,10}анализ`),
+			Signals: []Signal{
+				{Label: "линтеры/статический анализ", Re: regexp.MustCompile(`(?i)golangci|phpstan|staticcheck|линтер|linter|статическ.{0,10}анализ`)},
+				{Label: "тестовая культура", Re: regexp.MustCompile(`(?i)table.?driven|fuzz|\brace\b|unit.?test|e2e|покрытие`)},
+				{Label: "code review/ADR", Re: regexp.MustCompile(`(?i)code.?review|код-?ревью|ревью.{0,8}кода|\badr\b`)},
+				{Label: "SOLID/паттерны", Re: regexp.MustCompile(`(?i)solid|grasp|ddd|hexagonal|паттерн|принципы`)},
 			},
 		},
 		{
@@ -406,7 +435,7 @@ func DefaultConcepts() []Concept {
 		},
 		{
 			Name:    "system design и архитектурное проектирование",
-			Trigger: regexp.MustCompile(`(?i)system.{0,5}design|system.?design|системн.{0,8}дизайн|архитектурн.{0,15}проект|архитектурн.{0,10}решен`),
+			Trigger: regexp.MustCompile(`(?i)system.{0,5}design|system.?design|системн.{0,8}дизайн|архитектурн.{0,15}проект|архитектурн.{0,10}решен|проектирова.{0,20}архитектур`),
 			Signals: []Signal{
 				{Label: "ADR", Re: regexp.MustCompile(`(?i)\badr\b|architecture decision record`)},
 				{Label: "архитектурные стили", Re: regexp.MustCompile(`(?i)hexagonal|ddd|ports.{0,5}adapters|чистая архитектура|clean.arch`)},
