@@ -294,6 +294,25 @@ var bridges = map[string]bridge{
 	// Живой кейс АФЛТ (сентябрь 2026).
 	"http": {regexp.MustCompile(`(?i)\bgrpc\b|\brest\b|api|веб-сервис|веб\s+приложен|http|сетев`),
 		"мост: gRPC и REST API работают поверх HTTP — транспорт закрыт опытом веб-сервисов"},
+	// GPU/TPU — требования об ускорителях инференса. Кандидат честно
+	// называет GPU пробелом («не использовал GPU»), но НЕ ноль в смежном:
+	// применил int8-квантование и LoRA-дообучение (инференс/обучение — это
+	// сфера GPU), разворачивал инференс на CPU через ONNX Runtime. Живой
+	// кейс (октябрь 2026): требование «квантование … GPU/TPU» падало в
+	// «нет данных» (0.2), хотя письмо имело LoRA+int8+ONNX — честный пробел
+	// с мостом должен быть оговоркой (0.5), а не no-data: перверсия стимулов,
+	// когда скрытие пробела даёт лучший вердикт.
+	"gpu": {regexp.MustCompile(`(?i)инференс|квантован|int8|onnx|lora|дообучен|inference|обучени`),
+		"мост: оптимизация инференса (int8-квантование, LoRA-дообучение, ONNX Runtime CPU) → GPU/TPU ускорители"},
+	"tpu": {regexp.MustCompile(`(?i)инференс|квантован|int8|onnx|lora|дообучен|inference|обучени`),
+		"мост: оптимизация инференса (int8-квантование, LoRA-дообучение, ONNX Runtime CPU) → GPU/TPU ускорители"},
+	// CloudWatch — облачный мониторинг AWS. Кандидат имеет практику
+	// Prometheus/Grafana (мониторинг метрик, алерты, дашборды) — та же
+	// дисциплина, другой провайдер; облако честно называет пробелом.
+	// Без моста требование «Prometheus, Grafana, CloudWatch» ложится в
+	// no-data (0.2), хотя две трети факта в письме есть и мост живой.
+	"cloudwatch": {regexp.MustCompile(`(?i)prometheus|grafana|мониторинг|алерт|дашборд|metr\w*`),
+		"мост: мониторинг метрик и дашбордов (Prometheus, Grafana) → AWS CloudWatch"},
 }
 
 // softTerms — мягкие требования: не факты и не пробелы. Фит их не
@@ -651,7 +670,7 @@ var profileGapRe = regexp.MustCompile(`(?i)честн\w*\s+пробел|в пр�
 // них: «Transactional outbox на PostgreSQL: НЕ использовал» — отклоняет
 // outbox, хотя тот стоит впереди маркера. «не заявля/не говор» — маркеры
 // аннотаций-ограничителей профиля («НЕ заявлять как outbox» context/01:256,
-// «НЕ говорить «17+ лет PostgreSQL»» context/01:251). В negRe (маркеры
+// «НЕ говорить «20+ лет PostgreSQL»» context/01:251). В negRe (маркеры
 // отрицания в ПИСЬМЕ) они НЕ добавлены: кандидат так свой опыт не
 // описывает, а клаузная логика письма уже отлажена.
 var backwardNegRe = regexp.MustCompile(`(?i)опыта нет|нет опыта|опыта\s+(?:\S+\s+){0,3}нет|опыты?[^.!?;]{0,60}нет|нет\s+(?:\S+\s+){0,3}опыта|не работал|не использ|отсутствует|не зафиксирован|не применял|не приходилось|не заявля|не говор|не эксплуатировал|не развёртывал|не развертывал|не внедрял|не интегрировал|не настраивал|не деплоил|не управлял|не администрировал`)
@@ -1387,6 +1406,13 @@ func coverage(concepts []Concept, req Requirement, letter, profile string) (sour
 			// пробелом словами — «закрыто в письме» здесь нечестно.
 			if note2, gap := conceptGapNote(concepts, req.Text, letter); gap {
 				if s == SrcLetter {
+					// Честный пробел + мост — это оговорка (0.5), а не
+					// «нет данных» (0.2): рядом есть смежный опыт
+					// (GPU/TPU ← квантование, CloudWatch ← Prometheus/Grafana).
+					// Живой кейс LLM-платформы, октябрь 2026.
+					if bnote, bok := bridgeHit(tokens, letter, profile); bok {
+						return SrcBridge, bnote
+					}
 					return SrcUnknown, note2
 				}
 			}
@@ -1397,7 +1423,16 @@ func coverage(concepts []Concept, req Requirement, letter, profile string) (sour
 	// с отрицанием («С OpenTelemetry опыта нет, готов освоить»). Это не
 	// закрытие — но и не «в письме нет вообще»: модель отработала чек-лист,
 	// пробел назван словами. unknown с человеческой нотой, не missing.
+	//
+	// Честный пробел + мост НЕ должен уходить в «нет данных» (0.2): если
+	// рядом есть смежный опыт (квантование/int8 для GPU/TPU, Prometheus/
+	// Grafana для CloudWatch), честная оговорка с мостом — это SrcBridge
+	// (0.5), как и любой другой мост. Иначе скрытие пробела даёт лучший
+	// вердикт — перверсия стимулов (живой кейс LLM-платформы, октябрь 2026).
 	if note, ok := honestGapNote(tokens, letter, profile); ok {
+		if bnote, bok := bridgeHit(tokens, letter, profile); bok {
+			return SrcBridge, bnote
+		}
 		return SrcUnknown, note
 	}
 	// Мост: по токенам требования (Kubernetes в bridges НЕ входит —
@@ -1883,12 +1918,12 @@ func roleMismatch(reqs Requirements, profile string) bool {
 	goCand := regexp.MustCompile(`(?i)go-разработчик|golang|основн.{0,15}\bgo\b`).MatchString(profile)
 	// phpCand: кандидат с PHP-маркером. Раньше регулярка требовала
 	// «php-разработчик» или «основн...php» — узко, не ловило билингвальный
-	// профиль с «PHP — PRODUCTION (17 ЛЕТ ОПЫТА)». Расширяем до факта
+	// профиль с «PHP — PRODUCTION (20 ЛЕТ ОПЫТА)». Расширяем до факта
 	// продакшн-опыта на PHP, не только «названия профессии».
 	// Регресс: обрезанный профиль «Основные языки: Go (3 года), PHP (2005+), Bash, SQL»
 	// не содержит слова «PHP» в пределах 40 символов от маркера опыта → phpCand=false →
 	// ложный roleMismatch → мгновенный skip со счётом 0. Добавляем маркер года «PHP (20\d\d+)»
-	// и расширяем окно до 60 символов, чтобы ловить «PHP (2005+)» и «PHP, 17 лет опыта».
+	// и расширяем окно до 60 символов, чтобы ловить «PHP (2005+)» и «PHP, 20 лет опыта».
 	phpCand := regexp.MustCompile(`(?i)php-разработчик|основн.{0,15}php|\bphp\b.{0,60}(production|prod|лет|опыт|20\d\d)|((production|prod|лет|опыт|20\d\d).{0,60}\bphp\b|\bphp\b\s*\(\s*20\d\d)`).MatchString(profile)
 	return phpRole && goCand && !phpCand
 }

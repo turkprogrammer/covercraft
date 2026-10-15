@@ -75,7 +75,7 @@ var realProfile = func() string {
 func loadRealProfile() string { return realProfile }
 
 // эталонное письмо — эталон пользователя (октябрь 2026), без строки контактов.
-const realGoMLLetter = `Здравствуйте! Меня заинтересовала ваша вакансия Golang-разработчик. Мой профиль (17 лет бэкенда, PHP с 2005, 3 года Go) закрывает задачу по разработке и поддержке backend-сервисов на Go, проектированию архитектуры и оптимизации производительности.
+const realGoMLLetter = `Здравствуйте! Меня заинтересовала ваша вакансия Golang-разработчик. Мой профиль (20 лет бэкенда, PHP с 2005, 3 года Go) закрывает задачу по разработке и поддержке backend-сервисов на Go, проектированию архитектуры и оптимизации производительности.
 
 Чем могу быть полезен:
 
@@ -85,7 +85,7 @@ const realGoMLLetter = `Здравствуйте! Меня заинтересо�
 
 - **System Design и отказоустойчивость:** проектирование архитектуры приложений: ADR (10), Hexagonal Architecture, DDD, SOLID/GRASP; оптимизация производительности (pprof, GOGC, GOMEMLIMIT, GOMAXPROCS, gctrace, буферизация, multi-level кэш); отказоустойчивость: retries (exponential backoff), deadlines (context.WithTimeout), идемпотентность (ClickHouse Upsert), консистентность данных, at-least-once (Kafka consumer groups), Circuit Breaker + token bucket rate limiting (gobreaker), graceful shutdown всех сервисов.
 
-- **Командная работа, процессы, CI/CD:** уверенно владею Git (17 лет); совместная работа с командой разработчиков и QA, Agile (Scrum и Kanban — планирование спринтов, стендапы, груминг, ретроспективы, story points); regular code review (Go/PHP) + ADR; 155+ тестов (unit, integration, E2E); table-driven tests — стандарт; fuzzing — vpnctl; golangci-lint; Prometheus + Grafana (3 дашборда, 23 панели, алертинг P99 > 100ms / error rate > 1%), структурные логи, pprof (heap, cpu), gctrace; Docker Compose, systemd; запуск и поддержка готовых GitLab CI/CD пайплайнов (банк Росгосстрах); GitHub Actions (build + go test — CI написан сам).
+- **Командная работа, процессы, CI/CD:** уверенно владею Git (20 лет); совместная работа с командой разработчиков и QA, Agile (Scrum и Kanban — планирование спринтов, стендапы, груминг, ретроспективы, story points); regular code review (Go/PHP) + ADR; 155+ тестов (unit, integration, E2E); table-driven tests — стандарт; fuzzing — vpnctl; golangci-lint; Prometheus + Grafana (3 дашборда, 23 панели, алертинг P99 > 100ms / error rate > 1%), структурные логи, pprof (heap, cpu), gctrace; Docker Compose, systemd; запуск и поддержка готовых GitLab CI/CD пайплайнов (банк Росгосстрах); GitHub Actions (build + go test — CI написан сам).
 
 - **Микросервисы, БД, брокеры, сеть:** интеграции сервисов с базами данных и API: микросервисы банка Росгосстрах (gRPC, Elasticsearch, Oracle); PostgreSQL (глубокое знание, тюнинг, индексы B-tree/GIN/partial/covering, execution plans, pg_stat_statements), MySQL 8.0, ClickHouse (Upsert, материализованные представления, Buffer/flush), Elasticsearch (лог-агрегация, Kibana, full-text search), Redis (кэш, multi-level cache memory → Postgres → disk, 1M+ записей), Kafka (consumer groups, partitioning, dead letter, at-least-once), WebSocket (Laravel + Ratchet, real-time чат), gRPC (микросервисы банка Росгосстрах), REST API; MySQL (Task Flow) покрывает реляционные сценарии.
 

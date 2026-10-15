@@ -296,11 +296,11 @@ func TestEvaluateEmptyRequirementsNoVerdict(t *testing.T) {
 // технологий»), вердикт был skip при пустом missing — это регрессия.
 func TestEvaluateArchitectVacancyUserCase(t *testing.T) {
 	// Сокращённое письмо из реального прогона: сигналы концептов сохранены.
-	letter := "Мой профиль (17 лет бэкенда, 3 года Go). 10 ADR, Hexagonal Architecture / DDD. " +
+	letter := "Мой профиль (20 лет бэкенда, 3 года Go). 10 ADR, Hexagonal Architecture / DDD. " +
 		"Stable ID: Kafka, event-driven, 10 000 RPS, at-least-once, идемпотентность. " +
 		"миграция 329 847 legacy-записей без даунтайма. " +
 		"Prometheus + Grafana, алертинг P99 > 100ms, blue-green deploy, graceful shutdown."
-	profile := "Основной язык — Go. Backend: 17 лет, PHP с 2005. Проект «Мониторинг»: VictoriaMetrics, Kafka."
+	profile := "Основной язык — Go. Backend: 20 лет, PHP с 2005. Проект «Мониторинг»: VictoriaMetrics, Kafka."
 	reqs := mustReqs([]string{
 		"Релевантный опыт работы архитектором от 5 лет",
 		"Опыт работы в backend-разработке",
@@ -377,7 +377,7 @@ func TestVerdictNamesMatchUI(t *testing.T) {
 // требование в «не закрыто ничем»: закрыто письмом, недостающее названо.
 func TestEvaluateMajorityTokensLetter(t *testing.T) {
 	reqs := mustReqs([]string{"Знание системных сервисов ОС Linux (systemd, cron)"}, nil, "go-primary")
-	letter := "Linux 17+ лет диагностики, systemd-юниты в production, журналы."
+	letter := "Linux 20+ лет диагностики, systemd-юниты в production, журналы."
 	profile := ""
 	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
 	if f.Verdict == Skip {
@@ -396,7 +396,7 @@ func TestEvaluateMajorityTokensLetter(t *testing.T) {
 func TestEvaluateMajorityTokensProfile(t *testing.T) {
 	reqs := mustReqs([]string{"Знание системных сервисов ОС Linux (systemd, cron)"}, nil, "go-primary")
 	letter := "Про другой проект."
-	profile := "Linux 17+ лет, systemd (production), /etc/crontab."
+	profile := "Linux 20+ лет, systemd (production), /etc/crontab."
 	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
 	if len(f.Covered) != 1 || f.Covered[0].Source != SrcProfile {
 		t.Fatalf("покрытие должно быть из профиля: %+v", f.Covered)
@@ -497,8 +497,12 @@ func TestEvaluateProfileLimiterNotFact(t *testing.T) {
 }
 
 // Регресс (живой прогон): письмо честно отрицает outbox, а профиль
-// содержит мост-факт с упоминанием outbox — приоритет у честного пробела
-// письма: unknown, а не совет «впиши transactional в письмо».
+// содержит мост-факт. Новая семантика (октябрь 2026, живой кейс
+// LLM-платформы): честный пробел с мостом — это оговорка с мостом
+// (bridge, 0.5), а не «нет данных» (unknown, 0.2): кандидат признал
+// пробел словами, и рядом есть смежный опыт. Без моста честный пробел
+// остаётся unknown. При этом совет «впиши в письмо» недопустим — модель
+// не подталкивать к лжи: пробел уже честно назван в письме.
 func TestEvaluateLetterHonestGapBeatsProfile(t *testing.T) {
 	reqs := mustReqs([]string{"Проектирование event-driven цепочек через transactional outbox"}, nil, "go-primary")
 	profile := "ОБЩИЙ ПРОФИЛЬ:\n- Надёжная доставка событий (мост к outbox): буферизация, идемпотентный Upsert, at-least-once, event-driven паттерны."
@@ -509,6 +513,24 @@ func TestEvaluateLetterHonestGapBeatsProfile(t *testing.T) {
 			t.Errorf("письмо честно отрицает outbox — совет «впиши в письмо» недопустим: %+v", c)
 		}
 	}
+	foundBridge := false
+	for _, c := range f.Caveats {
+		if c.Source == SrcBridge && strings.Contains(c.Note, "мост") {
+			foundBridge = true
+		}
+	}
+	if !foundBridge {
+		t.Fatalf("честный пробел письма с мостом должен стать оговоркой с мостом, а не «нет данных»: %+v", f)
+	}
+}
+
+// Регресс: честный пробел БЕЗ моста остаётся unknown («нет данных»),
+// а не закрывается соседним опытом.
+func TestEvaluateLetterHonestGapWithoutBridgeStaysUnknown(t *testing.T) {
+	reqs := mustReqs([]string{"Проектирование event-driven цепочек через transactional outbox"}, nil, "go-primary")
+	profile := "Go бэкенд: PostgreSQL, Redis, REST API, Prometheus, Linux."
+	letter := "Kafka, event-driven архитектуры.\nTransactional outbox не использовал; готов освоить паттерн."
+	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
 	foundUnknown := false
 	for _, c := range f.Caveats {
 		if c.Source == SrcUnknown && strings.Contains(c.Note, "честно назван пробел") {
@@ -516,7 +538,7 @@ func TestEvaluateLetterHonestGapBeatsProfile(t *testing.T) {
 		}
 	}
 	if !foundUnknown {
-		t.Fatalf("честный пробел письма должен победить профиль: %+v", f)
+		t.Fatalf("честный пробел без моста должен остаться «нет данных»: %+v", f)
 	}
 }
 
@@ -740,12 +762,12 @@ func TestSynonymsLimitsLimiting(t *testing.T) {
 // TestRoleMismatchBilingualProfile — регресс: билингвальный профиль
 // (Go + PHP с продакшн-опытом) на PHP-вакансии не должен давать roleMismatch.
 // Раньше phpCand требовал «php-разработчик» или «основн...php» — узко,
-// и кандидат с «PHP — PRODUCTION (17 ЛЕТ ОПЫТА)» ловил ложное срабатывание.
+// и кандидат с «PHP — PRODUCTION (20 ЛЕТ ОПЫТА)» ловил ложное срабатывание.
 func TestRoleMismatchBilingualProfile(t *testing.T) {
 	reqs := Requirements{Role: "php-primary", MustHave: []Requirement{{Text: "PHP в проде"}}}
-	profile := "Go (3 года), PHP (2005+). PHP — PRODUCTION (17 ЛЕТ ОПЫТА), production-инциденты."
+	profile := "Go (3 года), PHP (2005+). PHP — PRODUCTION (20 ЛЕТ ОПЫТА), production-инциденты."
 	if roleMismatch(reqs, profile) {
-		t.Error("roleMismatch сработал на билингвальном профиле с 17-летним PHP в проде")
+		t.Error("roleMismatch сработал на билингвальном профиле с 20-летним PHP в проде")
 	}
 	// Контр-кейс: чистый Go-разработчик на PHP-вакансии — должно сработать.
 	profileGoOnly := "Go-разработчик, 3 года, Kafka и gRPC."
@@ -753,7 +775,7 @@ func TestRoleMismatchBilingualProfile(t *testing.T) {
 		t.Error("roleMismatch НЕ сработал на чистом Go-разработчике на PHP-вакансии")
 	}
 	// Контр-кейс: только PHP в профиле — не должно сработать (нет goCand).
-	profilePhpOnly := "PHP-разработчик, 17 лет, Symfony, Laravel."
+	profilePhpOnly := "PHP-разработчик, 20 лет, Symfony, Laravel."
 	if roleMismatch(reqs, profilePhpOnly) {
 		t.Error("roleMismatch сработал на чистом PHP-разработчике на PHP-вакансии")
 	}
@@ -1069,7 +1091,7 @@ func TestFitFixableFromEvaluate(t *testing.T) {
 	}
 	// Письмо БЕЗ токена Git — факт есть в профиле, но не в письме.
 	letter := "Стек: Go, PHP, ML, Kafka, Redis, PostgreSQL, MySQL, Docker."
-	profile := "Git: уверенно, 17 лет; PHP production; Go highload."
+	profile := "Git: уверенно, 20 лет; PHP production; Go highload."
 	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
 	if f.Verdict == "" {
 		t.Fatalf("verdict должен быть не пустым: %+v", f)
@@ -1185,22 +1207,22 @@ func TestTokensDeclinedSeesAnnotation(t *testing.T) {
 	}
 }
 
-// Живой регресс PHP-вакансии: билингвальный профиль (Go + PHP 17 лет)
+// Живой регресс PHP-вакансии: билингвальный профиль (Go + PHP 20 лет)
 // на PHP-вакансии не даёт ложный roleMismatch. Профиль без слова «PHP»
 // в пределах 60 символов от маркера опыта — самый частый паттерн
 // «Основные языки: Go (3 года), PHP (2005+)» — не должен ронять
 // вердикт до skip со счётом 0.
 func TestRoleMismatchBilingualNoFalseSkip(t *testing.T) {
 	// Обрезанный профиль: «PHP (2005+)» — маркер года, не «лет опыта».
-	profile := "17 лет в бэкенд-архитектуре. Основные языки: Go (3 года), PHP (2005+), Bash, SQL. Фреймворки Laravel - production."
+	profile := "20 лет в бэкенд-архитектуре. Основные языки: Go (3 года), PHP (2005+), Bash, SQL. Фреймворки Laravel - production."
 	reqs := Requirements{Role: "php-primary", MustHave: []Requirement{{Text: "PHP в проде"}}}
 	if roleMismatch(reqs, profile) {
 		t.Error("roleMismatch сработал на билингвальном профиле с «PHP (2005+)» — ложный skip")
 	}
-	// Полный профиль с «17 ЛЕТ ОПЫТА» рядом — тоже не должен.
-	profileFull := "Go (3 года), PHP (2005+). PHP — PRODUCTION (17 ЛЕТ ОПЫТА), production-инциденты."
+	// Полный профиль с «20 ЛЕТ ОПЫТА» рядом — тоже не должен.
+	profileFull := "Go (3 года), PHP (2005+). PHP — PRODUCTION (20 ЛЕТ ОПЫТА), production-инциденты."
 	if roleMismatch(reqs, profileFull) {
-		t.Error("roleMismatch сработал на билингвальном профиле с «17 ЛЕТ ОПЫТА» рядом")
+		t.Error("roleMismatch сработал на билингвальном профиле с «20 ЛЕТ ОПЫТА» рядом")
 	}
 	// Чистый Go-разработчик на PHP-вакансии — должно сработать.
 	profileGoOnly := "Go-разработчик, 3 года, Kafka и gRPC. No PHP."
@@ -1227,8 +1249,8 @@ func TestEnglishReqCyrillicLetter(t *testing.T) {
 // conflict/resolution) — стоп-слова: не раздувают majority-порог.
 // Факты «Git», «GitHub», «PR» в письме закрывают требование.
 func TestGitReqNarrativeStopwords(t *testing.T) {
-	profile := "GitHub PR workflows, Git (17 лет), ADR."
-	letter := "GitHub Pull Requests - уверенно владею Git (17 лет)."
+	profile := "GitHub PR workflows, Git (20 лет), ADR."
+	letter := "GitHub Pull Requests - уверенно владею Git (20 лет)."
 	reqs := mustReqs([]string{"Git & GitHub - branching strategies, PR workflows, conflict resolution"}, nil, "go-primary")
 	f := Evaluate(DefaultConcepts(), reqs, profile, letter, "вакансия")
 	if f.Score < 50 {

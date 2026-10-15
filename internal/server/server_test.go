@@ -922,7 +922,7 @@ func TestGenerateWarnsOnEmptyProfile(t *testing.T) {
 func TestGenerateNoProfileWarningWhenProfileExists(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "01-профиль.md"), []byte("# Профиль\nGo, PHP, 17 лет."), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "01-профиль.md"), []byte("# Профиль\nGo, PHP, 20 лет."), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	h := New(Config{

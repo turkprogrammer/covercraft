@@ -11,11 +11,11 @@ import (
 // одном context/*.md (проверено: 0 вхождений), а «навык построения трассировки
 // событий через Kafka» выдумывает компетенцию, которой нет.
 const sreLiveLetter2 = "Здравствуйте!\n\n" +
-	"Мой опыт в высоконагруженных системах (17 лет) и работа с Go-бэкендом позволяют мне эффективно решать задачи SRE.\n\n" +
+	"Мой опыт в высоконагруженных системах (20 лет) и работа с Go-бэкендом позволяют мне эффективно решать задачи SRE.\n\n" +
 	"*   **SRE в high-load средах:** 10+ лет опыта обеспечения стабильности production-сервисов. Ключевые метрики: Fraud Engine — 92% F1, P95 < 4.2ms; Stable ID — 10 000 RPS.\n" +
 	"*   **PostgreSQL (внутреннее устройство):** Глубокое знание индексов (B-tree/GIN/partial/covering), тюнинга `shared_buffers`/`work_mem`, мониторинга bloat и autovacuum. Автор TUI-профайлера SQL-Top для анализа execution plans и kill query. *Пробел:* Опыт работы с CloudNative-PG/WAL на уровне администрирования кластера ограничен; понимаю принципы WAL, готов углубиться в специфику CNPG.\n" +
 	"*   **Observability:** Развернул Prometheus + Grafana (23 панели, алертинг по latency/error rate). Интегрировал логирование через Elasticsearch/Kibana в банковских микросервисах. *Пробел:* Нет прямого опыта с Tempo/OpenTelemetry, но есть навык построения трассировки событий через Kafka и структурированное логирование.\n" +
-	"*   **Сети (HTTP/gRPC):** Диагностика сетевой подсистемы Linux (`/sys/class/net`) 17+ лет. Работа с gRPC (банк Росгосстрах), HTTP/REST API, TLS termination (Caddy). Понимание принципов Service Mesh, но *пробел:* нет практического опыта отладки внутри Cilium/Linkerd.\n" +
+	"*   **Сети (HTTP/gRPC):** Диагностика сетевой подсистемы Linux (`/sys/class/net`) 20+ лет. Работа с gRPC (банк Росгосстрах), HTTP/REST API, TLS termination (Caddy). Понимание принципов Service Mesh, но *пробел:* нет практического опыта отладки внутри Cilium/Linkerd.\n" +
 	"*   **Kubernetes:** *Честный пробел:* Нет опыта администрирования Managed K8s или Helm. Мост: уверенная работа с Docker Compose, systemd, понимание архитектуры оркестрации.\n\n" +
 	"**Адаптация под ваш стек:** Быстро интегрируюсь в ваши инструменты observability (Tempo, Pyroscope) и инфраструктурные решения (CNPG, Service Mesh).\n\n" +
 	"Стек: Go, PostgreSQL, Redis, ClickHouse, Kafka, Prometheus, Grafana, Elasticsearch, Docker, Caddy, GitLab CI, Linux\n\nС уважением,"
@@ -34,7 +34,7 @@ const sreLiveProfileFull = "ОБЩИЙ ПРОФИЛЬ\n" +
 	"- **Kubernetes:** НЕ работал. Service Mesh / Cilium / Linkerd / Istio: НЕ работал.\n" +
 	"- **OpenTelemetry / Tempo / Pyroscope / Jaeger / Zipkin:** НЕ работал; допустимо «принципы трассировки понятны».\n" +
 	"- **CloudNative-PG / CNPG / Patroni:** НЕ работал.\n" +
-	"- **Ограничения:** не заявлять стаж SRE/сетевой диагностики сверх общего (17 лет бэкенд).\n"
+	"- **Ограничения:** не заявлять стаж SRE/сетевой диагностики сверх общего (20 лет бэкенд).\n"
 
 // TestLiveSREFabricatedInfraTerms — универсальный guard: термины, которых
 // НЕТ в профиле, но которые письмо заявляет как свои инструменты/компетенцию,

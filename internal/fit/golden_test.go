@@ -63,7 +63,7 @@ func TestGolden(t *testing.T) {
 // Профиль — санитизированная реконструкция реального context/
 // Без email, телефона, URL — только факты.
 // ---------------------------------------------------------------------------
-const profileSanitized = "PHP с 2005 (17 лет), Go — 3 года. " +
+const profileSanitized = "PHP с 2005 (20 лет), Go — 3 года. " +
 	"Laravel (laravel-api, LaravelShop, LaravelBlog), Lumen — production. " +
 	"Symfony 7.2/8.0 (E-commerce-Lite, URL-Shortener), Yii2 — коммерческий production. " +
 	"PHPUnit + TDD, E2E API тесты, Red-Green-Refactor. " +
@@ -73,7 +73,7 @@ const profileSanitized = "PHP с 2005 (17 лет), Go — 3 года. " +
 	"Redis — кэш. " +
 	"MySQL 8.0+, тюнинг индексов B-tree/GIN/partial/covering. " +
 	"WebSocket (Laravel + Ratchet), HTTP. " +
-	"Git (17 лет), Git Flow. " +
+	"Git (20 лет), Git Flow. " +
 	"Code review, 10 ADR. " +
 	"End-to-end ответственность за сервисы. " +
 	"LLM-интеграции: RAG CLI System, DeepSeek R1, Llama-3.3-70B. " +
@@ -108,7 +108,7 @@ var cases = []goldenCase{
 		MustHave: []string{"Опыт Laravel от 3 лет", "Знание PostgreSQL", "Работа с REST API", "Git"},
 		Role:     "php-primary",
 		Profile:  profileSanitized,
-		Letter:   "Laravel (laravel-api, LaravelShop, LaravelBlog), PHP 8.x, production; REST API, PostgreSQL, Git (17 лет).",
+		Letter:   "Laravel (laravel-api, LaravelShop, LaravelBlog), PHP 8.x, production; REST API, PostgreSQL, Git (20 лет).",
 		Want:     "apply",
 	},
 

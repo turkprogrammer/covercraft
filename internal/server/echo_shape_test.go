@@ -234,7 +234,7 @@ func TestFitFixPromptDropsFullProfile(t *testing.T) {
 const echoProfileSrc = "# КАРТА МЕТРИК\n" +
 	"- 92% F1 — Fraud Detection Engine (чистый Go, антифрод)\n" +
 	"- 10 000 RPS — Stable ID (Kafka, 20+ воркеров)\n" +
-	"## 2. PHP — PRODUCTION (17 ЛЕТ ОПЫТА)\n" +
+	"## 2. PHP — PRODUCTION (20 ЛЕТ ОПЫТА)\n" +
 	"- **Symfony:** E-commerce-Lite (7.2, Hexagonal Architecture, DDD, TDD), Symfony-URL-Shortener (8.0, REST API, PHPUnit 13)\n" +
 	"## 5. DevOps / ИНФРАСТРУКТУРА\n" +
 	"- **Docker:** полный production-стек: API + PostgreSQL + Redis + Prometheus + Grafana\n"
@@ -273,7 +273,7 @@ func TestIsPromptEchoKeepsLetterLinesOutsideProfile(t *testing.T) {
 // регулярка считала только две, не достигая порога.
 func TestEchoSupersedesSingleHashHeadings(t *testing.T) {
 	letter := "# КАРТА МЕТРИК\n" +
-		"## 2. PHP — PRODUCTION (17 ЛЕТ ОПЫТА)\n" +
+		"## 2. PHP — PRODUCTION (20 ЛЕТ ОПЫТА)\n" +
 		"## 5. DevOps / ИНФРАСТРУКТУРА\n"
 	if !isPromptEcho(letter, "### Профиль\nсовсем другой текст\n", "", "") {
 		t.Errorf("эхо с одиночной «#» должно распознаваться структурно:\n%q", letter)
@@ -294,7 +294,7 @@ func TestFitVerdictSuppressedOnEcho(t *testing.T) {
 		ContextDir: dir,
 		LLMStream: func(ctx context.Context, system, user string, onDelta func(string)) (string, error) {
 			echo := "# КАРТА МЕТРИК\n- 10 000 RPS — Stable ID (Kafka, 20+ воркеров)\n" +
-				"## 2. PHP — PRODUCTION (17 ЛЕТ ОПЫТА)\n" +
+				"## 2. PHP — PRODUCTION (20 ЛЕТ ОПЫТА)\n" +
 				"- **Symfony:** E-commerce-Lite (7.2, Hexagonal), PHPUnit 13\n" +
 				"## 5. DevOps / ИНФРАСТРУКТУРА\n- **Docker:** production-стек: API + PostgreSQL + Redis\n"
 			onDelta(echo)

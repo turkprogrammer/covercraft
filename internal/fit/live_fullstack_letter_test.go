@@ -8,7 +8,7 @@ import "testing"
 //     осваивать медиа-конвейеры» — декларация готовности, не опыт;
 //   - fullstack-продукты ушли в «не закрыто ничем», хотя письмо перечислило
 //     Fraud Engine, Bundle ID, Domain ID, Geo-mapping с метриками.
-const fullstackLiveLetter = "**Fullstack и инфраструктура:** уверенно владею Git (17 лет), GitLab CI/CD, Docker Compose, systemd, PHP-фреймворки.\n" +
+const fullstackLiveLetter = "**Fullstack и инфраструктура:** уверенно владею Git (20 лет), GitLab CI/CD, Docker Compose, systemd, PHP-фреймворки.\n" +
 	"**AI Agents:** Tool Use (bash-конвейеры GeoMapping, LLM API), управление контекстом.\n" +
 	"**Адаптация под ваш стек:**\n" +
 	"- **Media / Video / Render pipelines:** опыт оптимизации обработки 10 000 RPS и гонок данных в Event-Driven системе (Stable ID); готовность осваивать медиа-конвейеры на базе инженерной дисциплины Go.\n" +
