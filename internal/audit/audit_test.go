@@ -22,6 +22,7 @@ func fullLetter(body string) string {
 }
 
 func TestCleanLetterPasses(t *testing.T) {
+	loadCandidateRules(t)
 	letter := `Здравствуйте! Меня заинтересовала ваша вакансия PHP-разработчик (Middle + / Senior).
 
 Чем могу быть полезен:
@@ -43,6 +44,7 @@ func TestCleanLetterPasses(t *testing.T) {
 }
 
 func TestFrameworkInStackFlagged(t *testing.T) {
+	loadCandidateRules(t)
 	letter := `Здравствуйте!
 
 Стек: Go, PHP, ML, Laravel, Symfony, Lumen, Yii2, Docker.`
@@ -98,6 +100,7 @@ func TestButPatternInGaps(t *testing.T) {
 }
 
 func TestMissingObligations(t *testing.T) {
+	loadCandidateRules(t)
 	// PHP-вакансия, но нет Symfony/Yii2/Lumen/PHPUnit/A-B/Fraud Engine/метрик.
 	letter := `Здравствуйте! Меня заинтересовала ваша вакансия PHP-разработчик (Middle + / Senior).
 
@@ -117,6 +120,7 @@ func TestMissingObligations(t *testing.T) {
 }
 
 func TestNoVacancySkipsObligationWarnings(t *testing.T) {
+	loadCandidateRules(t)
 	letter := `Здравствуйте! Стек: Go, PHP.` // голый текст без обязательств
 	r := Check(fullLetter(letter), "")
 	if !r.OK() {
@@ -125,6 +129,7 @@ func TestNoVacancySkipsObligationWarnings(t *testing.T) {
 }
 
 func TestGoPrimaryAllFiveServicesMandatory(t *testing.T) {
+	loadCandidateRules(t)
 	// GO-PRIMARY вакансия: пять Go-сервисов обязаны попасть в письмо.
 	// Письмо называет Fraud Engine, но молчит про остальные — аудит обязан
 	// назвать каждый теряемый сервис (закрывает рандомизацию сэмплов).
@@ -153,6 +158,7 @@ func TestGoPrimaryAllFiveServicesMandatory(t *testing.T) {
 }
 
 func TestGoPrimaryMandatoryNotAppliedToPhpHightload(t *testing.T) {
+	loadCandidateRules(t)
 	// PHP-primary highload-вакансия: чужие Go-сервисы не навязываются,
 	// даже если в вакансии есть сигналы highload (см. TestCleanLetterPasses).
 	vacancy := "Ищем PHP-разработчика (Senior). Высоконагруженные модули, A/B тесты."
@@ -177,6 +183,7 @@ func TestGoPrimaryMandatoryNotAppliedToPhpHightload(t *testing.T) {
 }
 
 func TestStackLineVariants(t *testing.T) {
+	loadCandidateRules(t)
 	// Жирный маркер «**Стек:**» тоже должен ловиться.
 	letter := "Что-то выше.\n**Стек:** Go, PHP, ML, Laravel."
 	r := Check(letter, "")
@@ -204,6 +211,7 @@ func TestDuplicateTechInBulletsAndGaps(t *testing.T) {
 }
 
 func TestMetricAttributionWrongProject(t *testing.T) {
+	loadCandidateRules(t)
 	// «155+ тестов» при PHPUnit без Go-контекста — ошибка атрибуции.
 	letter := `Чем могу быть полезен:
 • Тесты: PHPUnit + TDD (155+ тестов), PHPStan Level 6.`
@@ -215,6 +223,7 @@ func TestMetricAttributionWrongProject(t *testing.T) {
 }
 
 func TestMetricAttributionCorrectProject(t *testing.T) {
+	loadCandidateRules(t)
 	letter := `Чем могу быть полезен:
 • Go и highload: Fraud Engine (Random Forest на чистом Go, 92% F1, P95 < 4.2ms), 155+ тестов.`
 	r := Check(letter, "")
@@ -297,6 +306,7 @@ Go, PHP, ML, PostgreSQL, Redis, Kafka, ClickHouse, Docker
 }
 
 func TestBareStackLineWithFrameworkFlagged(t *testing.T) {
+	loadCandidateRules(t)
 	// Голая строка стека (без «Стек:») с фреймворками тоже должна ловиться.
 	letter := `Чем могу быть полезен:
 • Что-то.
@@ -361,6 +371,7 @@ func TestAffirmativeTechInGapsStillWarns(t *testing.T) {
 // проектом», «Fraud Engine отсутствует»). Полное название проекта —
 // легитимный владелец.
 func TestFraudDetectionEngineCountsAsOwner(t *testing.T) {
+	loadCandidateRules(t)
 	letter := `• Мой Fraud Detection Engine на чистом Go обеспечивает 92% F1 и 1000+ RPS при P95 < 4.2ms.`
 	r := Check(letter, "требуются навыки highload разработки")
 	got := strings.Join(r.Warnings, "\n")
@@ -376,6 +387,7 @@ func TestFraudDetectionEngineCountsAsOwner(t *testing.T) {
 // секция адаптации, финальная строка, строка контактов, префикс стека и
 // запрет самоуничижительного начала строки пробела.
 func TestV4VerbatimObligations(t *testing.T) {
+	loadCandidateRules(t)
 	vac := "Ищем Go-разработчика. Требуется Kafka, PostgreSQL, Kubernetes."
 	clean := "Go: Fraud Engine (multi-tenancy), Stable ID (Kafka, 10 000 RPS), Bundle ID (760–850 эл/с), Domain ID (329 847), Geo-mapping (гео-кластеризация).\n" +
 		"Адаптация под ваш стек: Kubernetes не эксплуатировал — опыт Docker Compose переносится.\n" +
@@ -387,10 +399,56 @@ func TestV4VerbatimObligations(t *testing.T) {
 	}
 
 	missing := Check("Go: Fraud Engine. Kubernetes не эксплуатировал.", vac).Warnings
-	for _, want := range []string{"финальная строка", "контакты", "Стек:", "Адаптация"} {
+	// Контакты — не здесь: Check профиля не видит, а требовать их у того, у
+	// кого в context/ их нет, значит заставлять модель выдумывать (v4 §2.6).
+	for _, want := range []string{"финальная строка", "Стек:", "Адаптация"} {
 		if !strings.Contains(strings.Join(missing, " "), want) {
 			t.Errorf("ожидал замечание про %q, получено: %v", want, missing)
 		}
+	}
+
+	// Оборудование и протоколы — не заявка на инструмент (живая проба на
+	// инородном профиле, сентябрь 2026), а выдуманный инструмент — по-прежнему.
+	for _, ordinary := range []string{
+		"Нагрузка на CPU: 30 000 RPS, память 8 GB RAM, хранение на SSD.",
+		"API отдаётся по HTTP, конфигурация в YAML, сборка в CI.",
+	} {
+		if w := CheckInfraClaims(ordinary, "Java, Spring Boot, Kafka, PostgreSQL."); len(w.Warnings) > 0 {
+			t.Errorf("обычный словарь не должен читаться как заявка: %v", w.Warnings)
+		}
+	}
+	if w := CheckInfraClaims("Опыт с DWH и ClickHouse.", "Java, Spring Boot."); len(w.Warnings) == 0 {
+		t.Error("выдуманный инструмент вне профиля обязан ловиться")
+	}
+
+	// Русские слова в регуляках аудита: \w, \W, \b и [[:alpha:]] в Go
+	// работают только по ASCII, поэтому после кириллицы они не срабатывают
+	// и заявка «искусственный интеллект» проходила молча.
+	if !aiToolClaimRe.MatchString("Опыт с искусственным интеллектом в разработке.") {
+		t.Error("«искусственный интеллект» должен распознаваться как заявка ИИ-класса")
+	}
+	if !aiToolAnonFactRe.MatchString("ИИ-инструменты в разработке — постоянное использование.") {
+		t.Error("анонимизированный факт об ИИ-инструментах должен распознаваться")
+	}
+
+	// Секция «Адаптация под ваш стек» не заменяет строку «Стек: »: префикс
+	// искался в любом месте строки, и обязательная секция закрывала собой
+	// отсутствие строки стека (живая проба на чужом профиле, сентябрь 2026).
+	adaptOnly := "Go: highload-сервис.\nАдаптация под ваш стек: Kubernetes не эксплуатировал — есть Docker Compose."
+	if w := Check(adaptOnly, vac).Warnings; !strings.Contains(strings.Join(w, " "), "строки стека") {
+		t.Errorf("«Адаптация под ваш стек» не должна засчитываться за строку стека: %v", w)
+	}
+
+	// Контакты: профиль их содержит — письмо обязано содержать тоже.
+	noContacts := "Go: highload-сервис.\nАдаптация под ваш стек: Kubernetes не эксплуатировал.\n" +
+		"Стек: Go, Kafka\nБуду рад обсудить ваши задачи. Спасибо за внимание!"
+	profWith := "Telegram: @handle | https://example.org/\nСтек: Go, Kafka, PostgreSQL."
+	if w := CheckProfile(noContacts, profWith).Warnings; !strings.Contains(strings.Join(w, " "), "контакты") {
+		t.Errorf("в профиле есть контакты — письмо без них обязано получить замечание: %v", w)
+	}
+	profWithout := "Стек: Go, Kafka, PostgreSQL. Опыт: highload-сервис, Kafka."
+	if w := CheckProfile(noContacts, profWithout).Warnings; strings.Contains(strings.Join(w, " "), "контакты") {
+		t.Errorf("в профиле нет контактов — требовать их значит заставлять выдумать: %v", w)
 	}
 
 	// Самоуничижительное начало строки пробела — красный флаг Senior (v4 §4).
@@ -434,6 +492,7 @@ func TestSignatureContactsNotMistakenForName(t *testing.T) {
 // без профиля, поэтому выдумка проходила как есть, а требование «основы
 // веб-безопасности» оставалось незакрытым — то есть письмо врало и не помогало.
 func TestCheckProfileFlagsTermsAbsentFromProfile(t *testing.T) {
+	loadCandidateRules(t)
 	profile := "CMS Blog: Go (Hexagonal, httprouter) + React; SQLite, JWT, XSS sanitization, роли admin/editor. " +
 		"TLS/SSL: Caddy (Fraud Engine production). 152-ФЗ: PII-маскирование в логах."
 	letter := "Здравствуйте! Веб-безопасность: XSSI sanitization, JWT и basic auth-механизмами, " +
@@ -457,6 +516,121 @@ func TestCheckProfileFlagsTermsAbsentFromProfile(t *testing.T) {
 // TestCheckProfileEmptyProfileIsSilent — без профиля (нет context/*.md) audit
 // не может судить о выдумках: молчит, иначе каждое письмо получало бы тонну
 // ложных замечаний у пользователей без профиля.
+// TestCheckProfileDeclinedTermIsNotConfirmation — строка-запрет в профиле
+// («⛔ НЕ писать про Kafka») не должна превращаться в подтверждение факта.
+// Живой прогон на чужих профилях, сентябрь 2026: правила claimable рабочего
+// стиля карт фактов выключали проверку на самих запрещённых терминах, и
+// письмо, заявившее Kafka как свой инструмент, проходило молча.
+func TestCheckProfileDeclinedTermIsNotConfirmation(t *testing.T) {
+	t.Cleanup(resetDefaults)
+	// Профиль отрицает Kafka и утверждает про другое.
+	profile := "Python 3.11, PyTorch, Celery, MLflow.\n" +
+		"- ⛔ НЕ писать про Kafka, Airflow, Spark, dbt: оркестрация только Celery."
+	setClaimableTerms(t, claimableTerm{pat: "Kafka", msg: "«Kafka» заявлен, а в профиле его нет"})
+	// Письмо заявляет Kafka утвердительно — это выдумка, должна ругаться.
+	claimed := "Здравствуйте! Опыт работы с Kafka: consumer groups, партиционирование, брокеры."
+	if r := CheckProfile(claimed, profile); len(r.Warnings) == 0 {
+		t.Error("запрет в профиле не должен считаться подтверждением факта: письмо заявило Kafka — нужны замечания")
+	}
+	// Честный пробел — не заявка, даже если термин в письме назван.
+	gap := "Здравствуйте! Опыта с Kafka нет: готов освоить под ваш стек."
+	if r := CheckProfile(gap, profile); len(r.Warnings) != 0 {
+		t.Errorf("честно названный пробел ругаться не должен, получили: %v", r.Warnings)
+	}
+}
+
+// TestContainsTermWordBoundary — термин ищется как отдельное слово, а не как
+// подстрока: «CLI» не должен совпадать с «ClickHouse» и «Kafka» — с
+// «Kafka-флоу» (там совпадение настоящее).
+func TestContainsTermWordBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		hay, term string
+		want      bool
+	}{
+		{"реальные из ClickHouse для приёмки", "CLI", false},
+		{"mt: Go Runtime Tuner CLI", "CLI", true},
+		{"- Kafka-флоу обучения", "Kafka", true},
+		{"- НЕ заявлять про Kafka", "Kafka", true},
+		{"анонимноkafka", "Kafka", false},
+	} {
+		if got := containsTerm(tc.hay, tc.term); got != tc.want {
+			t.Errorf("containsTerm(%q, %q) = %v, ждали %v", tc.hay, tc.term, got, tc.want)
+		}
+	}
+}
+
+// TestCheckProfileBulletLabelIsNotClaim — термин в заголовке буллета при
+// фактически обратном содержании («GraphQL: работал исключительно с REST»)
+// не выдумка. Живой прогон на чужом профиле, сентябрь 2026: слово «работал»
+// рядом с заголовком давало две выдумки подряд — из claimableTerms и из
+// CamelCase-guard.
+func TestCheckProfileBulletLabelIsNotClaim(t *testing.T) {
+	setClaimableTerms(t, claimableTerm{pat: "GraphQL", msg: "«GraphQL» заявлен, а в профиле его нет"})
+	profile := "React 18, TypeScript, TanStack Query, Jest, Playwright.\n- ⛔ НЕ писать про GraphQL, Next.js, MobX."
+	letter := "Здравствуйте!\n*   **GraphQL:** работал исключительно с REST API (TanStack Query); " +
+		"понимание схем данных позволит быстро перейти на Apollo.\n\nС уважением,"
+	if r := CheckProfile(letter, profile); len(r.Warnings) != 0 {
+		t.Errorf("термин в заголовке при обратном содержании — не выдумка, получили: %v", r.Warnings)
+	}
+	// А вот настоящая заявка GraphQL как своего опыта — ругаться обязана.
+	claim := "Здравствуйте! Опыт разработки схем GraphQL, запросы и мутации, Apollo Client.\n\nС уважением,"
+	if r := CheckProfile(claim, profile); len(r.Warnings) == 0 {
+		t.Error("заявленный опыт GraphQL без факта в профиле должен ругаться")
+	}
+}
+
+// TestClaimPositivelyVsVacancyEcho — термин в письме: заявление это или цитата
+// требования вакансии. Живой прогон на трёх чужих профилях (сентябрь 2026):
+// требование, процитированное в заголовке буллета, и мета-ссылка на вакансию
+// читались как выдумка — 6 ложных замечаний на трёх письмах.
+func TestClaimPositivelyVsVacancyEcho(t *testing.T) {
+	profile := "React 18, TypeScript, Vite, Redux Toolkit, TanStack Query, Jest, Playwright, Docker Compose.\n" +
+		"- ⛔ НЕ писать про GraphQL, Next.js, MobX, DWH."
+	setClaimableTerms(t,
+		claimableTerm{pat: "GraphQL", msg: "GraphQL выдуман"},
+		claimableTerm{pat: "MobX", msg: "MobX выдуман"},
+		claimableTerm{pat: "Next.js", msg: "Next.js выдуман"},
+		claimableTerm{pat: "DWH", msg: "DWH выдуман"},
+		claimableTerm{pat: "Kubernetes", msg: "Kubernetes выдуман"},
+	)
+	cases := []struct {
+		name   string
+		letter string
+		want   bool // ждём замечание
+	}{
+		{"перечисление в заголовке", "Здравствуйте!\n*   **Redux Toolkit или MobX, React Query:** " +
+			"состояние через Redux Toolkit и TanStack Query.\nС уважением,", false},
+		{"через слэш в заголовке", "Здравствуйте!\n*   **Jenkins/Docker:** пайплайны в Jenkins.\nС уважением,", false},
+		{"через запятую в заголовке", "Здравствуйте!\n*   **Docker, Kubernetes (желательно):** " +
+			"использовал локально для тестирования.\nС уважением,", false},
+		{"мета-ссылка на вакансию", "Здравствуйте! В вакансии указаны Next.js (SSR) и GraphQL как обязательные.\n" +
+			"У меня в опыте их нет, поэтому здесь пробел.\nС уважением,", false},
+		{"будущее действие", "Здравствуйте!\n*   Kubernetes: развёртывание через Docker Compose, могу перейти на K8s.\n" +
+			"С уважением,", false},
+		{"выдумка без глагола", "Здравствуйте!\n*   **Доступность:** DWH LCP 1.4 с, WCAG 2.1 AA.\nС уважением,", true},
+		{"выдумка с глаголом", "Здравствуйте!\n*   Опыт с GraphQL: схемы, запросы, мутации.\nС уважением,", true},
+	}
+	for _, tc := range cases {
+		got := len(CheckProfile(tc.letter, profile).Warnings) > 0
+		if got != tc.want {
+			t.Errorf("%s: замечание=%v, ждали %v (письмо: %q)", tc.name, got, tc.want, tc.letter)
+		}
+	}
+}
+
+// TestNegRegexHasNoEmptyAlternative — страховка от класса регрессий, который
+// стоил двух кругов: висячая «|» в регуляторе создаёт пустую альтернативу, и
+// regexp.MatchString совпадает НУЛЕВОЙ длиной в любой точке — проверка
+// включается целиком или выключается целиком, молча.
+func TestNegRegexHasNoEmptyAlternative(t *testing.T) {
+	if claimPositively("XSSI sanitization", "XSSI") != true {
+		t.Error("заявление без глагола должно считаться заявлением")
+	}
+	if claimPositively("", "XSSI") {
+		t.Error("пустое письмо не может содержать заявление")
+	}
+}
+
 func TestCheckProfileEmptyProfileIsSilent(t *testing.T) {
 	r := CheckProfile("Веб-безопасность: XSSI sanitization, basic auth, Hydra.", "")
 	if len(r.Warnings) != 0 {
@@ -757,4 +931,18 @@ func TestPluralWordsInVolumeMessage(t *testing.T) {
 			t.Errorf("дубль слова «требований»: %q", w)
 		}
 	}
+}
+
+// setClaimableTerms — подменить список заявляемых терминов на время теста
+// (после него generic-пустой список, как у пользователя без .audit-rules.md).
+func setClaimableTerms(t *testing.T, terms ...claimableTerm) {
+	t.Helper()
+	rulesMu.Lock()
+	claimableTerms = terms
+	rulesMu.Unlock()
+	t.Cleanup(func() {
+		rulesMu.Lock()
+		resetDefaults()
+		rulesMu.Unlock()
+	})
 }

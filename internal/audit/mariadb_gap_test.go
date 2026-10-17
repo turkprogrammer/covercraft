@@ -13,6 +13,7 @@ import (
 // хуже честного признания — перверсия стимулов, которую аудит обязан
 // ловить детерминированно.
 func TestMariaDBGapMustBeNamedInLetter(t *testing.T) {
+	loadCandidateRules(t)
 	vacancy := "Ключевые навыки: PostgreSQL, MySQL, MariaDB, Kafka."
 	silent := "Чем могу быть полезен:\n- **Базы данных:** PostgreSQL (глубокое знание), MySQL 8.0.\n\nАдаптация под ваш стек:\n- Kubernetes не эксплуатировал — готов освоить.\n\nСтек: Go, PostgreSQL, MySQL, Kafka"
 	gap := "Чем могу быть полезен:\n- **Базы данных:** PostgreSQL (глубокое знание), MySQL 8.0.\n\nАдаптация под ваш стек:\n- MariaDB: PostgreSQL/MySQL покрывают реляционные сценарии; MariaDB — естественное расширение, готов освоить оперативно.\n\nСтек: Go, PostgreSQL, MySQL, Kafka"

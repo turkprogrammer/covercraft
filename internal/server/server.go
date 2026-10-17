@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -641,6 +642,29 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request) {
 	// req.DropSections, если профиль правили после compose); попадает в
 	// sseDone, чтобы UI показывал факт, а не намерение композера.
 	applied := cover.AppliedDrops(h.cfg.ContextDir, req.DropSections)
+
+	// Правила аудита: данные профиля. Встроенных списков в коде нет
+	// (кандидат-факты — только в .audit-rules.md), поэтому файл — не
+	// ускорение, а условие работы профильных проверок: обязательства по
+	// фактам, атрибуция метрик, запрет чужого стека, claimable-термины.
+	// Вызывается до streamGenerate: постпроверка (audit.Check*/CheckProfile)
+	// внутри него читает уже загруженные срезы.
+	if h.cfg.ContextDir != "" {
+		// Отсутствие файла не ошибка парсинга, поэтому LoadProfileRules
+		// вернёт nil и промолчит — предупреждаем здесь, иначе выключенная
+		// защита от фабрикации выглядела бы как штатная работа.
+		if _, err := os.Stat(filepath.Join(h.cfg.ContextDir, audit.RulesFilename)); err != nil {
+			slog.Warn("audit rules: "+audit.RulesFilename+" не найден — профильные проверки аудита "+
+				"выключены (кандидат может заявить несуществующие факты); скопируйте "+
+				"docs/templates/.audit-rules.md в каталог контекста",
+				"dir", h.cfg.ContextDir, "path", filepath.Join(h.cfg.ContextDir, audit.RulesFilename))
+		}
+		// Ошибка парсера не блокирует генерацию: правила остаются пустыми,
+		// причина — в логе.
+		if err := audit.LoadProfileRules(h.cfg.ContextDir); err != nil {
+			slog.Warn("audit rules: using empty rules", "dir", h.cfg.ContextDir, "err", err)
+		}
+	}
 
 	streamGenerate(w, ctx, streamParams{Mode: req.Mode,
 		fn:          h.cfg.LLMStream,

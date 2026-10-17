@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/turkprogrammer/covercraft/internal/audit"
 )
 
 // setConfigDir направляет os.UserConfigDir во временную папку теста.
@@ -122,5 +124,40 @@ func TestDefaultPromptPrioritizesMustHaveOverLength(t *testing.T) {
 	}
 	if strings.Contains(p, "2–3 довода") {
 		t.Error("жёсткое «2–3 довода» возвращено — оно резало must-have")
+	}
+}
+
+// TestDefaultSystemPromptCoversAuditContract — дефолтный промпт обязан
+// называть дословно всё, что аудит проверяет жёстко. Расхождение было
+// живым: аудит требовал контакты, строку «Стек: » и финальную фразу, которых
+// промпт не просил, и автоправка зацикливалась (прогон на чужих профилях,
+// сентябрь 2026). Список контракта живёт в audit, чтобы не расходился снова.
+func TestDefaultSystemPromptCoversAuditContract(t *testing.T) {
+	prompt := strings.ToLower(DefaultSystemPrompt)
+	for _, marker := range audit.PromptMarkers() {
+		if !strings.Contains(prompt, strings.ToLower(marker)) {
+			t.Errorf("промпт не упоминает обязательный маркер %q — аудит будет ругаться на то, чего не просят", marker)
+		}
+	}
+}
+
+// TestAuditContractEntriesAreEnforced — каждая запись контракта обязана быть
+// не просто словом в промпте, а реальной проверкой аудита.
+func TestAuditContractEntriesAreEnforced(t *testing.T) {
+	bare := "Go: highload-сервис. Kubernetes не эксплуатировал."
+	// Контакты проверяет CheckProfile и только когда они есть в профиле, так
+	// что контракт собираем из обоих вызовов.
+	// Лимит слов срабатывает только на длинном письме: 5 слов × 60 = 300 при
+	// базовом потолке 250. Вакансия не про Go — у GO-PRIMARY потолок 400, и
+	// письмо такой длины прошло бы молча.
+	long := "Python: Kafka.\n" + strings.Repeat("факт про FastAPI и PostgreSQL. ", 60)
+	got := strings.Join(audit.Check(bare, "Ищем Go-разработчика.").Warnings, " ") +
+		" " + strings.Join(audit.CheckProfile(bare,
+		"Telegram: @handle\nСтек: Go, Kafka.").Warnings, " ") +
+		" " + strings.Join(audit.Check(long, "Ищем Python-разработчика. Требуется FastAPI, PostgreSQL.").Warnings, " ")
+	for _, c := range audit.PromptContract {
+		if !strings.Contains(got, c.Warn) {
+			t.Errorf("контракт %q: аудит не выдаёт %q на заведомо неполном письме", c.Key, c.Warn)
+		}
 	}
 }

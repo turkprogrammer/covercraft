@@ -76,61 +76,35 @@ var foreignGapTerms = []string{
 	"grafana", "airflow", "rabbitmq",
 }
 
-// stackForbidden — всё, что запрещено в строке стека (правила промпта v4.1):
-// фреймворки, инструменты тестирования/анализа, ADR, non-tech термины.
-var stackForbidden = []string{
-	"laravel", "symfony", "yii2", "lumen",
-	"phpunit", "phpstan", "xdebug", "rector",
-	"adr", "rest", "graphql", "grpc",
+// stackForbidden — слова, запрещённые в строке стека (правила промпта:
+// фреймворки, инструменты тестирования/анализа, ADR, non-tech термины).
+// Встроенный дефолт — generic (пустой список): собственный список кандидата
+// загружается из context/.audit-rules.md (## stackForbidden); тестовая
+// фикстура — testdata/candidate-rules. Кандидата-данных в коде нет (DoD «grep-0»).
+func defaultStackForbidden() []string {
+	return nil
 }
+
+var stackForbidden = defaultStackForbidden()
 
 // metricRules — метрики профиля и их проекты-владельцы. Если метрика
 // появилась в письме рядом с чужим проектом (и без своего) — предупреждение
 // о проверке атрибуции: модель при автоправке склеивает соседние факты
-// (был случай: «PHPUnit + TDD (155+ тестов)», где 155+ — тесты Go-проекта).
+// (метрика может оказаться приписана чужому проекту).
+// Встроенный дефолт — generic (пустой): метрики кандидата загружаются
+// из context/.audit-rules.md (## metricRules); тестовая фикстура —
+// testdata/candidate-rules.
 type metricRule struct {
 	metric *regexp.Regexp
 	owners []*regexp.Regexp // при ком хотя бы одном метрика легитимна
 	fact   string
 }
 
-var metricRules = []metricRule{
-	{
-		metric: mustRE(`(?i)155\+`),
-		owners: []*regexp.Regexp{mustRE(`(?i)fraud( detection)? engine|go-проект|go projects`)},
-		fact:   "155+ тестов — Go-проект Fraud Engine; не атрибутируй их PHPUnit/PHP-тестам",
-	},
-	{
-		metric: mustRE(`(?i)92\s?% ?f1`),
-		owners: []*regexp.Regexp{mustRE(`(?i)fraud( detection)? engine`)},
-		fact:   "92% F1 — только Fraud Engine",
-	},
-	{
-		metric: mustRE(`(?i)329[, ]?847`),
-		owners: []*regexp.Regexp{mustRE(`(?i)domain id`)},
-		fact:   "329 847 — только Domain ID",
-	},
-	{
-		metric: mustRE(`(?i)416k\+`),
-		owners: []*regexp.Regexp{mustRE(`(?i)domain id`)},
-		fact:   "416K+ доменов — только Domain ID",
-	},
-	{
-		metric: mustRE(`(?i)760[–-]850`),
-		owners: []*regexp.Regexp{mustRE(`(?i)bundle id`)},
-		fact:   "760–850 эл/с — только Bundle ID",
-	},
-	{
-		metric: mustRE(`(?i)(p95[^.\n]{0,12}4\.2|4\.2 ?ms)`),
-		owners: []*regexp.Regexp{mustRE(`(?i)fraud( detection)? engine`)},
-		fact:   "P95 < 4.2ms — только Fraud Engine",
-	},
-	{
-		metric: mustRE(`(?i)(10 ?000 rps|10k rps)`),
-		owners: []*regexp.Regexp{mustRE(`(?i)stable id`)},
-		fact:   "10 000 RPS — только Stable ID",
-	},
+func defaultMetricRules() []metricRule {
+	return nil
 }
+
+var metricRules = defaultMetricRules()
 
 // checkMetricAttribution — линейная проверка: метрика должна стоять в той же
 // строке, что и её проект-владелец. Строки писем короткие и одно-темные,
@@ -170,98 +144,16 @@ type obligation struct {
 	fact string         // человекочитаемое имя факта
 }
 
-var obligations = []obligation{
-	{
-		need: mustRE(`(?i)(a/b|ab[- ]тест|эксперимент|оценк\w* эффект|go/no-go)`),
-		has:  mustRE(`(?i)a/?b`),
-		fact: "A/B тестирование (Stable ID: traffic split 50/50, метрики P/R/F1) — вакансия требует оценки эффекта",
-	},
-	{
-		need: mustRE(`(?i)php.*(senior|middle)|laravel|symfony|bitrix|битрикс`),
-		has:  mustRE(`(?i)symfony`),
-		fact: "PHP-primary: Symfony (E-commerce-Lite 7.2, URL-Shortener 8.0) обязан быть в буллетах",
-	},
-	{
-		need: mustRE(`(?i)php.*(senior|middle)|laravel|symfony|bitrix|битрикс`),
-		has:  mustRE(`(?i)\byii2\b|yii2[a-z]`), // «yii2» или проект «yii2filmcatalog»
-		fact: "PHP-primary: Yii2 (коммерческий production) обязан быть в буллетах",
-	},
-	{
-		need: mustRE(`(?i)highload|высоконагруж|нагрузк|latency|производительност|p95|p99|rps`),
-		has:  mustRE(`(?i)fraud( detection)? engine`),
-		fact: "Highload-требование: Fraud Engine (92% F1, P95 < 4.2ms) — доказательная база",
-	},
-	{
-		need: mustRE(`(?i)highload|высоконагруж|go-primary|нагрузк|latency|производительност|p95|p99|rps`),
-		has:  mustRE(`(?i)(92\s?%|4\.2\s?ms|10\s?000|10 000)`),
-		fact: "Highload-требование: метрики профиля (92% F1 / P95 < 4.2ms / 10 000 RPS) отсутствуют",
-	},
-	{
-		// Живые кейсы (октябрь 2026, agnes-2.5-flash / mistral-large-4.0):
-		// письмо перечисляет 5 ML-сервисов внутри буллета «Go и highload» —
-		// fit засчитывает «ML-модели» по концепту, вердикт Apply, и письмо
-		// уходит без выделенного ML-блока, который требует эталон.
-		// Требование ML в вакансии → отдельный буллет с ML обязателен.
-		// Обязательство: ML-блок в письме обязан быть отдельным буллетом,
-		// и его заголовок — жирный или нет. Реальный кейс (октябрь 2026):
-		// модель писала «- ML/GenAI in production: …» без жирности, и
-		// строгая проверка `\*\*` роняла требование, хотя ML-буллет физически
-		// в письме есть. Принимаем и жирный (`**ML…**`), и незажирный
-		// (`- ML…:`) заголовок — главное, что ML выделен отдельным пунктом.
-		need: mustRE(`(?i)ml[- ]?модели|машинн.{0,10}обучени|machine.?learning|\bML\b|genai|llm|нейросет|нейронн`),
-		has:  mustRE(`(?i)(?:^|\n)\s*[-*•]\s*(?:\*\*)?[^*\n]*(?:\bml\b|машинн|genai|генеративн)[^*\n]*\s*:`),
-		fact: "ML-модели — отдельный буллет с ML/GenAI-опытом (5 production-сервисов: Fraud Engine, Stable ID, Bundle ID, Domain ID, Geo-mapping) обязан быть в письме, перечисление ML внутри Go-буллета не заменяет его",
-	},
-	{
-		// Живой кейс paste_8 (октябрь 2026): вакансия называет MariaDB
-		// must-have навыком, письмо о нём молчит — требование падает в
-		// hard missing, хотя эталон трактует тот же пробел честно, в
-		// секции «Адаптация под ваш стек». Молчание хуже честного
-		// признания: аудит ловит это детерминированно.
-		need: mustRE(`(?i)mariadb`),
-		has:  mustRE(`(?i)mariadb`),
-		fact: "MariaDB назван в навыках вакансии — письмо обязано закрыть его фактом или честным пробелом в секции «Адаптация под ваш стек»",
-	},
-	{
-		// GO-PRIMARY/highload: пять Go-сервисов обязаны попасть в письмо.
-		// Каждое имя — отдельная проверка, чтобы аудит называл теряемый факт
-		// точно. Обязательство закрывает рандомизацию: автоправка возвращает
-		// сервис, который модель случайно срезала в текущем сэмпле. Триггер —
-		// роль go-primary в тексте вакансии (а не любой highload): PHP-письму
-		// чужие Go-сервисы не навязываются (см. TestCleanLetterPasses).
-		need: mustRE(`(?i)(\bgo\b|\bgolang\b|go[- ]?primary|go[- ]?(разраб|backend|middle|senior|junior|инжен))`),
-		has:  mustRE(`(?i)Stable ID`),
-		fact: "Stable ID (трафик-сплит 50/50, 10 000 RPS) — GO-PRIMARY обязан быть в письме",
-	},
-	{
-		need: mustRE(`(?i)(\bgo\b|\bgolang\b|go[- ]?primary|go[- ]?(разраб|backend|middle|senior|junior|инжен))`),
-		has:  mustRE(`(?i)Bundle ID`),
-		fact: "Bundle ID (760–850 эл/с) — GO-PRIMARY обязан быть в письме",
-	},
-	{
-		need: mustRE(`(?i)(\bgo\b|\bgolang\b|go[- ]?primary|go[- ]?(разраб|backend|middle|senior|junior|инжен))`),
-		has:  mustRE(`(?i)Domain ID`),
-		fact: "Domain ID (329 847, 416K+ доменов) — GO-PRIMARY обязан быть в письме",
-	},
-	{
-		need: mustRE(`(?i)(\bgo\b|\bgolang\b|go[- ]?primary|go[- ]?(разраб|backend|middle|senior|junior|инжен))`),
-		has:  mustRE(`(?i)Geo-mapping`),
-		fact: "Geo-mapping (гео-кластеризация трафика) — GO-PRIMARY обязан быть в письме",
-	},
-	{
-		// PHPUnit + TDD обязателен ТОЛЬКО для PHP-primary. Слово «тест» в
-		// Go-вакансии не запускает это правило: для Go-primary PHPUnit в
-		// письме запрещён (правило промпта), тесты закрываются «155+ тестов».
-		need: mustRE(`(?i)(php.*(senior|middle)|laravel|symfony|bitrix|битрикс)`),
-		has:  mustRE(`(?i)phpunit`),
-		fact: "PHP-primary: PHPUnit + TDD обязателен в буллете",
-	},
-	{
-		need: mustRE(`(?i)php.*(senior|middle)|laravel|symfony`),
-		has:  mustRE(`(?i)lumen`),
-		fact: "Laravel/PHP-вакансия: Lumen обязателен в буллете",
-	},
+// defaultObligations — встроенные факт-обязательства. Generic (пустой список):
+// собственные обязательства кандидата (need/has/fact) загружаются из
+// context/.audit-rules.md (## obligations); тестовая фикстура —
+// testdata/candidate-rules. Механизм проверки обязательств универсален и
+// читает правила только из данных — кандидат-специфичных фактов в коде нет.
+func defaultObligations() []obligation {
+	return nil
 }
+
+var obligations = defaultObligations()
 
 func mustRE(s string) *regexp.Regexp { return regexp.MustCompile(s) }
 
@@ -277,6 +169,11 @@ func Check(letter, vacancy string) Result {
 // внешние проверки, менять их ради одного параметра незачем. nMust == 0
 // (разбор вакансии не удался) — базовый лимит, самое строгое поведение.
 func CheckWithMust(letter, vacancy string, nMust int) Result {
+	// Читает глобальные срезы правил (metricRules, stackForbidden,
+	// obligations) — под RLock, LoadProfileRules пишет под Lock.
+	rulesMu.RLock()
+	defer rulesMu.RUnlock()
+
 	var r Result
 	low := strings.ToLower(letter)
 
@@ -415,11 +312,10 @@ func CheckWithMust(letter, vacancy string, nMust int) Result {
 	if !strings.Contains(low, "буду рад обсудить") {
 		r.Warnings = append(r.Warnings, "нет обязательной строки: финальная строка «Буду рад обсудить… Спасибо за внимание!» — v4 §2.7")
 	}
-	// Контакты одной строкой: признаки, а не конкретные значения — контакты
-	// живут в приватном context/, и промпт вправе их поменять.
-	if !contactLineRe.MatchString(letter) {
-		r.Warnings = append(r.Warnings, "нет обязательной строки: контакты одной строкой (телефон/Telegram/сайт/репозиторий) — v4 §2.6")
-	}
+	// Контакты здесь НЕ проверяются: Check не видит профиль, а требовать
+	// строку контактов у пользователя, у которого в context/ их нет, значит
+	// заставлять модель выдумывать телефон или ник. Проверка переехала в
+	// CheckProfile и срабатывает только если контакты в профиле есть (v4 §2.6).
 	// Строка стека обязана иметь префикс «Стек: »: по нему пост-проверка
 	// отличает стек от буллета (v4 §2.5/§3).
 	if stackSectionOf(letter) == "" {
@@ -469,12 +365,24 @@ var contactLineRe = regexp.MustCompile(`(?im)^[\s>*\-•]*(?:\+\d|telegram\b|t\.
 // есть: голая строка стека без префикса не считается (v4 §2.5/§10).
 func stackSectionOf(letter string) string {
 	for _, line := range strings.Split(letter, "\n") {
+		// «Адаптация под ваш стек: …» — тоже строка про стек, и она же
+		// обязательная секция. Пока префикс искался в любом месте строки,
+		// секция адаптации засчитывалась за строку стека, и письмо без
+		// «Стек: » проходило молча (живая проба на чужом профиле,
+		// сентябрь 2026). Поэтому секция адаптации исключена явно.
+		if adaptationLineRe.MatchString(line) {
+			continue
+		}
 		if stackLineRe.FindStringIndex(line) != nil && strings.Contains(line, ":") {
 			return line
 		}
 	}
 	return ""
 }
+
+// adaptationLineRe — обязательная секция «Адаптация под ваш стек» в любой
+// разметке буллета.
+var adaptationLineRe = regexp.MustCompile(`(?i)^\W*адаптация`)
 
 // nameIntroRe — «Меня зовут …». Имени кандидата в профиле нет, поэтому такая
 // фраза — чистая фабрикация: живой случай — модель взяла имя из
@@ -622,20 +530,25 @@ func gapSectionIndex(letter string) int {
 // auth, CSRF-токены) из соседних технологий, и именно там это не проверял
 // прежний blacklist-подход «слова, которые нельзя». Список расширяемый, но
 // короткий: каждый элемент проверяется на реальном кейсе.
-var claimableTerms = []struct {
+// claimableTerm — термин, который письмо может заявить как свой опыт, а
+// профиль обязан подтверждать.
+type claimableTerm struct {
 	// pat — как термин выглядит в письме.
 	pat string
 	// profileAlt — что искать в профиле (пусто = pat).
 	profileAlt string
 	msg        string
-}{
-	{"XSSI", "", "«XSSI sanitization» — в профиле такого факта нет (есть только XSS-санитизация в CMS Blog); это другая технология, проверь"},
-	{"basic auth", "", "«basic auth» заявлен как опыт, но в профиле его нет — убери или добавь факт в context/"},
-	{"CSRF", "", "«CSRF» заявлен как опыт — в профиле этого факта нет; не выдумывай защиту, которой не было"},
-	{"cookie", "", "«cookie» заявлены как опыт — в профиле этого факта нет"},
-	{"сесси", "", "«управление сессиями» заявлено как опыт — в профиле этого факта нет"},
-	{"Helmet", "", "«Helmet» заявлен как опыт — в профиле этого фреймворка нет"},
 }
+
+// defaultClaimableTerms — встроенные заявляемые термины. Generic (пустой):
+// собственные термины кандидата («термин» или «термин: авторское сообщение»)
+// загружаются из context/.audit-rules.md (## claimableTerms); тестовая
+// фикстура — testdata/candidate-rules.
+func defaultClaimableTerms() []claimableTerm {
+	return nil
+}
+
+var claimableTerms = defaultClaimableTerms()
 
 // infraTechRe — кандидаты в «инфраструктурном» классе: латинские слова с
 // внутренней заглавной (Tempo, Pyroscope, CloudNative, OpenTelemetry) либо из
@@ -657,22 +570,15 @@ var infraCamelRe = regexp.MustCompile(`\b[A-Z][a-z]+[A-Z][A-Za-z]*\b`)
 // Модель стабильно дорисовывает их в блоке «Адаптация под ваш стек», подгоняя
 // письмо под вакансию: живой кейс SRE (сентябрь 2026) — «Tempo, Pyroscope»,
 // «CNPG, Service Mesh», ни одного из них в context/*.md (0 вхождений).
-var infraDomainTerms = []string{
-	// ИИ-инструменты разработки. Живой кейс Fullstack Backend (сентябрь
-	// 2026): письмо писало «ИИ-инструменты (Cursor, Claude Code и аналоги) —
-	// ежедневная практика», в профиле их 0 вхождений. Как и Tempo/Pyroscope —
-	// модель дорисовывает «правдоподобное» из соседних технологий.
-	"Cursor", "Claude Code", "Copilot", "Windsurf", "Codeium", "Aider",
-	"ChatGPT", "Gemini", "Grok",
-	"Service Mesh", "servicemesh", "Istio", "Cilium", "Linkerd",
-	"Tempo", "Pyroscope", "Jaeger", "Zipkin",
-	"CloudNative-PG", "CloudNative", "Patroni", "Helm",
-	"VictoriaMetrics", "Thanos", "Mimir",
-	// Фронтенд/медиа-стек вакансий, которого в профиле нет (октябрь 2026).
-	// Convex/Remotion не ловятся CamelCase-guard'ом (нет второй заглавной),
-	// E2B — цифрой в имени, Expo — тем, что «экспо» есть внутри «экспорт».
-	"Convex", "Remotion", "E2B", "Expo", "React Native",
+// defaultInfraDomainTerms — встроенные доменные имена инфраструктуры.
+// Generic (пустой список): собственный список кандидата загружается из
+// context/.audit-rules.md (## infraDomainTerms); тестовая фикстура —
+// testdata/candidate-rules. CamelCase-guard универсален и читает списки из данных.
+func defaultInfraDomainTerms() []string {
+	return nil
 }
+
+var infraDomainTerms = defaultInfraDomainTerms()
 
 // infraCommonWords — обычные слова в именительном падеже, которые письмо
 // начинает с заглавной (первое слово буллета, «Managed», «Высоконагруженные»).
@@ -683,26 +589,39 @@ var infraCommonWords = map[string]bool{
 	"rust": true, "java": true,
 	"written": true, "built": true, "done": true, "плюс": true,
 	"bottleneck": true, "latency": true, "greeting": true, "hello": true,
+	// Оборудование, протоколы и форматы — обычный словарь письма, а не
+	// навык: CamelCase-guard ругался «CPU заявлен как свой инструмент» на
+	// инородном Java-профиле (живая проба, сентябрь 2026). Заявка, которую
+	// ловит guard, — это выдуманный ИНСТРУМЕНТ (DWH, Kafka, которого нет).
+	"cpu": true, "ram": true, "ssd": true, "hdd": true, "vcpu": true,
+	"http": true, "https": true, "rest": true, "json": true, "yaml": true,
+	"xml": true, "api": true, "sdk": true, "cli": true, "gui": true,
+	"ide": true, "ci": true, "tls": true, "ssl": true, "utf": true,
+	// Метрики и единицы измерения: «30 000 RPS», «8 GB RAM» — числа письма,
+	// а не инструменты (guard ругался «RPS заявлен как свой инструмент»).
+	"rps": true, "qps": true, "gb": true, "mb": true, "tb": true,
 }
 
 // infraNeutralWords — имена, которые не являются фактами о навыке: роли,
 // языки, сокращения. Всё прочее CamelCase сверяется с профилем.
-var infraNeutralWords = map[string]bool{
-	"sre": true, "go": true, "sql": true, "api": true, "http": true, "grpc": true,
-	"ci": true, "cd": true, "db": true, "tui": true, "sdk": true, "ide": true,
-	// Технологии, подтверждённые профилем и потому частые в письме. Guard и сам
-	// сверяется с профилем, но список не даёт тратить сверку на заведомо
-	// валидные слова. Сюда НЕЛЬЗЯ вносить сомнительные термины (Tempo,
-	// Pyroscope, Cilium): именно их письмо и выдумывает, и в списке они
-	// проходили бы молча — этот класс проверяется сравнением с профилем.
-	"prometheus": true, "grafana": true, "kafka": true, "redis": true,
-	"elasticsearch": true, "kibana": true, "docker": true, "caddy": true,
-	"postgresql": true, "clickhouse": true, "gitlab": true, "linux": true,
-	"nginx": true, "symfony": true, "php": true, "bash": true,
+// defaultInfraNeutralWords — встроенный whitelist нейтральных слов (роли,
+// языки, сокращения). Generic (пустой): собственный whitelist кандидата
+// загружается из context/.audit-rules.md (## infraNeutralWords); тестовая
+// фикстура — testdata/candidate-rules. Без whitelist'а guard сверяет с
+// профилем все доменные термины.
+func defaultInfraNeutralWords() map[string]bool {
+	return map[string]bool{}
 }
 
+var infraNeutralWords = defaultInfraNeutralWords()
+
 // infraDeclineRe — профиль называет термин, но отрицает работу с ним.
-var infraDeclineRe = regexp.MustCompile(`(?i)не работал|не применял|не использовал|не настраивал|не интегрировал|опыта нет|нет опыта|не знаком`)
+// Живой прогон на чужих профилях (сентябрь 2026): рабочий стиль карт фактов
+// запрещает через «⛔ НЕ писать про Kafka, Airflow, Spark» — прежние маркеры
+// такое вхождение не признавали, и термин, выдуманный письмом, проходил как
+// «подтверждённый профилем».
+var infraDeclineRe = regexp.MustCompile(`(?i)не работал|не применял|не использовал|не настраивал|не интегрировал|опыта нет|нет опыта|не знаком|` +
+	`⛔|не писать|не упоминать|не заявлять|запрещен|запрещён|не выдумыв|не занимался`)
 
 // profileDeclinesTerm — термин есть в профиле, но назван пробелом
 // («Service Mesh / Cilium / Linkerd / Istio: НЕ работал»). Заявлять его в
@@ -712,7 +631,7 @@ func profileDeclinesTerm(term, profile string) bool {
 	for _, c := range strings.FieldsFunc(lower, func(r rune) bool {
 		return r == '.' || r == ',' || r == ';' || r == '\n' || r == '(' || r == ')'
 	}) {
-		if !strings.Contains(c, strings.ToLower(term)) {
+		if !containsTerm(c, term) {
 			continue
 		}
 		// «Service Mesh / Cilium / Linkerd / Istio: НЕ работал» — список
@@ -726,36 +645,79 @@ func profileDeclinesTerm(term, profile string) bool {
 	return false
 }
 
+// isTermByte — часть идентификатора. Кириллица (UTF-8, байты >= 0x80) тоже
+// считается символом слова, иначе «CLI» нашлось бы внутри «ClickHouse».
+func isTermByte(b byte) bool {
+	return b == '_' || (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') ||
+		(b >= 'A' && b <= 'Z') || b >= 0x80
+}
+
+// containsTerm — вхождение термина как самостоятельного слова, а не как
+// подстроки. Живой кейс (сентябрь 2026): «CLI» совпадало с «ClickHouse»
+// внутри строки профиля, и проверка объявляла отвергнутый инструмент
+// отрицанием там, где отрицания не было.
+func containsTerm(hay, term string) bool {
+	n := strings.ToLower(term)
+	if n == "" {
+		return false
+	}
+	h := strings.ToLower(hay)
+	for i := 0; i < len(h); {
+		j := strings.Index(h[i:], n)
+		if j < 0 {
+			return false
+		}
+		s, e := i+j, i+j+len(n)
+		if (s == 0 || !isTermByte(h[s-1])) && (e == len(h) || !isTermByte(h[e])) {
+			return true
+		}
+		i = s + 1
+	}
+	return false
+}
+
 // claimPositively — термин заявлен в письме утвердительно, а не в клаузе с
 // отрицанием. «Нет прямого опыта с Tempo» — честно; «интегрируюсь в Tempo» —
 // заявление о своём инструменте, даже если в соседнем пункте пробел назван.
+// claimPositively — термин заявлен в письме как СВОЙ, а не в клаузе с
+// отрицанием. Проверка по глаголам («опыт», «работал») тут не годится:
+// письмо заявляет инструмент простым перечислением — «Веб-безопасность:
+// XSSI sanitization, JWT и basic auth» (живой кейс, сентябрь 2026), и без
+// глагола такой выдуманный факт проходил.
+//
+// Правило: термин упомянут и в его клаузе нет отрицания. Два исключения:
+//
+//   - цитата требования вакансии в заголовке буллета: «Redux Toolkit или MobX,
+//     React Query:», «Jenkins/GitLab CI:», «Docker, Kubernetes (желательно):» —
+//     дальше идёт содержание про другой инструмент, а термин merely назван;
+//   - мета-ссылка на вакансию: «в вакансии указаны Next.js и GraphQL».
+//
+// Наличие утверждения рядом с термином больше не требуется: перечисление
+// требований без глагола — тоже заявление, если это не цитата вакансии.
 func claimPositively(letter, term string) bool {
 	reTerm := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(term) + `[\w-]*`)
-	affirm := regexp.MustCompile(`(?i)интегриру|навык|опыт|работал|знаком|использ|уверен|владе|внедри|применя|эксплуатирую|понимани|` +
-		// Живая практика ИИ-инструментов выражалась словами «ежедневная практика»,
-		// «производственное применение», «автоматизирую с их помощью» — без слова
-		// «опыт». Без них Cursor/Claude Code проходили как неупомянутые, хотя
-		// письмо заявляло «ежедневная практика» (сентябрь 2026).
-		`практик|ежедневн|применяю|автоматизиру|пишу.{0,15}(с|в) них|работаю.{0,15}(с|в) них|`)
-	// Декларация понимания/готовности — не заявление о навыке, даже если
-	// профиль разрешает именно эту формулировку («допустимо «понимаю принципы
-	// WAL»»). Живой кейс: с расширением маркеров практики «понимаю» попало в
-	// affirm, и разрешённое мостом «понимаю принципы WAL» стало warning'ом
-	// о выдумке. Здесь важно отличать «заявляю опыт» от «делюсь мостом».
+	// Отрицание и «мост» — плюс живые формы из прогонов на чужих профилях.
 	neg := regexp.MustCompile(`(?i)пробел|нет прямого|не име|не работал|не использ|отсутствует|не знаком|ограничен|нет опыта|нет практического|не вносил|` +
+		// Отрицание с обратным порядком слов: «прямого опыта нет», «в опыте их
+		// нет», «у меня нет» (прогон на трёх чужих профилях, сентябрь 2026).
+		`опыта нет|в опыте[а-яё]*\s+(?:их\s+|его\s+|её\s+)?нет|у меня нет|нет в опыте|` +
+		// Мета-ссылка на вакансию: термин там назван, но как ТРЕБОВАНИЕ, а не
+		// как свой опыт («В вакансии указаны Next.js (SSR) и GraphQL»).
+		`в вакансии указан|в вакансии указан|в требованиях указан|требование (?:вакансии|роли)|необходимо[\w ]{0,12}(?:знание|опыт)|` +
+		// Грядущее действие: «могу перейти на K8s», «собираюсь внедрить» — план,
+		// а не состоявшийся опыт.
+		`могу перейти|перейду|собираюсь|планирую внедрить|намерева|хотел бы внедрить|` +
 		`понима[юе]|понимать|разбира[юесь]|готовност|готовост|способност|основан.{0,15}на |мост|принципы? .{0,10}(поним|работ)|` +
+		// «GraphQL: работал исключительно с REST API» — термин в заголовке,
+		// фактически отрицается (прогон на чужом профиле, сентябрь 2026).
+		`исключительно|` +
 		// «готова оперативно освоить ваш стек» — признание пробела, а не заявка
-		// опыта. Живой кейс Fullstack (октябрь 2026): без этой формы блок
-		// адаптации с перечислением чужого стека давал пачку ложных warning'ов.
+		// опыта (живой кейс Fullstack, октябрь 2026).
 		`готов[а-яё]*\s+(?:оперативно\s+|быстро\s+|легко\s+)?(?:освоить|осваивать|перенести|переносить|изучать|изучить|разобраться|углубиться)`)
-	positive := false
-	// Точка = конец клаузы только когда после неё пробел/конец/перенос
-	// (\s включает 	 и \n): точка внутри токена («sip.js», «go.mod»,
-	// адреса) НЕ разрывает предложение. Иначе «с WebRTC, sip.js и Asterisk
-	// не работал» резалось бы на «[с WebRTC, sip]» + «[js и Asterisk не
-	// работал]», отрицание уезжало во вторую клаузу, и честный пробел
-	// проходил как утвердительная заявка (живой кейс VoIP-вакансии,
-	// октябрь 2026).
+	// Заголовок-перечисление перед двоеточием: «X или Y», «X/Y», «X, Y».
+	echoListRe := regexp.MustCompile(`(?i)\sили\s|/|,`)
+	// Точка = конец клаузы только когда после неё пробел/конец/перенос: точка
+	// внутри токена («sip.js», «go.mod», адреса) НЕ разрывает предложение.
 	sentenceDot := regexp.MustCompile(`\.(?:\s+|$)`)
 	dotted := sentenceDot.ReplaceAllString(letter, "\n")
 	for _, c := range strings.FieldsFunc(dotted, func(r rune) bool {
@@ -767,11 +729,15 @@ func claimPositively(letter, term string) bool {
 		if neg.MatchString(c) {
 			continue
 		}
-		if affirm.MatchString(c) {
-			positive = true
+		// Двоеточие обязательно: без него «голова» — это вся клауза, и любая
+		// запятая внутри неё съедала бы настоящую выдумку.
+		if i := strings.IndexAny(c, ":："); i > 0 &&
+			containsTerm(c[:i], term) && echoListRe.MatchString(c[:i]) {
+			continue // цитата требования в заголовке буллета
 		}
+		return true
 	}
-	return positive
+	return false
 }
 
 // CheckInfraClaims — универсальный guard против выдуманных инструментов.
@@ -817,6 +783,10 @@ func stdlibQualifiedIdents(letter string) map[string]bool {
 var stdlibPkgs = regexp.MustCompile(`(?i)^(context|sync|fmt|os|io|net/http|net/url|strings|strconv|bytes|errors|sort|time|math|regexp|encoding/json|encoding/base64|bufio|log|path/filepath|runtime|reflect|slices|maps|cmp|iter|testing|atomic|sync/atomic|embed|crypto|hash|container/heap|math/rand|unicode|html|compress/gzip|io/ioutil)$`)
 
 func CheckInfraClaims(letter, profile string) Result {
+	// Читает infraDomainTerms/infraNeutralWords — под RLock.
+	rulesMu.RLock()
+	defer rulesMu.RUnlock()
+
 	var r Result
 	low := strings.ToLower(profile)
 	seen := map[string]bool{}
@@ -840,7 +810,7 @@ func CheckInfraClaims(letter, profile string) Result {
 		if !claimPositively(letter, term) {
 			return
 		}
-		if strings.Contains(low, key) && !profileDeclinesTerm(term, profile) {
+		if containsTerm(low, key) && !profileDeclinesTerm(term, profile) {
 			return
 		}
 		r.Warnings = append(r.Warnings, "«"+term+"» заявлен как свой инструмент/навык, "+
@@ -988,6 +958,35 @@ var persuasionRe = regexp.MustCompile(`(?i)(достаточно|хватает|
 	`покрыва[ет|ю] потребност|не догоняет критично|стоит вопроса|` +
 	`(опыт|стаж|знания|навыки).{0,40}(не помеша|не важн|второстепенн))`)
 
+// PromptContract — что аудит проверяет жёстко и что DefaultSystemPrompt
+// обязан называть дословно. Список один на оба пакета: пока эти строки
+// расходились, аудит ругался на отсутствие контактов, строки «Стек: » и
+// финальной фразы, которых дефолтный промпт не просил, — и автоправка
+// письма зацикливалась (живой прогон на чужих профилях, сентябрь 2026).
+//
+// Marker — литерал, который обязан встречаться в промпте; Warn — кусок
+// предупреждения, который обязан срабатывать в Check.
+var PromptContract = []struct {
+	Key    string
+	Marker string
+	Warn   string
+}{
+	{"adaptation", "Адаптация под ваш стек", "нет обязательной секции «Адаптация под ваш стек»"},
+	{"stack", "Стек: ", "нет строки стека с префиксом"},
+	{"closing", "Буду рад обсудить", "нет обязательной строки: финальная строка"},
+	{"contacts", "Контакты одной строкой", "нет обязательной строки: контакты одной строкой"},
+	{"wordlimit", "200 слов", "при лимите"},
+}
+
+// PromptMarkers — литералы контракта для проверки промпта (в tests и в UI).
+func PromptMarkers() []string {
+	out := make([]string, 0, len(PromptContract))
+	for _, c := range PromptContract {
+		out = append(out, c.Marker)
+	}
+	return out
+}
+
 // CheckProfile — дополнение к Check: сверяет заявленные в письме факты с
 // профилем. Черный список «запрещённых слов» тут не годится — выдумка
 // может называться как угодно, — поэтому проверка идёт по списку технических
@@ -1002,15 +1001,33 @@ var persuasionRe = regexp.MustCompile(`(?i)(достаточно|хватает|
 // пользователей без context/*.md каждое письмо иначе получило бы десятки
 // ложных замечаний.
 func CheckProfile(letter, profile string) Result {
+	// Читает claimableTerms/infra-списки — под RLock.
+	rulesMu.RLock()
+	defer rulesMu.RUnlock()
+
 	var r Result
 	if strings.TrimSpace(profile) == "" {
 		return r
 	}
 	low := strings.ToLower(letter)
 	prof := strings.ToLower(profile)
+	// Контакты обязательны только если они есть в профиле: иначе модель
+	// вынуждена сочинить телефон или ник, а это ровно та фабрикация, которую
+	// аудит ловит. Признаки, а не значения: контакты живут в приватном
+	// context/, и промпт вправе их переформатировать (v4 §2.6).
+	if contactLineRe.MatchString(profile) && !contactLineRe.MatchString(letter) {
+		r.Warnings = append(r.Warnings, "нет обязательной строки: контакты одной строкой (телефон/Telegram/сайт/репозиторий) — v4 §2.6")
+	}
 	for _, t := range claimableTerms {
 		needle := strings.ToLower(t.pat)
 		if !strings.Contains(low, needle) {
+			continue
+		}
+		// Честный пробел — не заявка. Раньше этот список смотрел только на
+		// наличие слова в письме, поэтому «Next.js: готов оперативно освоить»
+		// и «Celery как аналог Airflow» уезжали в варнинги. Тот же
+		// claimPositively, что у CamelCase-guard.
+		if !claimPositively(letter, t.pat) {
 			continue
 		}
 		// В самом профиле термин есть — значит, факт подтверждён, а письмо
@@ -1019,7 +1036,10 @@ func CheckProfile(letter, profile string) Result {
 		if t.profileAlt != "" {
 			search = strings.ToLower(t.profileAlt)
 		}
-		if strings.Contains(prof, search) {
+		// ...но профиль, который термин ОТРИЦАЕТ («⛔ НЕ писать про Kafka»),
+		// подтверждением не является: раньше такое вхождение глушило проверку
+		// целиком — запрет сам себя обезвреживал (живой прогон, сентябрь 2026).
+		if containsTerm(prof, search) && !profileDeclinesTerm(t.pat, profile) {
 			continue
 		}
 		r.Warnings = append(r.Warnings, t.msg)
@@ -1042,8 +1062,13 @@ func CheckProfile(letter, profile string) Result {
 // модель дописывает… ловится на интервью»), и Contains(prof, «cursor») дал бы
 // ложное «подтверждено».
 var (
+	// ВНИМАНИЕ, класс ловушки Go regexp: \w, \W, \b и [[:alpha:]] работают ТОЛЬКО
+	// по ASCII. После кириллицы \b не срабатывает никогда, а \w+ не находит
+	// «ы» — из-за этого «искусственный интеллект» не распознавался заявкой, а
+	// секция «Адаптация под ваш стек» не отличалась от буллета. Для русских
+	// слов используем \p{L} и явные классы [а-яё], а не \w и \b.
 	// aiToolClaimRe — заявка класса «ИИ-инструменты в работе» в письме.
-	aiToolClaimRe = regexp.MustCompile(`(?i)(ии[-\s]?инструмент|ии[-\s]?код|искусственн\w+ интеллект)`)
+	aiToolClaimRe = regexp.MustCompile(`(?i)(ии[-\s]?инструмент|ии[-\s]?код|искусственн\p{L}+ интеллект)`)
 	// aiToolDailyRe — признак ежедневного применения, а не разовой задачи.
 	aiToolDailyRe = regexp.MustCompile(`(?i)(ежедневн[а-яё]*[ \t]+практик[а-яё]*|ежедневно|кажд[а-яё]+ день)`)
 	// aiToolNames — подтверждение факта: конкретное имя инструмента в профиле
@@ -1056,7 +1081,7 @@ var (
 	// распознавался → генератор письма уходил в крайность «не использую ИИ-
 	// инструменты» и дисквалифицировал себя по must-have «опыт работы с
 	// AI-инструментами». Факт = анон-форма в профиле (вне запретных строк).
-	aiToolAnonFactRe = regexp.MustCompile(`(?i)ии[- ]?инструмент\w*.{0,80}(постоянн|активн|ежедневн|регулярн|применя|использую)`)
+	aiToolAnonFactRe = regexp.MustCompile(`(?i)ии[- ]?инструмент\p{L}*.{0,80}(постоянн|активн|ежедневн|регулярн|применя|использую)`)
 	// profileForbiddenMarkers — маркеры строки-запрета. Такой блок профиля
 	// запрещает заявку, а не подтверждает её: его надо вырезать перед сверкой.
 	profileForbiddenMarkers = regexp.MustCompile(`0 вхождений|НЕ заявлять|дописывает|ловится на интервью`)

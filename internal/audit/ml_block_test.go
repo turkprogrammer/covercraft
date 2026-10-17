@@ -12,6 +12,7 @@ import (
 // пользователя. Обязательство закрывает дырку детерминистически: автоправка
 // дописывает блок по замечанию «Потерян факт».
 func TestMLVacancyRequiresDedicatedMLBlock(t *testing.T) {
+	loadCandidateRules(t)
 	vacancy := `Ключевые навыки: PostgreSQL, Git, Golang, Docker, Kafka, Redis,
 RabbitMQ, HTTP, REST API, WebSocket, DevOps, Go от 3-х лет,
 Микросервисная архитектура, best practices разработка, k8s, ML-модели`

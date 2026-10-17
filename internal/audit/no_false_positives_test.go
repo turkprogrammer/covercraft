@@ -15,6 +15,7 @@ func TestInfraClaimsNoFalsePositivesOnRealProfile(t *testing.T) {
 	if err != nil {
 		t.Skipf("профиль недоступен: %v", err)
 	}
+	loadCandidateRules(t)
 	prof := string(b)
 	// Письмо, написанное ТОЛЬКО по профилю — guard не должен ругаться.
 	letter := "Здравствуйте!\n\n" +

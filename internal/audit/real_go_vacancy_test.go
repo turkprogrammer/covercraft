@@ -10,6 +10,7 @@ import (
 // отсутствующему (Bundle/Domain/Geo), при этом настоящие (Stable ID, Fraud
 // Engine) не должны ложно срабатывать. Фиксирует детерминизм-фикс obligations.
 func TestRealGoVacancyFireGoPrimaryObligations(t *testing.T) {
+	loadCandidateRules(t)
 	vacancy := `Чем Вы будете заниматься:
 
     Разработкой и поддержкой высоконагруженных бэкенд-сервисов и API (для Web, Mobile и Smart TV приложений).

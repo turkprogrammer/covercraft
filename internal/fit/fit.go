@@ -156,7 +156,7 @@ var synonyms = map[string][]string{
 	"migrate":      {"migrations", "migrate", "миграци"},
 	"tests":        {"test", "tests", "тесты", "тест"},
 	"test":         {"test", "tests", "тесты", "тест"},
-	// «PHPUnit testing» — токен «testing» закрывается альт-списком
+	// Пример вакансии «тест-фреймворк — testing» — токен «testing» закрывается альт-списком
 	// «test/tests/тест»: кандидат пишет тесты на Go/PHP — это то же самое.
 	"testing": {"testing", "test", "tests", "тест"},
 	// rest/grpc НЕ в альт-списке api: «Опыт разработки REST API» — два
@@ -187,7 +187,7 @@ var synonyms = map[string][]string{
 	"technical":     {"technical", "техн"},
 	"overviews":     {"overviews", "обзор", "схем"},
 	"docs":          {"docs", "documentation", "документаци", "документир"},
-	// «PHPUnit - you've written tests» — «phpunit» без прямых фактов
+	// Пример вакансии «тест-фреймворк - you've written tests» — имя фреймворка без прямых фактов
 	// закрывается по альт-списку «тест/unit» (если кандидат пишет тесты
 	// на Go/PHP — это то же самое).
 	"phpunit": {"phpunit", "тест", "tests", "unit"},
@@ -201,8 +201,8 @@ var synonyms = map[string][]string{
 	// — нарратив; факты «тесты», «table-driven» закрывают.
 	"structured": {"structured", "структурир", "системн", "системат"},
 	"approach":   {"approach", "подход", "медиц", "метод", "style"},
-	// «PHPUnit: experience writing and believing in tests» — «believing»
-	// — нарратив; факты «PHPUnit», «тесты», «TDD» закрывают.
+	// Пример вакансии «тест-фреймворк: experience writing and believing in tests» — «believing»
+	// — нарратив; факты «тесты», «TDD» закрывают.
 	"believing": {"believing", "believe", "уверенн", "довер"},
 	// «Strong Go in production high-load systems» — «high-load»,
 	// «systems» — классы систем; факты «RPS», «Kafka», «P99» закрывают.
@@ -474,7 +474,7 @@ var stopwords = map[string]bool{
 	"works": true,
 	// Нарративные слова про тесты: «you've written tests and you
 	// believe in them» — «written», «writing» — нарратив; факт
-	// «PHPUnit»/«unit tests»/«TDD» закрывает требование.
+	// «unit tests»/«TDD» (или имя тест-фреймворка) закрывает требование.
 	"written": true, "writing": true, "writes": true, "maintain": true,
 	"maintaining": true, "maintains": true, "technical": true,
 	// Нарративные слова про документацию: «API docs, architecture
@@ -662,7 +662,7 @@ var negRe = regexp.MustCompile(`(?i)опыта нет|нет опыта|опыт
 // ограничители, в которых эти слова названы, чтобы их НЕ заявлять.
 //
 // «не пробел» сюда НЕ входит намеренно: строка «A/B тестирование — НЕ
-// пробел: факт Stable ID — event-driven A/B через Kafka» называет ФАКТ, и
+// пробел: факт event-driven A/B-сервиса через Kafka» называет ФАКТ, и
 // маркер «пробел» здесь отрицающий.
 var profileGapRe = regexp.MustCompile(`(?i)честн\w*\s+пробел|в профиле\s+нет|не писать про|не упоминать`)
 
@@ -813,7 +813,7 @@ func stripListMarker(clause string) string {
 //
 //	«**Media / Video:** опыт оптимизации…» → media/video в заголовке,
 //	                                  «опыт оптимизации…» — без них;
-//	«**Kafka:** Stable ID, 10 000 RPS»  → kafka в заголовке, но «Stable ID,
+//	«**Kafka:** сервис, 10 000 RPS»  → kafka в заголовке, но «сервис,
 //	                                  10 000 RPS» — факт про Kafka.
 //
 // Возвращает true, только если в остатке токена НЕТ. Заголовок повторяет тему
@@ -836,10 +836,10 @@ func inBulletHeader(token, clause, text string) bool {
 	}
 	// Различаем ТЕМУ буллета и СОДЕРЖАНИЕ.
 	//
-	//	«**Kafka:** Stable ID, 10 000 RPS»  → тема=Kafka, содержание=факт.
+	//	«**Kafka:** сервис, 10 000 RPS»  → тема=Kafka, содержание=факт.
 	//	    Kafka засчитывается: буллет О нём и содержит подтверждение.
 	//	«**Media / Video / Render pipelines:** опыт оптимизации 10 000 RPS
-	//	  (Stable ID); готовность осваивать медиа-конвейеры» → тема=Media/Video,
+	//	  (сервис); готовность осваивать медиа-конвейеры» → тема=Media/Video,
 	//	  содержание=чужие факты + декларация готовности. Тема без
 	//	  подтверждения в содержании НЕ доказывает опыт.
 	//
@@ -857,14 +857,14 @@ func inBulletHeader(token, clause, text string) bool {
 		return true
 	}
 	// Декларация может стоять в СЛЕДУЮЩЕЙ клаузе того же буллета:
-	// «**Media / Video:** опыт оптимизации 10 000 RPS (Stable ID); готовность
+	// «**Media / Video:** опыт оптимизации 10 000 RPS (сервис); готовность
 	// осваивать медиа-конвейеры». Обе части — про один буллет, и вторая
 	// прямо говорит, что опыта в медиа нет. Считать заголовок
 	// подтверждённым содержимым первой части нельзя.
 	if nextIsDeclaration(clause, text) {
 		return true
 	}
-	// Иначе содержание подтверждает заголовок: «**Kafka:** Stable ID,
+	// Иначе содержание подтверждает заголовок: «**Kafka:** сервис,
 	// 10 000 RPS», «**PostgreSQL (глубокое знание)**, MySQL, ClickHouse».
 	return false
 }
@@ -873,11 +873,11 @@ func inBulletHeader(token, clause, text string) bool {
 // содержательной части. Именно такой фрагмент ничего не утверждает:
 //
 //	«**Media / Video / Render pipelines:**»            → заголовок, тема
-//	«**Kafka:** Stable ID, 10 000 RPS, at-least-once»  → факт, закрывает
+//	«**Kafka:** сервис, 10 000 RPS, at-least-once»  → факт, закрывает
 //
 // Заголовок с текстом после него фактом считается: там и правда написано про
-// Kafka. Регресс-тесты TestLongParenListIsNotAlternatives («**Kafka:** Stable
-// ID, 10 000 RPS») и TestProfileLimiterDoesNotLeakToOtherTokens ловят ровно
+// Kafka. Регресс-тесты TestLongParenListIsNotAlternatives («**Kafka:** сервис,
+// 10 000 RPS») и TestProfileLimiterDoesNotLeakToOtherTokens ловят ровно
 // это, поэтому отбрасывать можно ТОЛЬКО заголовок целиком.
 func isHeaderFragment(clause string) bool {
 	c := stripListMarker(clause)

@@ -42,6 +42,7 @@ const sreLiveProfileFull = "ОБЩИЙ ПРОФИЛЬ\n" +
 // терминов (XSSI/CSRF/cookie), поэтому весь этот выдуманный SRE-сетап проходил
 // молча, и письмо уходило с выдуманными Tempo, Pyroscope, Service Mesh, CNPG.
 func TestLiveSREFabricatedInfraTerms(t *testing.T) {
+	loadCandidateRules(t)
 	r := CheckProfile(sreLiveLetter2, sreLiveProfileFull)
 	joined := ""
 	for _, w := range r.Warnings {
@@ -146,6 +147,7 @@ func TestSingleClosingNotFlagged(t *testing.T) {
 // Cursor, ни Claude Code не встречаются ни разу. Инструменты ИИ-разработки
 // — тот же класс, что Tempo/Pyroscope: модель дорисовывает «правдоподобное».
 func TestLiveFullstackFabricatedTools(t *testing.T) {
+	loadCandidateRules(t)
 	letter := "Здравствуйте!\n\n" +
 		"- **AI Agents и оптимизация ИИ:** ИИ-инструменты (Cursor, Claude Code и аналоги) — ежедневная практика " +
 		"(постановка задач, генерация, ревью, отладка); Tool Use (bash-конвейеры GeoMapping).\n\n" +
@@ -240,6 +242,7 @@ func TestAuditIgnoresAIClaimWithRealFact(t *testing.T) {
 // ни React Native. Имена без CamelCase-границы (Convex, Remotion) и с цифрой
 // (E2B) не ловились ни CamelCase-guard'ом, ни all-caps, ни infraCommonWords.
 func TestAuditFlagsClaimedForeignStack(t *testing.T) {
+	loadCandidateRules(t)
 	letter := "Опыт: TypeScript, React Native, Convex, Remotion, E2B в production-продуктах."
 	r := CheckInfraClaims(letter, "Go, PHP, Kafka, PostgreSQL — профиль без фронтенд-стека.")
 	for _, want := range []string{"Convex", "Remotion", "E2B"} {
