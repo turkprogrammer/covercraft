@@ -1331,6 +1331,16 @@ async function generate() {
   // Факт предыдущего прогона прячем сразу: пока идёт новая генерация, показанные
   // байты и дропы относятся к уже завершённому письму, а не к текущему.
   if (els.promptSentInfo) { els.promptSentInfo.hidden = true; els.promptSentInfo.textContent = ""; }
+  // qa-режим не выполняет ни fit, ни аудит (server.go, TestGenerateQAModeSkipsLetterPipeline):
+  // кавеаты и дефекты прошлого cover_letter-прогона в нём неактуальны. Без очистки
+  // showFitVerdict(null) перерисовывал fit-fix по кавеатам прошлого прогона:
+  // прогон cover_letter с fit → смена пресета на qa → кнопка fit-fix оставалась,
+  // хотя fit в qa не выполняется вовсе. Прогон qa с чистого листа кнопки не
+  // давал — потому баг выглядел «иногда бывает» (живой баг, октябрь 2026).
+  if (currentPresetMode === "qa") {
+    lastFit = null; lastFitCaveats = []; lastFitObjects = [];
+    lastDefects = [];
+  }
   let live = 0;
   try {
     const data = await streamGenerate(

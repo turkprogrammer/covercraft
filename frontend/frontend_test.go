@@ -525,6 +525,37 @@ func TestFitFixButtonSurvivesRejectedEcho(t *testing.T) {
 	}
 }
 
+// TestQaModeClearsStaleFitState — переключение пресета на qa между прогонами
+// не должно протаскивать кнопки прошлого cover_letter-прогона. Сервер в qa
+// не выполняет ни fit, ни аудит (TestGenerateQAModeSkipsLetterPipeline): в
+// done уходит fit:null и пустой fitNote. Раньше showFitVerdict(null) оставлял
+// lastFitObjects от прошлого прогона и перерисовывал fit-fix по кавеатам
+// чужого письма (живой баг, октябрь 2026): прогон cover_letter с fit →
+// смена пресета на qa → кнопка fit-fix на экране, хотя fit в qa не
+// выполняется. Прогон qa с чистого листа кнопку не давал — потому баг
+// выглядел «иногда бывает».
+func TestQaModeClearsStaleFitState(t *testing.T) {
+	for _, want := range []string{
+		`if (currentPresetMode === "qa") {`,
+		"lastFit = null; lastFitCaveats = []; lastFitObjects = [];",
+		"lastDefects = [];",
+	} {
+		if !strings.Contains(IndexHTML, want) {
+			t.Errorf("в UI нет %q — qa-прогон обязан чистить stale-состояние фита", want)
+		}
+	}
+	// Очистка обязана жить в generate() до стрима: qa-прогон с чистого листа
+	// не должен показывать призраков прошлого прогона, а падение сети не
+	// должно их воскрешать.
+	genAt := strings.Index(IndexHTML, "async function generate()")
+	guardAt := strings.Index(IndexHTML, `if (currentPresetMode === "qa") {`)
+	fitAt := strings.Index(IndexHTML, "showFitVerdict(data.fit, data.fitNote);")
+	if genAt < 0 || guardAt < 0 || fitAt < 0 || guardAt < genAt || guardAt > fitAt {
+		t.Errorf("guard qa (поз. %d) должен быть внутри generate() (поз. %d) до showFitVerdict (поз. %d)",
+			guardAt, genAt, fitAt)
+	}
+}
+
 // TestPresetModeSelect — модалка пресета содержит селектор режима,
 // сервер получает его в запросе /api/generate и UI показывает режим
 // активного пресета ([QA] для qa-режима).

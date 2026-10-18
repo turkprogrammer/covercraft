@@ -6,6 +6,19 @@
 
 Автор и единственный контрибутор всех версий: turkprogrammer.
 
+## [Unreleased]
+
+### Fixed
+
+- **Кнопка fit-fix оставалась после смены пресета на qa.** Прогон
+  cover_letter с fit заполнял `lastFitObjects`; qa-прогон присылает
+  `fit: null`, и `showFitVerdict(null)` перерисовывал fit-fix по кавеатам
+  прошлого прогона, хотя qa не выполняет fit вовсе. Прогон qa с чистого
+  листа кнопку не давал, поэтому баг выглядел «иногда бывает».
+  `generate()` теперь чистит stale-состояние фита и аудита (`lastFit`,
+  `lastFitCaveats`, `lastFitObjects`, `lastDefects`) при
+  `currentPresetMode === "qa"` до стрима (`TestQaModeClearsStaleFitState`).
+
 ## [0.5.0] — 2026-10-17
 
 Аудиторные правила кандидата вынесены из Go-кода в `context/.audit-rules.md`
